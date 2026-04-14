@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Wrench, Paperclip, Clock } from 'lucide-react'
 import { Panel } from '../components/Panel'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
@@ -8,6 +8,16 @@ import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Textarea } from '../components/ui/Field'
+
+type UnifiedSkill = {
+  key: string
+  name: string
+  description?: string
+  source: string
+  isPlugin: boolean
+  custom?: CustomSkill
+  plugin?: PluginSkill
+}
 
 // ── Types ──
 
@@ -18,6 +28,9 @@ interface CustomSkill {
   path?: string
   content?: string
   type: string
+  allowedTools?: string[]
+  resources?: string[]
+  lastModified?: string | null
 }
 
 interface PluginSkill {
@@ -27,6 +40,9 @@ interface PluginSkill {
   description?: string
   content?: string
   type: string
+  allowedTools?: string[]
+  resources?: string[]
+  lastModified?: string | null
 }
 
 interface InstalledPlugin {
@@ -44,6 +60,18 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
   return res.json()
+}
+
+function relTime(iso?: string | null): string {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  const days = Math.floor(ms / 86400000)
+  if (days === 0) return 'today'
+  if (days === 1) return '1d ago'
+  if (days < 30) return `${days}d ago`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months}mo ago`
+  return `${Math.floor(days / 365)}y ago`
 }
 
 export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | 'error' | 'info') => void }) {
@@ -73,15 +101,25 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
 
   useEffect(() => { loadSkills() }, [loadSkills])
 
-  const groupedPluginSkills = useMemo(() => {
-    const groups: Record<string, { pluginName: string; skills: PluginSkill[] }> = {}
-    for (const s of pluginSkills) {
-      const key = s.pluginName || s.plugin
-      if (!groups[key]) groups[key] = { pluginName: key, skills: [] }
-      groups[key].skills.push(s)
-    }
-    return Object.values(groups)
-  }, [pluginSkills])
+  const allSkills: UnifiedSkill[] = useMemo(() => {
+    const custom: UnifiedSkill[] = customSkills.map((s) => ({
+      key: 'local:' + s.dirName,
+      name: s.name,
+      description: s.description,
+      source: 'local',
+      isPlugin: false,
+      custom: s,
+    }))
+    const plug: UnifiedSkill[] = pluginSkills.map((s) => ({
+      key: 'plugin:' + s.plugin + ':' + s.name,
+      name: s.name,
+      description: s.description,
+      source: s.pluginName || s.plugin,
+      isPlugin: true,
+      plugin: s,
+    }))
+    return [...custom, ...plug].sort((a, b) => a.name.localeCompare(b.name))
+  }, [customSkills, pluginSkills])
 
   const openSkillDetail = useCallback((skill: CustomSkill) => {
     setPanelType('skill-detail')
@@ -134,12 +172,23 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
     setPanelData(null)
   }, [])
 
+  const togglePlugin = useCallback(async (pluginName: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    try {
+      const r = await apiFetch<{ enabled: boolean }>('/api/plugins/' + encodeURIComponent(pluginName) + '/toggle', { method: 'POST' })
+      await loadSkills()
+      onToast(`${pluginName.split('@')[0]} ${r.enabled ? 'enabled' : 'disabled'}`, 'success')
+    } catch (err: unknown) {
+      onToast(err instanceof Error ? err.message : String(err), 'error')
+    }
+  }, [loadSkills, onToast])
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <PageHeader
         title="Skills & Plugins"
-        count={`${customSkills.length + pluginSkills.length} skills · ${plugins.length} plugins`}
-        description="Custom skills from ~/.claude/ and skills bundled with installed plugins."
+        count={`${allSkills.length} skills · ${plugins.length} plugins`}
+        description="Skills discovered in ~/.claude/skills/ and from installed plugins."
         actions={
           <IconButton
             icon={<RefreshCw size={13} />}
@@ -150,82 +199,62 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
       />
 
       <div>
-        <SectionHeader title="Custom Skills" count={customSkills.length} />
-        {customSkills.length === 0 ? (
-          <EmptyState title="No custom skills" hint="Drop a folder with SKILL.md in ~/.claude/skills/ to add one." />
+        <SectionHeader title="Skills" count={allSkills.length} />
+        {allSkills.length === 0 ? (
+          <EmptyState title="No skills" hint="Drop a folder with SKILL.md in ~/.claude/skills/ to add one." />
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
-            {customSkills.map((s) => (
-              <Card key={s.dirName} interactive padding="12px 14px" onClick={() => openSkillDetail(s)}>
-                <div style={{ marginBottom: 4 }}>
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
-                    {s.name}
-                  </span>
-                </div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: 'var(--text-3)',
-                    marginBottom: 6,
-                    lineHeight: 1.45,
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical',
-                    overflow: 'hidden',
-                  }}
+            {allSkills.map((s) => {
+              const meta = (s.isPlugin ? s.plugin : s.custom) as { allowedTools?: string[]; resources?: string[]; lastModified?: string | null } | undefined
+              const toolCount = meta?.allowedTools?.length ?? 0
+              const resCount = meta?.resources?.length ?? 0
+              return (
+                <Card
+                  key={s.key}
+                  interactive
+                  padding="12px 14px"
+                  onClick={() => (s.isPlugin ? openPluginSkillDetail(s.plugin!) : openSkillDetail(s.custom!))}
                 >
-                  {s.description || 'No description'}
-                </div>
-                <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>{s.path}</div>
-              </Card>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div>
-        <SectionHeader title="Plugin Skills" count={pluginSkills.length} />
-        {pluginSkills.length === 0 ? (
-          <EmptyState title="No plugin skills" />
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {groupedPluginSkills.map((group) => (
-              <div key={group.pluginName}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-2)', fontWeight: 500 }}>{group.pluginName}</span>
-                  <Badge tone="muted" size="xs">{group.skills.length}</Badge>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
-                  {group.skills.map((s) => (
-                    <Card
-                      key={s.name + s.plugin}
-                      interactive
-                      padding="12px 14px"
-                      onClick={() => openPluginSkillDetail(s)}
-                    >
-                      <div style={{ marginBottom: 4 }}>
-                        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
-                          {s.name}
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: 'var(--text-3)',
-                          lineHeight: 1.45,
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
-                        }}
-                      >
-                        {s.description || 'No description'}
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              </div>
-            ))}
+                  <div style={{ marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
+                      {s.name}
+                    </span>
+                    <Badge tone="muted" size="xs">{s.source}</Badge>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--text-3)',
+                      lineHeight: 1.45,
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                      marginBottom: 6,
+                    }}
+                  >
+                    {s.description || 'No description'}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 10, color: 'var(--text-4)' }}>
+                    {toolCount > 0 && (
+                      <span title="allowed-tools directives" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                        <Wrench size={10} /> {toolCount}
+                      </span>
+                    )}
+                    {resCount > 0 && (
+                      <span title="resources in skill directory" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                        <Paperclip size={10} /> {resCount}
+                      </span>
+                    )}
+                    {meta?.lastModified && (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                        <Clock size={10} /> {relTime(meta.lastModified)}
+                      </span>
+                    )}
+                  </div>
+                </Card>
+              )
+            })}
           </div>
         )}
       </div>
@@ -236,28 +265,47 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
           <EmptyState title="No plugins installed" />
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
-            {plugins.map((p) => (
-              <Card
-                key={p.name + (p.scope || '')}
-                interactive
-                padding="12px 14px"
-                onClick={() => openPluginDetail(p)}
-                style={{ opacity: p.enabled === false ? 0.6 : 1 }}
-              >
-                <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
-                    {p.name.split('@')[0]}
-                  </span>
-                  <Badge tone={p.enabled !== false ? 'ok' : 'muted'} size="xs">
-                    {p.enabled !== false ? 'enabled' : 'disabled'}
-                  </Badge>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text-4)' }}>
-                  {p.scope}
-                  {p.project ? ' — ' + p.project.split('/').pop() : ''}
-                </div>
-              </Card>
-            ))}
+            {plugins.map((p) => {
+              const on = p.enabled !== false
+              return (
+                <Card
+                  key={p.name + (p.scope || '')}
+                  interactive
+                  padding="12px 14px"
+                  onClick={() => openPluginDetail(p)}
+                  style={{ opacity: on ? 1 : 0.65 }}
+                >
+                  <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: 'var(--text-1)', flex: 1 }}>
+                      {p.name.split('@')[0]}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => togglePlugin(p.name, e)}
+                      role="switch"
+                      aria-checked={on}
+                      title={on ? 'Disable plugin' : 'Enable plugin'}
+                      style={{
+                        border: 'none', cursor: 'pointer', padding: 0,
+                        width: 28, height: 16, borderRadius: 8,
+                        background: on ? 'var(--ok)' : 'var(--bg-2)',
+                        position: 'relative', transition: 'background 120ms ease',
+                      }}
+                    >
+                      <span style={{
+                        position: 'absolute', top: 2, left: on ? 14 : 2,
+                        width: 12, height: 12, borderRadius: '50%',
+                        background: 'var(--text-1)', transition: 'left 120ms ease',
+                      }} />
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-4)' }}>
+                    {p.scope}
+                    {p.project ? ' — ' + p.project.split('/').pop() : ''}
+                  </div>
+                </Card>
+              )
+            })}
           </div>
         )}
       </div>
@@ -268,15 +316,31 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
         title={(panelData as CustomSkill | null)?.name || ''}
         onClose={closePanel}
       >
-        {panelType === 'skill-detail' && panelData && (
+        {panelType === 'skill-detail' && panelData && (() => {
+          const sk = panelData as unknown as CustomSkill
+          return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <dl style={{ display: 'grid', gridTemplateColumns: '90px 1fr', gap: 6, fontSize: 12, color: 'var(--text-2)', margin: 0 }}>
+            <dl style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 6, fontSize: 12, color: 'var(--text-2)', margin: 0 }}>
               <dt style={dtStyle}>Name</dt>
-              <dd style={ddStyle}>{(panelData as unknown as CustomSkill).name}</dd>
+              <dd style={ddStyle}>{sk.name}</dd>
               <dt style={dtStyle}>Path</dt>
-              <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{(panelData as unknown as CustomSkill).path}</dd>
+              <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{sk.path}</dd>
+              <dt style={dtStyle}>Modified</dt>
+              <dd style={ddStyle}>{sk.lastModified ? relTime(sk.lastModified) + ' · ' + new Date(sk.lastModified).toLocaleString('it-IT') : '—'}</dd>
               <dt style={dtStyle}>Description</dt>
-              <dd style={ddStyle}>{(panelData as unknown as CustomSkill).description || '—'}</dd>
+              <dd style={ddStyle}>{sk.description || '—'}</dd>
+              {sk.allowedTools && sk.allowedTools.length > 0 && (<>
+                <dt style={dtStyle}>Allowed tools</dt>
+                <dd style={ddStyle}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {sk.allowedTools.map((t, i) => <Badge key={i} tone="muted" size="xs">{t}</Badge>)}
+                  </div>
+                </dd>
+              </>)}
+              {sk.resources && sk.resources.length > 0 && (<>
+                <dt style={dtStyle}>Resources</dt>
+                <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{sk.resources.join(', ')}</dd>
+              </>)}
             </dl>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <SectionHeader title="SKILL.md" />
@@ -300,10 +364,11 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
                 margin: 0,
               }}
             >
-              {(panelData as unknown as CustomSkill).content || ''}
+              {sk.content || ''}
             </pre>
           </div>
-        )}
+          )
+        })()}
       </Panel>
 
       {/* Plugin Skill Detail */}
@@ -312,15 +377,31 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
         title={(panelData as PluginSkill | null)?.name || ''}
         onClose={closePanel}
       >
-        {panelType === 'plugin-skill-detail' && panelData && (
+        {panelType === 'plugin-skill-detail' && panelData && (() => {
+          const ps = panelData as unknown as PluginSkill
+          return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <dl style={{ display: 'grid', gridTemplateColumns: '90px 1fr', gap: 6, fontSize: 12, color: 'var(--text-2)', margin: 0 }}>
+            <dl style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 6, fontSize: 12, color: 'var(--text-2)', margin: 0 }}>
               <dt style={dtStyle}>Name</dt>
-              <dd style={ddStyle}>{(panelData as unknown as PluginSkill).name}</dd>
+              <dd style={ddStyle}>{ps.name}</dd>
               <dt style={dtStyle}>Plugin</dt>
-              <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{(panelData as unknown as PluginSkill).plugin}</dd>
+              <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{ps.plugin}</dd>
+              <dt style={dtStyle}>Modified</dt>
+              <dd style={ddStyle}>{ps.lastModified ? relTime(ps.lastModified) + ' · ' + new Date(ps.lastModified).toLocaleString('it-IT') : '—'}</dd>
               <dt style={dtStyle}>Description</dt>
-              <dd style={ddStyle}>{(panelData as unknown as PluginSkill).description || '—'}</dd>
+              <dd style={ddStyle}>{ps.description || '—'}</dd>
+              {ps.allowedTools && ps.allowedTools.length > 0 && (<>
+                <dt style={dtStyle}>Allowed tools</dt>
+                <dd style={ddStyle}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {ps.allowedTools.map((t, i) => <Badge key={i} tone="muted" size="xs">{t}</Badge>)}
+                  </div>
+                </dd>
+              </>)}
+              {ps.resources && ps.resources.length > 0 && (<>
+                <dt style={dtStyle}>Resources</dt>
+                <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{ps.resources.join(', ')}</dd>
+              </>)}
             </dl>
             <SectionHeader title="SKILL.md" />
             <pre
@@ -339,10 +420,11 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
                 margin: 0,
               }}
             >
-              {(panelData as unknown as PluginSkill).content || ''}
+              {ps.content || ''}
             </pre>
           </div>
-        )}
+          )
+        })()}
       </Panel>
 
       {/* Plugin Detail */}

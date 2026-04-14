@@ -28,6 +28,13 @@ interface ToolDef extends Tool {
   icon?: string
 }
 
+interface McpServerStatus {
+  name: string
+  target: string
+  status: 'connected' | 'auth' | 'failed'
+  statusText: string
+}
+
 function categorizeTools(tools: ToolDef[]): Record<string, ToolDef[]> {
   return {
     Media: tools.filter(t => ['vision', 'voice', 'documents'].includes(t.id)),
@@ -63,6 +70,20 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
 
   const [routes, setRoutes] = useState<FullRoute[]>([])
   const [selectedTool, setSelectedTool] = useState<ToolDef | null>(null)
+
+  // MCP auth/connection status from `claude mcp list`
+  const [mcpStatus, setMcpStatus] = useState<Record<string, McpServerStatus>>({})
+
+  const loadMcpStatus = useCallback(async () => {
+    try {
+      const r = await apiFetch<{ servers: McpServerStatus[] }>('/api/mcp-status')
+      const map: Record<string, McpServerStatus> = {}
+      for (const s of r.servers || []) map[s.name] = s
+      setMcpStatus(map)
+    } catch { /* silent */ }
+  }, [])
+
+  useEffect(() => { loadMcpStatus() }, [loadMcpStatus])
 
   // Email/Calendar account management
   const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([])
@@ -157,7 +178,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
           <IconButton
             icon={<RefreshCw size={13} />}
             label="Refresh tools"
-            onClick={() => { refresh(); loadEmailAccounts() }}
+            onClick={() => { refresh(); loadEmailAccounts(); loadMcpStatus() }}
             disabled={loading}
           />
         }
@@ -199,6 +220,14 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                     <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', flex: 1, minWidth: 0 }}>
                       {t.label}
                     </span>
+                    {cat === 'MCP' && (() => {
+                      const serverName = t.id.replace(/^mcp:/, '')
+                      const st = mcpStatus[serverName]
+                      if (!st) return null
+                      const tone = st.status === 'connected' ? 'ok' : st.status === 'auth' ? 'warn' : 'err'
+                      const label = st.status === 'connected' ? 'connected' : st.status === 'auth' ? 'needs auth' : 'failed'
+                      return <Badge tone={tone} size="xs" title={st.statusText}>{label}</Badge>
+                    })()}
                     <Badge tone="neutral" size="xs">{typeBadge(t)}</Badge>
                   </div>
 

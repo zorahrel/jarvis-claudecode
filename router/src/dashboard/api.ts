@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getProcesses, killProcessByKey } from "../services/claude";
+import { getProcesses, killProcessByKey, resolveCliPath } from "../services/claude";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
 import { getCronStates, triggerCronJob } from "../services/cron";
@@ -269,48 +269,69 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         } catch {}
       }
 
-      // Helper: parse SKILL.md frontmatter
+      // Helper: parse SKILL.md frontmatter using the YAML parser (handles block
+      // scalars, lists, and single-line values uniformly). Falls back to empty
+      // fields if the frontmatter is malformed.
       const parseSkillMd = (content: string) => {
         const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-        let name = "", description = "";
+        let name = "", description = "", allowedTools: string[] = [];
         if (fmMatch) {
-          const fm = fmMatch[1];
-          const nm = fm.match(/^name:\s*(.+)$/m);
-          name = nm?.[1]?.trim() ?? "";
-          const descMulti = fm.match(/^description:\s*>\s*\n((?:[ \t]+.+\n?)+)/m);
-          if (descMulti) {
-            description = descMulti[1].split("\n").map((l: string) => l.trim()).filter(Boolean).join(" ");
-          } else {
-            const descSingle = fm.match(/^description:\s*(.+)$/m);
-            if (descSingle && descSingle[1].trim() !== ">") {
-              description = descSingle[1].trim();
+          try {
+            const fm = parseYaml(fmMatch[1]) as Record<string, unknown>;
+            name = typeof fm?.name === "string" ? fm.name.trim() : "";
+            if (typeof fm?.description === "string") {
+              description = fm.description.replace(/\s+/g, " ").trim();
             }
-          }
+            const at = fm?.["allowed-tools"];
+            if (Array.isArray(at)) {
+              allowedTools = at.filter((x): x is string => typeof x === "string");
+            }
+          } catch { /* malformed YAML — leave fields empty */ }
         }
         const body = content.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
-        return { name, description, body };
+        return { name, description, allowedTools, body };
       };
 
-      // Custom skills (SKILL.md in ~/.claude/*)
+      // Enumerate non-SKILL.md entries in the skill directory (scripts, rules, references, etc.)
+      const listResources = (skillDir: string): string[] => {
+        try {
+          return readdirSync(skillDir, { withFileTypes: true })
+            .filter((d) => d.name !== "SKILL.md" && !d.name.startsWith("."))
+            .map((d) => d.name + (d.isDirectory() ? "/" : ""));
+        } catch { return []; }
+      };
+
+      // Custom skills: scan both the legacy flat layout (~/.claude/<name>/SKILL.md)
+      // and the canonical Claude Code layout (~/.claude/skills/<name>/SKILL.md).
       const customSkills: any[] = [];
       const claudeDir = join(process.env.HOME || "", ".claude");
-      try {
-        for (const entry of readdirSync(claudeDir)) {
-          if (entry === "plugins" || entry.startsWith(".")) continue;
-          const skillPath = join(claudeDir, entry, "SKILL.md");
-          if (existsSync(skillPath)) {
-            const content = readFileSync(skillPath, "utf-8");
-            const parsed = parseSkillMd(content);
-            customSkills.push({
-              name: parsed.name || entry,
-              dirName: entry,
-              path: join(claudeDir, entry),
-              description: parsed.description,
-              content: content.length > 2000 ? content.slice(0, 2000) + "\n..." : content,
-            });
+      const scanSkillsIn = (baseDir: string) => {
+        try {
+          for (const entry of readdirSync(baseDir)) {
+            if (entry === "plugins" || entry === "skills" || entry.startsWith(".")) continue;
+            const skillPath = join(baseDir, entry, "SKILL.md");
+            if (existsSync(skillPath)) {
+              const content = readFileSync(skillPath, "utf-8");
+              const parsed = parseSkillMd(content);
+              const skillDir = join(baseDir, entry);
+              let lastModified: string | null = null;
+              try { lastModified = statSync(skillPath).mtime.toISOString(); } catch {}
+              customSkills.push({
+                name: parsed.name || entry,
+                dirName: entry,
+                path: skillDir,
+                description: parsed.description,
+                allowedTools: parsed.allowedTools,
+                resources: listResources(skillDir),
+                lastModified,
+                content: content.length > 2000 ? content.slice(0, 2000) + "\n..." : content,
+              });
+            }
           }
-        }
-      } catch {}
+        } catch {}
+      };
+      scanSkillsIn(claudeDir);
+      scanSkillsIn(join(claudeDir, "skills"));
 
       // Plugin skills (SKILL.md in ~/.claude/plugins/marketplaces/*/plugins/*/skills/*)
       const pluginSkills: any[] = [];
@@ -329,11 +350,16 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
                   if (!existsSync(skillMdPath)) continue;
                   const content = readFileSync(skillMdPath, "utf-8");
                   const parsed = parseSkillMd(content);
+                  let lastModified: string | null = null;
+                  try { lastModified = statSync(skillMdPath).mtime.toISOString(); } catch {}
                   pluginSkills.push({
                     name: parsed.name || skillDir,
                     plugin: `${pluginDir}@${marketplace}`,
                     pluginName: pluginDir,
                     description: parsed.description,
+                    allowedTools: parsed.allowedTools,
+                    resources: listResources(join(skillsDir, skillDir)),
+                    lastModified,
                     content: content.length > 2000 ? content.slice(0, 2000) + "\n..." : content,
                     path: skillMdPath,
                   });
@@ -350,7 +376,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
   // --- SKILL CONTENT GET/PUT ---
   } else if (path.match(/^\/api\/skills\/[^/]+\/content$/) && (req.method === "GET" || req.method === "PUT")) {
     const skillName = decodeURIComponent(path.split("/")[3]);
-    const skillPath = join(process.env.HOME || "", ".claude", skillName, "SKILL.md");
+    const claudeDir = join(process.env.HOME || "", ".claude");
+    const flatPath = join(claudeDir, skillName, "SKILL.md");
+    const nestedPath = join(claudeDir, "skills", skillName, "SKILL.md");
+    const skillPath = existsSync(flatPath) ? flatPath : nestedPath;
     if (req.method === "GET") {
       try {
         if (!existsSync(skillPath)) { json(req, res, { error: "not found" }, 404); return; }
@@ -364,6 +393,54 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         json(req, res, { ok: true });
       } catch (e: any) { json(req, res, { error: e.message }, 500); }
     }
+
+  // --- PLUGIN ENABLE/DISABLE ---
+  } else if (path.match(/^\/api\/plugins\/[^/]+\/toggle$/) && req.method === "POST") {
+    try {
+      const pluginName = decodeURIComponent(path.split("/")[3]);
+      const settingsPath = join(process.env.HOME || "", ".claude", "settings.json");
+      if (!existsSync(settingsPath)) { json(req, res, { error: "settings.json not found" }, 404); return; }
+      const raw = readFileSync(settingsPath, "utf-8");
+      const settings = JSON.parse(raw);
+      settings.enabledPlugins = settings.enabledPlugins || {};
+      const next = !settings.enabledPlugins[pluginName];
+      settings.enabledPlugins[pluginName] = next;
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+      json(req, res, { ok: true, plugin: pluginName, enabled: next });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MCP SERVER STATUS (runs `claude mcp list`) ---
+  } else if (path === "/api/mcp-status" && req.method === "GET") {
+    try {
+      const { execFile } = await import("child_process");
+      const cli = resolveCliPath();
+      const out: string = await new Promise((resolve, reject) => {
+        execFile(cli, ["mcp", "list"], { timeout: 15000 }, (err, stdout, stderr) => {
+          if (err && !stdout) reject(new Error(stderr || err.message));
+          else resolve(stdout);
+        });
+      });
+      // Parse lines like: "name: target - ✓ Connected" / "- ! Needs authentication" / "- ✗ Failed"
+      // Name may contain colons (e.g. "plugin:playwright:playwright"), so split from the right.
+      const servers = out.split("\n")
+        .map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trim()) // strip ANSI
+        .map((l) => {
+          const m = l.match(/^(.+?)\s+-\s+([✓✗!])\s+(.*)$/);
+          if (!m) return null;
+          const [, head, icon, statusText] = m;
+          // Separator is the FIRST ": " (colon + space) — names may contain colons
+          // (e.g. "plugin:playwright:playwright") and targets may be URLs ("https://...").
+          const splitIdx = head.indexOf(": ");
+          if (splitIdx < 0) return null;
+          const name = head.slice(0, splitIdx).trim();
+          const target = head.slice(splitIdx + 2).trim();
+          if (!name) return null;
+          const status = icon === "✓" ? "connected" : icon === "!" ? "auth" : "failed";
+          return { name, target, status, statusText: statusText.trim() };
+        })
+        .filter(Boolean);
+      json(req, res, { servers });
+    } catch (e: any) { json(req, res, { error: e.message, servers: [] }, 200); }
 
   // --- ROUTES GET --- (thin matchers referencing agents by name)
   } else if (path === "/api/routes" && req.method === "GET") {
