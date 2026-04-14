@@ -1,8 +1,8 @@
 # Jarvis Router — Architecture
 
 ## Overview
-Router multi-canale che connette Telegram, WhatsApp e Discord a Claude Code CLI.
-Ogni canale ha route con agent specifici, capabilities e scoping.
+Multi-channel router connecting Telegram, WhatsApp, and Discord to the Claude Code CLI.
+Each channel has routes with per-agent capabilities and scoping.
 
 ## Stack
 - **Runtime**: Node.js + tsx (TypeScript)
@@ -11,7 +11,7 @@ Ogni canale ha route con agent specifici, capabilities e scoping.
 - **Config**: YAML (`config.yaml`)
 - **Dashboard**: HTTP :3340, HTTPS :3341 (self-signed)
 
-## Servizi core (sempre presenti)
+## Core Services (always present)
 
 | Servizio | Porta | Processo | Path |
 |----------|-------|----------|------|
@@ -20,9 +20,9 @@ Ogni canale ha route con agent specifici, capabilities e scoping.
 | Mem0 | 3343 | com.jarvis.mem0 (launchd) | `scripts/mem0-server.py` |
 | Tray App | — | JarvisTray | `~/.claude/jarvis/tray-app/` |
 
-Servizi extra possono essere aggiunti via sezione `services:` in `router/config.yaml`
-(vedi `router/config.example.yaml`). Vengono mostrati nel dashboard e possono essere
-gestiti dalla tray app se hanno una config `launchd:`.
+Extra services can be added via a `services:` section in `router/config.yaml`
+(see `router/config.example.yaml`). They show up in the dashboard and can be
+managed by the tray app if they provide a `launchd:` config.
 
 ## Directory Structure
 ```
@@ -63,12 +63,12 @@ gestiti dalla tray app se hanno una config `launchd:`.
 
 ## Routing
 
-Routes sono matcher thin che mappano (channel, from/group/guild) a un agente
-definito in `agents/<name>/`. Il comportamento dell'agente (model, tools, MCP,
-fullAccess, effort) è in `agents/<name>/agent.yaml`, non in `config.yaml`.
+Routes are thin matchers that map (channel, from/group/guild) to an agent
+defined in `agents/<name>/`. Agent behavior (model, tools, MCP, fullAccess,
+effort) lives in `agents/<name>/agent.yaml`, not in `config.yaml`.
 
-Route evaluation è in ordine: first match wins. Include una route catch-all
-`{ channel: "*", action: "ignore" }` per ignorare messaggi non matchati.
+Routes are evaluated in order: first match wins. Include a catch-all
+`{ channel: "*", action: "ignore" }` to drop unmatched messages.
 
 ### Capabilities per route
 ```
@@ -91,8 +91,8 @@ Connector receives media
 ```
 
 ## Memory System
-- **ChromaDB** (localhost:3342): indicizza `.md` files scoped by agent
-- **Mem0** (localhost:3343): estrae fact dalle conversazioni, auto-save dopo ogni risposta
+- **ChromaDB** (localhost:3342): indexes `.md` files scoped by agent
+- **Mem0** (localhost:3343): extracts facts from conversations, auto-saved after each reply
 - **Embeddings**: OpenAI text-embedding-3-small
 - **LLM for facts**: OpenAI gpt-4.1-nano
 
@@ -104,27 +104,27 @@ Connector receives media
 - Crash recovery: respawn on next message
 
 ## LaunchAgents
-Core (sempre presenti) in `~/Library/LaunchAgents/`:
+Core (always present) in `~/Library/LaunchAgents/`:
 - `com.jarvis.router` — KeepAlive
 - `com.jarvis.chroma` — KeepAlive
 - `com.jarvis.mem0` — KeepAlive
 - `com.jarvis.tray` — RunAtLoad
 
-Servizi utente da `config.yaml` generano il proprio `com.<user>.<name>.plist`.
+User services from `config.yaml` generate their own `com.<user>.<name>.plist`.
 
 ## Key Decisions
 - Claude Code CLI as backend (not SDK) — OAuth subscription, no API key needed
 - launchd per service management (no pm2, no Docker)
 - Spawn discipline (see `services/claude.ts` `buildSpawnArgs()`):
   - `--strict-mcp-config` always so nothing leaks from user scope
-  - `--setting-sources user,project,local` per ereditare l'ecosistema CLI (hooks, commands, agents, skills, plugins)
-  - `--mcp-config` inline, filtered per-route tool list, o tutti i shared servers quando `fullAccess`
-  - `JARVIS_SPAWN=1` env var così gli user hooks possono self-guard
+  - `--setting-sources user,project,local` to inherit the CLI ecosystem (hooks, commands, agents, skills, plugins)
+  - `--mcp-config` inline, filtered per-route tool list, or all shared servers when `fullAccess`
+  - `JARVIS_SPAWN=1` env var so user hooks can self-guard
 - Identity (two layers only — no extra append):
   - `~/.claude/CLAUDE.md` → user-global common layer
-  - `<workspace>/CLAUDE.md` → agent-specific identity (auto-loaded da cwd)
-- MCP servers live in `~/.claude/settings.json` — single source of truth tra CLI interattiva e Jarvis
-- MCP solo sulle route che lo richiedono (per-route filter via `mcp:<name>` tool entries, o tutti via `fullAccess: true`)
-- No Docker — tutto nativo (qdrant embedded, sqlite)
+  - `<workspace>/CLAUDE.md` → agent-specific identity (auto-loaded from cwd)
+- MCP servers live in `~/.claude/settings.json` — single source of truth between the interactive CLI and Jarvis
+- MCP only on routes that require it (per-route filter via `mcp:<name>` tool entries, or all via `fullAccess: true`)
+- No Docker — fully native (embedded Qdrant, SQLite)
 - OpenAI for embeddings only (cheap), Claude for everything else
 - Vision via Claude content blocks (not GPT-4 Vision)

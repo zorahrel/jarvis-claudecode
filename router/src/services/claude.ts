@@ -14,7 +14,7 @@ const log = logger.child({ module: "claude" });
 // Auto-detect latest Claude CLI version. Resolved lazily at each spawn so that
 // an auto-update during router boot doesn't leave us stuck on a stale fallback.
 const CLI_VERSIONS_DIR = join(process.env.HOME || "", ".local/share/claude/versions");
-function resolveCliPath(): string {
+export function resolveCliPath(): string {
   try {
     const versions = readdirSync(CLI_VERSIONS_DIR)
       .filter((f) => /^\d/.test(f))
@@ -584,7 +584,7 @@ async function askClaudeInternal(
         log.warn({ key, model }, "Message timed out after 30 min — killing stale process");
         const pp = processes.get(key);
         if (pp) { killProcess(pp); processes.delete(key); }
-        throw new Error("Claude took too long (30 min). Process killed — riprova.");
+        throw new Error("Claude took too long (30 min). Process killed — please retry.");
       }
 
       if (errMsg === "RATE_LIMIT" || errMsg.includes("rate_limit") || errMsg.includes("429")) {

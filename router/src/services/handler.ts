@@ -261,11 +261,11 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     try {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes("TIMEOUT")) {
-        await msg.reply("› timeout — riprova tra un momento");
+        await msg.reply("› timeout — please try again in a moment");
       } else if (errMsg.includes("ALL_MODELS_EXHAUSTED")) {
-        await msg.reply("› tutti i modelli occupati — riprova tra qualche minuto");
+        await msg.reply("› all models are busy — please try again in a few minutes");
       } else {
-        await msg.reply("› errore nell'elaborazione del messaggio");
+        await msg.reply("› error processing message");
       }
     } catch (replyErr) {
       log.error({ err: replyErr, channel: msg.channel, from: msg.from }, "Failed to send error reply");

@@ -1,8 +1,44 @@
-# Jarvis
+# jarvis-claudecode
 
-> Multi-channel AI assistant router that connects Telegram, WhatsApp and Discord to Claude Code CLI.
+> Multi-channel router that brings the **Claude Code CLI** to Telegram, WhatsApp, and Discord — with per-route agents, persistent memory, media processing, a web dashboard, and a native macOS tray app.
 
-Jarvis is a personal AI gateway. Incoming messages across chat platforms are matched against per-route agents, each with its own identity (CLAUDE.md), tool scope, memory and model. A persistent Claude Code process runs per session key, so conversations retain context across messages.
+<p align="left">
+  <img src="https://img.shields.io/badge/runtime-Node.js%2020+-339933?logo=node.js&logoColor=white" alt="Node.js 20+" />
+  <img src="https://img.shields.io/badge/language-TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white" alt="macOS" />
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
+  <img src="https://img.shields.io/badge/status-personal%20project-orange" alt="Personal project" />
+</p>
+
+`jarvis-claudecode` is a personal AI gateway. Messages arriving on any chat platform are matched against per-route agents — each with its own identity (`CLAUDE.md`), tool scope, memory, and model. A persistent Claude Code process runs per session key, so conversations retain context across messages.
+
+**Keywords**: Claude Code, Claude Code CLI, Telegram bot, WhatsApp bot, Discord bot, MCP, ChromaDB, Mem0, multi-channel AI assistant, personal AI agent, macOS menu bar.
+
+---
+
+## Table of Contents
+
+- [Why jarvis-claudecode](#why-jarvis-claudecode)
+- [Features](#features)
+- [Architecture at a Glance](#architecture-at-a-glance)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Project Layout](#project-layout)
+- [How it Compares](#how-it-compares)
+- [Documentation](#documentation)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Why jarvis-claudecode
+
+The Claude Code CLI is powerful on the desktop — but chat apps are where most real-world requests happen. `jarvis-claudecode` exposes that same CLI through the messaging channels you already use, while keeping:
+
+- **One agent per context** — personal DM, work group, and public channel can each run a different agent with different tools, memory, and permissions.
+- **Real conversation memory** — ChromaDB indexes your notes, Mem0 extracts facts from conversation history.
+- **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
+- **Native and local** — no Docker, no cloud router. Services run as macOS LaunchAgents and are controlled from a tray app.
 
 ## Features
 
@@ -12,69 +48,93 @@ Jarvis is a personal AI gateway. Incoming messages across chat platforms are mat
 - **Memory**: ChromaDB (document RAG) + Mem0 (conversation fact extraction)
 - **Dashboard**: React SPA at `http://localhost:3340` — routes, agents, tools, memory, costs, logs
 - **macOS tray app**: SwiftUI menu bar app to start/stop/restart services
-- **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard + tray
+- **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard and tray
 - **Native launchd**: no Docker, no pm2 — services are managed as LaunchAgents
+- **Spawn discipline**: `--strict-mcp-config`, per-route tool filtering, readonly file access, user-scope inheritance toggle
+
+## Architecture at a Glance
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Messaging Channels                        │
+│        Telegram   │   WhatsApp   │   Discord                 │
+└──────┬───────────────────┬──────────────────┬────────────────┘
+       │                   │                  │
+       ▼                   ▼                  ▼
+┌──────────────────────────────────────────────────────────────┐
+│                      Router (:3340/:3341)                    │
+│   Route matching  →  Media pipeline  →  Spawn discipline     │
+└──────┬────────────────────────────┬────────────────┬─────────┘
+       │                            │                │
+       ▼                            ▼                ▼
+┌───────────────┐        ┌───────────────┐   ┌───────────────┐
+│ Claude Code   │        │  ChromaDB     │   │   Mem0        │
+│ CLI processes │        │  (:3342)      │   │   (:3343)     │
+│ (1 per key)   │        │  Doc RAG      │   │   Conv. facts │
+└───────────────┘        └───────────────┘   └───────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────┐
+│           agents/<name>/   — identity, tools, MCP            │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requirements
 
-- macOS (tested on 15+) — tray app is macOS-only; the router itself is cross-platform
-- Node.js >= 20 (via [nvm](https://github.com/nvm-sh/nvm) recommended) + `tsx`
+- macOS (tested on 15+) — the tray app is macOS-only; the router itself is cross-platform
+- Node.js 20+ (via [nvm](https://github.com/nvm-sh/nvm) recommended) and `tsx`
 - Python 3.11+ (for ChromaDB and Mem0 servers)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 - `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing
-- An OpenAI API key (used only for embeddings and Mem0 fact extraction)
+- OpenAI API key (used only for embeddings and Mem0 fact extraction)
 
-## Install
+## Quick Start
 
 ```bash
+# 1. Clone
 git clone https://github.com/<you>/jarvis.git ~/.claude/jarvis
 cd ~/.claude/jarvis/router
 
-# Install deps
+# 2. Install deps
 npm install
 
-# Copy example configs
+# 3. Copy example configs
 cp .env.example .env
 cp config.example.yaml config.yaml
 
-# Edit .env with your bot tokens and OpenAI key
-# Edit config.yaml with your phone number / telegram ID / discord ID / routes
+# 4. Fill in:
+#    - .env:          bot tokens, OpenAI key
+#    - config.yaml:   your phone number / Telegram ID / Discord ID / routes
 
-# Copy agent template
+# 5. Create your first agent from the template
 mkdir -p ../agents
 cp -r ../agents.example/default ../agents/default
-# Edit ../agents/default/CLAUDE.md and agent.yaml
-```
+#    edit ../agents/default/CLAUDE.md and agent.yaml
 
-Then either run directly:
-
-```bash
-cd ~/.claude/jarvis/router
+# 6. Run
 npm start
 ```
 
-Or install as a LaunchAgent so it auto-starts on login:
+Dashboard: <http://localhost:3340>.
 
-```bash
-# Example plist at ~/Library/LaunchAgents/com.jarvis.router.plist
-# (see SETUP.md for the full template)
-launchctl load ~/Library/LaunchAgents/com.jarvis.router.plist
-```
-
-Open the dashboard at <http://localhost:3340>.
+To auto-start on login, register the LaunchAgent plists described in [`SETUP.md`](SETUP.md).
 
 ## Configuration
 
 Two files you own:
 
-- **`router/.env`** — secrets (bot tokens, OpenAI key). Never commit.
-- **`router/config.yaml`** — routes, channels, rate limits, extra services, cron jobs.
+| File | Purpose |
+|------|---------|
+| `router/.env` | Secrets (bot tokens, OpenAI key). Never commit. |
+| `router/config.yaml` | Routes, channels, rate limits, extra services, cron jobs. |
 
 Agents live in `~/.claude/jarvis/agents/<name>/` and are referenced from `config.yaml` routes via `use: <name>`. See `agents.example/default/` for a template.
 
 ### Extra services
 
-Add any service to the dashboard ribbon + tray app by listing it under `services:` in `config.yaml`:
+Register any background service in the dashboard ribbon and tray app by listing it under `services:` in `config.yaml`:
 
 ```yaml
 services:
@@ -90,27 +150,89 @@ services:
       cwd: ~/path/to
 ```
 
-## Architecture
+## How it Compares
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full system overview, directory structure, and design decisions. See [`SETUP.md`](SETUP.md) for operational commands and troubleshooting.
+There are a few excellent projects in the "Claude Code as a bot backend" space. Here is how `jarvis-claudecode` positions itself against them, so you can pick the right tool for your use case:
 
-## Project layout
+| | **jarvis-claudecode** | [sbusso/claudeclaw][s] | [openclaw/openclaw][o] | [moazbuilds/claudeclaw][m] |
+|---|---|---|---|---|
+| **Agent engine** | Claude Code CLI spawn | Claude Agent SDK (`query()`) | Pi runtime (proprietary) | Claude Code CLI spawn (Bun) |
+| **Models** | Claude only | Claude only | Multi-provider | Claude only |
+| **Channels** | Telegram, WhatsApp, Discord | Telegram, WhatsApp, Slack | 23+ channels | Telegram, Discord |
+| **Runtime** | Node.js + tsx | Node.js | Node.js (pnpm) | Bun |
+| **Memory** | ChromaDB + Mem0 | Filesystem + grep | SQLite + FTS5 + sqlite-vec | Claude sessions + CLAUDE.md |
+| **Isolation** | `--strict-mcp-config` + per-route tool deny list | `@anthropic-ai/sandbox-runtime` (kernel) | Docker containers | `--dangerously-skip-permissions` |
+| **Config** | YAML | SQLite + `.env` | Typed config (zod) + wizard | JSON settings |
+| **Dashboard** | React SPA + macOS tray | — (TUI on roadmap) | Control UI + macOS menu bar | Local web UI |
+| **Cost tracking** | No (planned) | Per-run in SQLite | Per-session + OTEL | No |
+| **Plugin system** | MCP per-route | `registerExtension()` | ClawHub + SDK | Claude Code plugin marketplace |
+
+[s]: https://github.com/sbusso/claudeclaw
+[o]: https://github.com/openclaw/openclaw
+[m]: https://github.com/moazbuilds/claudeclaw
+
+### What `jarvis-claudecode` does differently
+
+**Pros**
+
+- **Claude Code CLI, not Agent SDK** — keeps the full ecosystem: skills, hooks, slash commands, sub-agents, MCP, settings layering. Agent SDK wrappers re-implement a subset of that.
+- **Two-layer identity that survives `--resume`** — `~/.claude/CLAUDE.md` (user global) + `<workspace>/CLAUDE.md` (agent). No fragile `--append-system-prompt` hacks.
+- **Per-route scoping with real enforcement** — `--strict-mcp-config` + `--disallowed-tools` + `fileAccess: readonly` gate actions at spawn time, per chat context.
+- **Hybrid memory out of the box** — document RAG (ChromaDB) and conversation fact extraction (Mem0) as first-class services, auto-managed by launchd.
+- **End-to-end media pipeline** — voice → Whisper, images → Claude vision content blocks, PDFs → text, quoted replies kept as context, file outputs auto-sent back as attachments.
+- **Native macOS integration** — LaunchAgents for every service, SwiftUI tray app for start/stop/health, no Docker daemon required.
+
+**Cons (today)**
+
+- **No process-level sandbox** — isolation is at the CLI-argument level, not kernel-level like sbusso's sandbox-runtime or OpenClaw's Docker. A hardened sandbox mode is on the roadmap.
+- **No built-in cost tracking** — `--output-format stream-json` usage logging is planned, not implemented.
+- **macOS-first** — the router itself is cross-platform, but the tray app and LaunchAgent integration assume macOS.
+- **Claude-only** — if you need OpenAI/Gemini/local models as peers, OpenClaw is a better fit.
+- **Fewer channels than OpenClaw** — Telegram, WhatsApp, and Discord cover most personal use, but there's no Matrix/Signal/Slack out of the box.
+
+Use `jarvis-claudecode` if you want a personal, Claude-Code-native, config-driven router on your own Mac. Use the alternatives if you need kernel sandboxing, multi-provider model support, or 20+ channels.
+
+## Project Layout
 
 ```
 .
-├── router/          # TypeScript router (entry point, channels, dashboard API)
-│   ├── src/
-│   ├── dashboard/   # React SPA (Vite)
-│   ├── scripts/     # ChromaDB + Mem0 Python servers
+├── router/               # TypeScript router (entry point, channels, dashboard API)
+│   ├── src/              # Router source
+│   ├── dashboard/        # React SPA (Vite)
+│   ├── scripts/          # ChromaDB + Mem0 Python servers
 │   └── config.example.yaml
-├── agents.example/  # Agent template (copy to agents/<name>/)
-├── tray-app/        # macOS SwiftUI menu bar app
-├── research/        # Notes comparing adjacent projects
-├── ARCHITECTURE.md
-├── SETUP.md
-├── CLAUDE.md        # Project instructions for Claude Code contributors
-└── TODO.md
+├── agents.example/       # Agent template — copy to agents/<name>/
+├── tray-app/             # macOS SwiftUI menu bar app
+├── ARCHITECTURE.md       # System design
+├── SETUP.md              # Operations and troubleshooting
+├── TODO.md               # Roadmap
+├── CLAUDE.md             # Project instructions for Claude Code contributors
+└── LICENSE
 ```
+
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — full system overview, directory structure, design decisions
+- [`SETUP.md`](SETUP.md) — operational commands, troubleshooting, service management
+- [`TODO.md`](TODO.md) — current roadmap and known issues
+- [`CLAUDE.md`](CLAUDE.md) — contributor guide for Claude Code itself
+
+## Roadmap
+
+See [`TODO.md`](TODO.md) for the full list. Highlights on deck:
+
+- Sub-agents from chat — "do X in background" spawns a background Claude task
+- Custom slash commands (`/clear`, `/scope`, `/status`)
+- Cron runtime: schedule Claude jobs from `config.yaml` with channel delivery
+- Dashboard auth for exposure outside localhost/LAN
+
+## Contributing
+
+This is a personal project, but ideas and patches are welcome. Please open an issue first for anything non-trivial so we can align on scope. Before submitting a PR:
+
+- Run `npx tsc --noEmit` inside `router/` — there must be no new TypeScript errors
+- Rebuild the dashboard if you touched it: `cd router/dashboard && npm run build`
+- Keep code and docs in English
 
 ## License
 

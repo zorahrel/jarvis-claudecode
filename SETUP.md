@@ -26,7 +26,7 @@ cp .build/release/JarvisTray ~/bin/jarvis-tray
 
 ## Services
 
-Core (sempre presenti, hardcoded):
+Core (always present, hardcoded):
 
 | Service | Port | LaunchAgent | Health |
 |---------|------|-------------|--------|
@@ -34,10 +34,10 @@ Core (sempre presenti, hardcoded):
 | ChromaDB | 3342 | com.jarvis.chroma | `curl localhost:3342/health` |
 | Mem0 | 3343 | com.jarvis.mem0 | `curl localhost:3343/health` |
 
-Servizi extra: aggiungi una sezione `services:` in `router/config.yaml` (vedi `config.example.yaml`).
-Vengono mostrati nel dashboard e gestiti dalla tray se forniscono `launchd:`.
+Extra services: add a `services:` section in `router/config.yaml` (see `config.example.yaml`).
+They appear in the dashboard and are managed by the tray if they provide `launchd:`.
 
-Tutti i servizi launchd usano `KeepAlive: true` (auto-restart on crash).
+All launchd services use `KeepAlive: true` (auto-restart on crash).
 
 ## Key Paths
 - Config: `~/.claude/jarvis/router/config.yaml`
@@ -48,10 +48,10 @@ Tutti i servizi launchd usano `KeepAlive: true` (auto-restart on crash).
 
 ## Troubleshooting
 
-### Bot non risponde su TG
+### Bot not replying on Telegram
 ```bash
 tail -30 ~/.claude/jarvis/logs/router.log
-# Se timeout:
+# If timeout:
 launchctl kickstart -k gui/$(id -u)/com.jarvis.router
 ```
 
@@ -65,7 +65,7 @@ launchctl kickstart -k gui/$(id -u)/com.jarvis.chroma
 ```
 
 ### Mem0 Qdrant lock error
-`mem0-server.py` auto-clears stale locks at startup. Se insiste:
+`mem0-server.py` auto-clears stale locks at startup. If it persists:
 ```bash
 launchctl stop com.jarvis.mem0
 rm ~/.claude/jarvis/mem0-data/.lock
@@ -73,17 +73,17 @@ launchctl start com.jarvis.mem0
 ```
 
 ### WhatsApp disconnected (Bad MAC)
-Normale durante reconnection. Se persistente, cancella `wa-auth/` e ri-esegui il pairing.
+Normal during reconnection. If persistent, delete `wa-auth/` and re-run pairing.
 
 ### Tray app crash
-Di solito `shell()` chiamata dal main thread. Tutte le shell op devono girare in background.
+Usually `shell()` called on the main thread. All shell ops must run in the background.
 ```bash
 pkill JarvisTray
 ~/.claude/jarvis/tray-app/.build/debug/JarvisTray &
 ```
 
 ### Router PID lock stuck
-Se il router non parte ("Another instance is already running"):
+If the router won't start ("Another instance is already running"):
 ```bash
 rm ~/.claude/jarvis/router/jarvis-router.pid
 launchctl kickstart -k gui/$(id -u)/com.jarvis.router
@@ -116,14 +116,14 @@ curl localhost:3340/api/cli-sessions
 ## Config Changes
 Edit `config.yaml` → restart router (`launchctl kickstart -k gui/$(id -u)/com.jarvis.router`)
 Edit `CLAUDE.md` agents → process auto-reads on next spawn
-Edit dashboard → `npm run build` dentro `router/dashboard/` e restart router
+Edit dashboard → `npm run build` inside `router/dashboard/` and restart the router
 
 ## OpenAI Key
-Usato per: ChromaDB embeddings, Mem0 embeddings/LLM.
+Used for: ChromaDB embeddings, Mem0 embeddings/LLM.
 Set via env in `.env`: `OPENAI_API_KEY=sk-...`.
-Modelli: `text-embedding-3-small` (embeddings), `gpt-4.1-nano` (Mem0 fact extraction).
+Models: `text-embedding-3-small` (embeddings), `gpt-4.1-nano` (Mem0 fact extraction).
 
 ## Whisper
 - Binary: `/opt/homebrew/bin/whisper-cli`
-- Model: scarica `ggml-large-v3.bin` e punta il router al file
-- Usato per: voice messages su tutti i canali
+- Model: download `ggml-large-v3.bin` and point the router at the file
+- Used for: voice messages on all channels

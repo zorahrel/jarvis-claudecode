@@ -39,6 +39,9 @@ tray-app/.build/
 # Playwright MCP artifacts
 .playwright-mcp/
 
+# Private analysis notes
+research/
+
 # Backup files
 *.bak
 
