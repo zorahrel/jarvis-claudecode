@@ -80,8 +80,12 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 |---|---|
 | ![Routes](docs/images/dashboard-routes.png) | ![Agents](docs/images/dashboard-agents.png) |
 | **Routes** — one row per `(channel, match) → agent` mapping. Evaluated top-down, first match wins. | **Agents** — each agent is a folder with its own `CLAUDE.md`, tool list, memory scope, and model. |
-| ![Memory graph](docs/images/dashboard-memory.png) | ![Logs](docs/images/dashboard-logs.png) |
-| **Memory** — live 3D graph over ChromaDB documents and Mem0 facts, scoped per agent. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
+| ![Tools](docs/images/dashboard-tools.png) | ![Analytics](docs/images/dashboard-analytics.png) |
+| **Tools** — per-capability view across vision, voice, docs, email accounts, calendar, memory, system, and MCP. | **Analytics** — token usage and cost over time, broken down by agent / channel / model. |
+| ![Memory](docs/images/dashboard-memory.png) | ![Logs](docs/images/dashboard-logs.png) |
+| **Memory** — ChromaDB docs and Mem0 conversation facts scoped per agent, browsable as grid / list / graph. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
+| ![Sessions](docs/images/dashboard-sessions.png) | |
+| **Sessions** — active and past Claude Code CLI sessions, one per `(channel, from)` key, killable from the UI. | |
 
 ## Architecture at a Glance
 
