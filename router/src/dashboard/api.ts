@@ -1,0 +1,1451 @@
+import type { IncomingMessage, ServerResponse } from "http";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync } from "fs";
+import { join } from "path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { getProcesses, killProcessByKey } from "../services/claude";
+import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
+import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
+import { getCronStates, triggerCronJob } from "../services/cron";
+import { queryCosts, aggregateCosts, getTotalCost } from "../services/cost-tracker";
+import { logger } from "../services/logger";
+import { clearLogEntries } from "./state";
+import { corsOrigin, json, parseBody, requireConfirm, validateAgentName, safeReadFile } from "./helpers";
+import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, persistCliSessionsNow } from "./state";
+import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
+import { getAllServices, generatePlist } from "../services/services";
+
+const log = logger.child({ module: "dashboard" });
+const HOME = process.env.HOME!;
+
+// --- Debounced memory reindex after file CRUD ---
+// Multiple rapid edits coalesce into a single reindex call ~2s after the last mutation.
+let _reindexTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleReindex(reason: string): void {
+  if (_reindexTimer) clearTimeout(_reindexTimer);
+  _reindexTimer = setTimeout(() => {
+    _reindexTimer = null;
+    reindexDocs()
+      .then((r) => log.info("[memory] auto-reindex after %s: %o", reason, r))
+      .catch((e) => log.warn("[memory] auto-reindex failed after %s: %s", reason, e.message));
+  }, 2000);
+}
+
+// --- Memory graph response cache ---
+// Building the graph walks the FS and reads every .md file; caching for a window
+// cuts repeat latency. Invalidated on any PUT/DELETE via invalidateGraphCache().
+const GRAPH_CACHE_TTL_MS = 30_000;
+let _graphCache: { at: number; payload: { nodes: any[]; edges: any[] } } | null = null;
+function invalidateGraphCache(): void { _graphCache = null; }
+
+// --- Scope descriptions for memory dropdown ---
+// Built-in descriptions for common scopes. User-defined scopes (see
+// jarvis.memoryScopePatterns in config.yaml) fall through to a default label
+// rendered by the dashboard.
+export const SCOPE_HELP: Record<string, string> = {
+  "": "All scopes",
+  business: "Default scope for conversations — work / clients / routing",
+  global: "General purpose scope — cross-cutting notes",
+};
+
+export async function handleApi(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+  // Strip query string so endpoint matches with `path === "..."` work correctly
+  const qIdx = path.indexOf("?");
+  if (qIdx >= 0) path = path.slice(0, qIdx);
+
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    const origin = corsOrigin(req);
+    const headers: Record<string, string> = {
+      "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,X-Confirm",
+    };
+    if (origin) headers["Access-Control-Allow-Origin"] = origin;
+    res.writeHead(204, headers);
+    res.end();
+    return;
+  }
+
+  const logEntries = getLogEntries();
+  const cliSessions = getCliSessionsMap();
+
+  // --- CONSOLIDATED DASHBOARD STATE ---
+  if (path === "/api/dashboard-state") {
+    // Config-backed state (safely read, fallbacks to empty)
+    let callers: string[] = [];
+    let alwaysReplyGroups: string[] = [];
+    try {
+      const raw = readRawConfig() as any;
+      callers = raw?.jarvis?.allowedCallers ?? [];
+      alwaysReplyGroups = raw?.jarvis?.alwaysReplyGroups ?? [];
+    } catch { /* ignore */ }
+
+    // Global CLAUDE.md (system-wide, auto-loaded by all agents)
+    const HOME = process.env.HOME!;
+    const globalClaudeMdPath = `${HOME}/.claude/CLAUDE.md`;
+    const globalClaudeMd = safeReadFile(globalClaudeMdPath) ?? "";
+    const globalClaudeMdSize = globalClaudeMd.length;
+
+    // settings.json → hooks list (MCP + plugins live in Tools / Skills pages)
+    let settingsHooks: string[] = [];
+    try {
+      const settingsRaw = safeReadFile(`${HOME}/.claude/settings.json`);
+      if (settingsRaw) {
+        const s = JSON.parse(settingsRaw);
+        settingsHooks = Object.keys(s.hooks ?? {});
+      }
+    } catch { /* ignore */ }
+
+    // Agent names — used by Cron create form
+    let agentNames: string[] = [];
+    try {
+      const agents = getAgentsData();
+      agentNames = agents.map((a: any) => a.name);
+    } catch { /* ignore */ }
+
+    json(req, res, {
+      stats: getStatsData(),
+      processes: getProcessesWithContext(),
+      responseTimes: getResponseTimesData(),
+      logs: logEntries.slice(-50),
+      cliSessions: getCliSessions(),
+      scopeHelp: SCOPE_HELP,
+      callers,
+      alwaysReplyGroups,
+      globalClaudeMd,
+      globalClaudeMdSize,
+      settingsHooks,
+      agentNames,
+    });
+
+  // --- CLI SESSION APIs ---
+  } else if (path === "/api/session-start" && req.method === "POST") {
+    const body = await parseBody(req);
+    const id = body.id || `cli-${Date.now()}`;
+    const workspace = body.workspace || process.cwd();
+    const existing = cliSessions.get(id);
+    cliSessions.set(id, {
+      id,
+      workspace,
+      startedAt: existing?.startedAt ?? Date.now(),
+      lastSeen: Date.now(),
+      alive: true,
+    });
+    persistCliSessionsNow();
+    log.info("[cli] Session started: %s in %s", id, workspace);
+    json(req, res, { ok: true, id });
+
+  } else if (path === "/api/session-stop" && req.method === "POST") {
+    const body = await parseBody(req);
+    const id = body.id || "";
+    if (cliSessions.has(id)) {
+      cliSessions.get(id)!.alive = false;
+      persistCliSessionsNow();
+      log.info("[cli] Session stopped: %s", id);
+    }
+    json(req, res, { ok: true });
+
+  } else if (path === "/api/session-heartbeat" && req.method === "POST") {
+    const body = await parseBody(req);
+    const id = body.id || "";
+    const workspace = body.workspace as string | undefined;
+    const existing = cliSessions.get(id);
+    if (existing) {
+      existing.lastSeen = Date.now();
+      existing.alive = true;
+    } else if (id) {
+      // First heartbeat for an unseen id (e.g. router restarted) — auto-register.
+      cliSessions.set(id, { id, workspace: workspace || "", startedAt: Date.now(), lastSeen: Date.now(), alive: true });
+    }
+    json(req, res, { ok: true });
+
+  } else if (path === "/api/cli-sessions" && req.method === "DELETE") {
+    // Prune all dead/stale CLI sessions.
+    let removed = 0;
+    for (const [id, s] of cliSessions) {
+      if (!s.alive) { cliSessions.delete(id); removed++; }
+    }
+    persistCliSessionsNow();
+    json(req, res, { ok: true, removed });
+
+  } else if (path.startsWith("/api/cli-sessions/") && req.method === "DELETE") {
+    const id = decodeURIComponent(path.slice("/api/cli-sessions/".length));
+    const removed = cliSessions.delete(id);
+    if (removed) persistCliSessionsNow();
+    json(req, res, { ok: removed });
+
+  } else if (path === "/api/cli-sessions") {
+    json(req, res, getCliSessions());
+
+  // --- READ APIs ---
+  } else if (path === "/api/processes") {
+    json(req, res, getProcessesWithContext());
+  } else if (path === "/api/stats") {
+    json(req, res, getStatsData());
+  } else if (path === "/api/response-times") {
+    json(req, res, getResponseTimesData());
+  } else if (path === "/api/costs" && req.method === "GET") {
+    const url = new URL(req.url!, `http://${req.headers.host ?? "localhost"}`);
+    const days = url.searchParams.get("days") ? parseInt(url.searchParams.get("days")!) : undefined;
+    const from = days ? Date.now() - days * 86400_000 : (url.searchParams.get("from") ? parseInt(url.searchParams.get("from")!) : undefined);
+    const to = url.searchParams.get("to") ? parseInt(url.searchParams.get("to")!) : undefined;
+    const route = url.searchParams.get("route") || undefined;
+    const groupBy = (url.searchParams.get("groupBy") as "route" | "channel" | "day" | "model") || "route";
+    const aggregated = aggregateCosts({ from, to, route, groupBy });
+    const byDay = aggregateCosts({ from, to, route, groupBy: "day" });
+    const raw = queryCosts({ from, to, route });
+    const { totalCost, count } = getTotalCost();
+    json(req, res, { totalCost, count, aggregated, byDay, recent: raw.slice(-100) });
+  } else if (path === "/api/logs") {
+    json(req, res, logEntries.slice(-50));
+  } else if (path.startsWith("/api/kill/") && req.method === "POST") {
+    const key = decodeURIComponent(path.slice("/api/kill/".length));
+    json(req, res, { ok: killProcessByKey(key), key });
+
+  // --- CONFIG READ ---
+  } else if (path === "/api/config" && req.method === "GET") {
+    try {
+      const raw = readRawConfig();
+      json(req, res, raw);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- TOOLS REGISTRY ---
+  } else if (path === "/api/tools" && req.method === "GET") {
+    try {
+      const registry = getToolRegistry();
+      const routeMap = getToolRouteMap();
+      json(req, res, { tools: registry, byRoute: routeMap });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- CRON JOBS ---
+  } else if (path === "/api/crons" && req.method === "GET") {
+    json(req, res, getCronStates().map(s => ({
+      name: s.job.name,
+      schedule: s.job.schedule,
+      timezone: s.job.timezone ?? "UTC",
+      workspace: s.job.workspace,
+      model: s.job.model ?? "opus",
+      prompt: s.job.prompt,
+      timeout: s.job.timeout ?? 300,
+      delivery: s.job.delivery ?? null,
+      lastRun: s.lastRun,
+      lastStatus: s.lastStatus,
+      lastDurationMs: s.lastDurationMs,
+      lastError: s.lastError,
+      lastResult: s.lastResult,
+      runCount: s.runCount,
+    })));
+
+  } else if (path.match(/^\/api\/crons\/[^/]+\/run$/) && req.method === "POST") {
+    const name = decodeURIComponent(path.split("/")[3]);
+    const result = await triggerCronJob(name);
+    json(req, res, result, result.ok ? 200 : 400);
+
+  // --- SKILLS & PLUGINS ---
+  } else if (path === "/api/skills" && req.method === "GET") {
+    try {
+      const pluginsPath = join(process.env.HOME || "", ".claude/plugins/installed_plugins.json");
+      const settingsPath = join(process.env.HOME || "", ".claude", "settings.json");
+      let plugins: any[] = [];
+      let enabledPlugins: Record<string, boolean> = {};
+
+      if (existsSync(settingsPath)) {
+        try { enabledPlugins = JSON.parse(readFileSync(settingsPath, "utf-8")).enabledPlugins ?? {}; } catch {}
+      }
+
+      if (existsSync(pluginsPath)) {
+        try {
+          const raw = JSON.parse(readFileSync(pluginsPath, "utf-8"));
+          for (const [name, installs] of Object.entries(raw.plugins ?? {})) {
+            for (const inst of installs as any[]) {
+              plugins.push({
+                name,
+                scope: inst.scope ?? "user",
+                project: inst.projectPath ?? null,
+                enabled: enabledPlugins[name] ?? false,
+                installedAt: inst.installedAt ?? null,
+              });
+            }
+          }
+        } catch {}
+      }
+
+      // Helper: parse SKILL.md frontmatter
+      const parseSkillMd = (content: string) => {
+        const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+        let name = "", description = "";
+        if (fmMatch) {
+          const fm = fmMatch[1];
+          const nm = fm.match(/^name:\s*(.+)$/m);
+          name = nm?.[1]?.trim() ?? "";
+          const descMulti = fm.match(/^description:\s*>\s*\n((?:[ \t]+.+\n?)+)/m);
+          if (descMulti) {
+            description = descMulti[1].split("\n").map((l: string) => l.trim()).filter(Boolean).join(" ");
+          } else {
+            const descSingle = fm.match(/^description:\s*(.+)$/m);
+            if (descSingle && descSingle[1].trim() !== ">") {
+              description = descSingle[1].trim();
+            }
+          }
+        }
+        const body = content.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
+        return { name, description, body };
+      };
+
+      // Custom skills (SKILL.md in ~/.claude/*)
+      const customSkills: any[] = [];
+      const claudeDir = join(process.env.HOME || "", ".claude");
+      try {
+        for (const entry of readdirSync(claudeDir)) {
+          if (entry === "plugins" || entry.startsWith(".")) continue;
+          const skillPath = join(claudeDir, entry, "SKILL.md");
+          if (existsSync(skillPath)) {
+            const content = readFileSync(skillPath, "utf-8");
+            const parsed = parseSkillMd(content);
+            customSkills.push({
+              name: parsed.name || entry,
+              dirName: entry,
+              path: join(claudeDir, entry),
+              description: parsed.description,
+              content: content.length > 2000 ? content.slice(0, 2000) + "\n..." : content,
+            });
+          }
+        }
+      } catch {}
+
+      // Plugin skills (SKILL.md in ~/.claude/plugins/marketplaces/*/plugins/*/skills/*)
+      const pluginSkills: any[] = [];
+      const marketplacesDir = join(claudeDir, "plugins", "marketplaces");
+      try {
+        if (existsSync(marketplacesDir)) {
+          for (const marketplace of readdirSync(marketplacesDir)) {
+            const mpDir = join(marketplacesDir, marketplace, "plugins");
+            if (!existsSync(mpDir)) continue;
+            for (const pluginDir of readdirSync(mpDir)) {
+              const skillsDir = join(mpDir, pluginDir, "skills");
+              if (!existsSync(skillsDir)) continue;
+              try {
+                for (const skillDir of readdirSync(skillsDir)) {
+                  const skillMdPath = join(skillsDir, skillDir, "SKILL.md");
+                  if (!existsSync(skillMdPath)) continue;
+                  const content = readFileSync(skillMdPath, "utf-8");
+                  const parsed = parseSkillMd(content);
+                  pluginSkills.push({
+                    name: parsed.name || skillDir,
+                    plugin: `${pluginDir}@${marketplace}`,
+                    pluginName: pluginDir,
+                    description: parsed.description,
+                    content: content.length > 2000 ? content.slice(0, 2000) + "\n..." : content,
+                    path: skillMdPath,
+                  });
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+
+      json(req, res, { plugins, customSkills, pluginSkills });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- SKILL CONTENT GET/PUT ---
+  } else if (path.match(/^\/api\/skills\/[^/]+\/content$/) && (req.method === "GET" || req.method === "PUT")) {
+    const skillName = decodeURIComponent(path.split("/")[3]);
+    const skillPath = join(process.env.HOME || "", ".claude", skillName, "SKILL.md");
+    if (req.method === "GET") {
+      try {
+        if (!existsSync(skillPath)) { json(req, res, { error: "not found" }, 404); return; }
+        json(req, res, { content: readFileSync(skillPath, "utf-8") });
+      } catch (e: any) { json(req, res, { error: e.message }, 500); }
+    } else {
+      try {
+        const body = await parseBody(req);
+        if (!body.content && body.content !== "") { json(req, res, { error: "content required" }, 400); return; }
+        writeFileSync(skillPath, body.content, "utf-8");
+        json(req, res, { ok: true });
+      } catch (e: any) { json(req, res, { error: e.message }, 500); }
+    }
+
+  // --- ROUTES GET --- (thin matchers referencing agents by name)
+  } else if (path === "/api/routes" && req.method === "GET") {
+    try {
+      const raw = readRawConfig();
+      const registry = getAgentRegistry();
+      const routes = (raw.routes || []).map((r: any, i: number) => {
+        const agent = r.use ? registry[r.use] : undefined;
+        return {
+          index: i,
+          channel: r.match?.channel ?? "*",
+          from: r.match?.from ?? "*",
+          group: r.match?.group ?? null,
+          guild: r.match?.guild ?? null,
+          jid: r.match?.jid ?? null,
+          use: r.use ?? null,
+          action: r.action ?? "route",
+          agent: agent ? {
+            name: agent.name,
+            workspace: agent.workspace,
+            model: agent.model ?? "default",
+            fallbacks: agent.fallbacks ?? [],
+            tools: agent.tools ?? [],
+            effort: agent.effort ?? null,
+            fullAccess: agent.fullAccess === true,
+            inheritUserScope: agent.inheritUserScope !== false,
+          } : null,
+        };
+      });
+      json(req, res, routes);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- SETTINGS GET ---
+  } else if (path === "/api/settings" && req.method === "GET") {
+    try {
+      const settingsPath = join(process.env.HOME || "", ".claude", "settings.json");
+      const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf-8")) : {};
+      json(req, res, {
+        hooks: settings.hooks || {},
+        mcpServers: settings.mcpServers || {},
+        plugins: settings.plugins || {},
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- CALLERS ---
+  } else if (path === "/api/config/callers" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!body.phone) { json(req, res, { error: "phone required" }, 400); return; }
+      const raw = readRawConfig();
+      if (!raw.jarvis) raw.jarvis = {};
+      if (!raw.jarvis.allowedCallers) raw.jarvis.allowedCallers = [];
+      if (!raw.jarvis.allowedCallers.includes(body.phone)) {
+        raw.jarvis.allowedCallers.push(body.phone);
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Added caller: %s", body.phone);
+      json(req, res, { ok: true, callers: raw.jarvis.allowedCallers });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/config/callers/") && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const phone = decodeURIComponent(path.slice("/api/config/callers/".length));
+      const raw = readRawConfig();
+      if (raw.jarvis?.allowedCallers) {
+        raw.jarvis.allowedCallers = raw.jarvis.allowedCallers.filter((c: string) => c !== phone);
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Removed caller: %s", phone);
+      json(req, res, { ok: true, callers: raw.jarvis?.allowedCallers ?? [] });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- ALWAYS REPLY GROUPS ---
+  } else if (path === "/api/config/always-reply" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!body.group) { json(req, res, { error: "group required" }, 400); return; }
+      const raw = readRawConfig();
+      if (!raw.jarvis) raw.jarvis = {};
+      if (!raw.jarvis.alwaysReplyGroups) raw.jarvis.alwaysReplyGroups = [];
+      if (!raw.jarvis.alwaysReplyGroups.includes(body.group)) {
+        raw.jarvis.alwaysReplyGroups.push(body.group);
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Added always-reply group: %s", body.group);
+      json(req, res, { ok: true, groups: raw.jarvis.alwaysReplyGroups });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/config/always-reply/") && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const group = decodeURIComponent(path.slice("/api/config/always-reply/".length));
+      const raw = readRawConfig();
+      if (raw.jarvis?.alwaysReplyGroups) {
+        raw.jarvis.alwaysReplyGroups = raw.jarvis.alwaysReplyGroups.filter((g: string) => g !== group);
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Removed always-reply group: %s", group);
+      json(req, res, { ok: true, groups: raw.jarvis?.alwaysReplyGroups ?? [] });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- ROUTES POST (create thin route) ---
+  } else if (path === "/api/routes/full" && req.method === "GET") {
+    try {
+      const routes = getRoutesData();
+      json(req, res, routes);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/routes" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const raw = readRawConfig();
+      const route: any = { match: { channel: body.channel || "whatsapp" } };
+      if (body.from) route.match.from = body.from;
+      if (body.group) route.match.group = body.group;
+      if (body.jid) route.match.jid = body.jid;
+      if (body.action === "ignore") {
+        route.action = "ignore";
+      } else {
+        const use = String(body.use || "").trim();
+        if (!use) { json(req, res, { error: "`use` (agent name) required" }, 400); return; }
+        if (!getAgentRegistry()[use]) { json(req, res, { error: `agent not found: ${use}` }, 400); return; }
+        route.use = use;
+      }
+      raw.routes.push(route);
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Added route using agent %s", route.use || "(ignored)");
+      json(req, res, { ok: true, routes: raw.routes.length });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- ROUTE PUT (edit match + use + action) ---
+  } else if (path.match(/^\/api\/routes\/\d+$/) && req.method === "PUT") {
+    try {
+      const idx = parseInt(path.split("/").pop()!, 10);
+      const body = await parseBody(req);
+      const raw = readRawConfig();
+      if (idx < 0 || idx >= raw.routes.length) { json(req, res, { error: "invalid index" }, 400); return; }
+      const route = raw.routes[idx];
+      if (body.channel) route.match.channel = body.channel;
+      if (body.from !== undefined) {
+        if (body.from === null || body.from === "") delete route.match.from;
+        else route.match.from = body.from;
+      }
+      if (body.group !== undefined) {
+        if (body.group === null || body.group === "") delete route.match.group;
+        else route.match.group = body.group;
+      }
+      if (body.jid !== undefined) {
+        if (body.jid === null || body.jid === "") delete route.match.jid;
+        else route.match.jid = body.jid;
+      }
+      if (body.action === "ignore") {
+        route.action = "ignore";
+        delete route.use;
+      } else if (body.use !== undefined) {
+        const use = String(body.use || "").trim();
+        if (!use) { json(req, res, { error: "`use` cannot be empty" }, 400); return; }
+        if (!getAgentRegistry()[use]) { json(req, res, { error: `agent not found: ${use}` }, 400); return; }
+        route.use = use;
+        delete route.action;
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Updated route %d", idx);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.match(/^\/api\/routes\/\d+$/) && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const idx = parseInt(path.split("/").pop()!, 10);
+      const raw = readRawConfig();
+      if (idx < 0 || idx >= raw.routes.length) { json(req, res, { error: "invalid index" }, 400); return; }
+      raw.routes.splice(idx, 1);
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Deleted route %d", idx);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT REGISTRY (from agents/*/agent.yaml) ---
+  } else if (path === "/api/agents" && req.method === "GET") {
+    try {
+      const registry = getAgentRegistry();
+      const raw = readRawConfig();
+      const usedBy: Record<string, string[]> = {};
+      (raw.routes || []).forEach((r: any, i: number) => {
+        if (!r.use) return;
+        (usedBy[r.use] ||= []).push(
+          `${r.match?.channel ?? "*"}:${r.match?.from ?? r.match?.group ?? r.match?.jid ?? "*"} (#${i})`,
+        );
+      });
+      const agents = Object.values(registry).map(a => ({
+        name: a.name,
+        workspace: a.workspace,
+        model: a.model ?? null,
+        tools: a.tools ?? [],
+        fallbacks: a.fallbacks ?? [],
+        effort: a.effort ?? null,
+        fullAccess: a.fullAccess === true,
+        inheritUserScope: a.inheritUserScope !== false,
+        usedBy: usedBy[a.name!] ?? [],
+      }));
+      json(req, res, agents);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT YAML EDIT (model, tools, fallbacks, effort, fullAccess, inheritUserScope) ---
+  } else if (path.match(/^\/api\/agents\/[^/]+\/config$/) && req.method === "PUT") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const body = await parseBody(req);
+      const yamlPath = join(HOME, ".claude/jarvis/agents", agentName, "agent.yaml");
+      const existing = existsSync(yamlPath) ? (parseYaml(readFileSync(yamlPath, "utf-8")) ?? {}) : {};
+
+      if (body.model !== undefined) existing.model = body.model || undefined;
+      if (body.effort !== undefined) {
+        if (body.effort) existing.effort = body.effort;
+        else delete existing.effort;
+      }
+      if (body.fallbacks !== undefined) {
+        const arr = Array.isArray(body.fallbacks)
+          ? body.fallbacks
+          : String(body.fallbacks).split(",").map((s: string) => s.trim()).filter(Boolean);
+        if (arr.length) existing.fallbacks = arr;
+        else delete existing.fallbacks;
+      }
+      if (body.fullAccess !== undefined) {
+        if (body.fullAccess === true) {
+          existing.fullAccess = true;
+          delete existing.tools;
+        } else {
+          delete existing.fullAccess;
+        }
+      }
+      if (body.tools !== undefined && existing.fullAccess !== true) {
+        existing.tools = Array.isArray(body.tools) ? body.tools : [];
+      }
+      if (body.inheritUserScope !== undefined) {
+        // Default is true; only persist when explicitly false.
+        if (body.inheritUserScope === false) existing.inheritUserScope = false;
+        else delete existing.inheritUserScope;
+      }
+
+      for (const k of Object.keys(existing)) if (existing[k] === undefined) delete existing[k];
+
+      writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
+      await reloadConfig();
+      invalidateHtmlCache();
+      log.info("[dashboard] Updated agent.yaml for %s", agentName);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT SCOPE TOGGLE (adds/removes an @import line in CLAUDE.md) ---
+  } else if (path.match(/^\/api\/agents\/[^/]+\/scope$/) && req.method === "PATCH") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const body = await parseBody(req);
+      const importPath = String(body.import || "").trim();
+      const enable = body.enable === true || body.enable === "true";
+      if (!importPath) { json(req, res, { error: "`import` path required" }, 400); return; }
+      if (!importPath.endsWith(".md")) { json(req, res, { error: "import must be a .md file" }, 400); return; }
+      const allowedPrefixes = ["~/.claude/jarvis/agents/_shared/", `~/.claude/jarvis/agents/${agentName}/`, "~/.claude/jarvis/memory/"];
+      if (!allowedPrefixes.some(p => importPath.startsWith(p))) {
+        json(req, res, { error: "import path outside allowed roots" }, 400); return;
+      }
+      const claudePath = join(HOME, ".claude/jarvis/agents", agentName, "CLAUDE.md");
+      if (!existsSync(claudePath)) { json(req, res, { error: "CLAUDE.md not found" }, 404); return; }
+      const original = readFileSync(claudePath, "utf-8");
+
+      const lines = original.split("\n");
+      const importLines = new Set<string>();
+      const rest: string[] = [];
+      let headerLines: string[] = [];
+      let seenNonImport = false;
+      for (const ln of lines) {
+        if (/^@/.test(ln.trim())) {
+          importLines.add(ln.trim());
+        } else if (!seenNonImport && /^#/.test(ln.trim())) {
+          headerLines.push(ln);
+        } else if (!seenNonImport && ln.trim() === "") {
+          headerLines.push(ln);
+        } else {
+          seenNonImport = true;
+          rest.push(ln);
+        }
+      }
+
+      const importLine = `@${importPath}`;
+      if (enable) importLines.add(importLine);
+      else importLines.delete(importLine);
+
+      const sharedOrder = ["SOUL.md", "AGENTS.md", "TOOLS.md"];
+      const sorted = Array.from(importLines).sort((a, b) => {
+        const rank = (s: string) => s.includes("_shared/") ? 0 : s.includes(`/${agentName}/`) ? 1 : 2;
+        const ra = rank(a), rb = rank(b);
+        if (ra !== rb) return ra - rb;
+        if (ra === 0) {
+          const sharedIdx = (s: string) => {
+            for (let i = 0; i < sharedOrder.length; i++) if (s.endsWith("/" + sharedOrder[i])) return i;
+            return 999;
+          };
+          return sharedIdx(a) - sharedIdx(b);
+        }
+        return a.localeCompare(b);
+      });
+
+      while (headerLines.length && headerLines[headerLines.length - 1].trim() === "") headerLines.pop();
+      while (rest.length && rest[0].trim() === "") rest.shift();
+
+      const pieces: string[] = [];
+      if (headerLines.length) pieces.push(headerLines.join("\n"));
+      if (sorted.length) pieces.push(sorted.join("\n"));
+      if (rest.length) pieces.push(rest.join("\n"));
+      const out = pieces.join("\n\n") + (original.endsWith("\n") ? "\n" : "");
+
+      writeFileSync(claudePath, out, "utf-8");
+      invalidateHtmlCache();
+      log.info("[dashboard] Scope %s: %s @%s", enable ? "added" : "removed", agentName, importPath);
+      json(req, res, { ok: true, imports: sorted });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT TOOLS PATCH (add/remove/replace granular tools) ---
+  } else if (path.match(/^\/api\/agents\/[^/]+\/tools$/) && req.method === "PATCH") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const body = await parseBody(req);
+      const yamlPath = join(HOME, ".claude/jarvis/agents", agentName, "agent.yaml");
+      if (!existsSync(yamlPath)) { json(req, res, { error: "agent.yaml not found" }, 404); return; }
+      const existing = parseYaml(readFileSync(yamlPath, "utf-8")) ?? {};
+      if (existing.fullAccess) { json(req, res, { error: "agent has fullAccess; tools list is ignored" }, 400); return; }
+      existing.tools = Array.isArray(existing.tools) ? existing.tools : [];
+      if (body.addTool && !existing.tools.includes(body.addTool)) existing.tools.push(body.addTool);
+      if (body.removeTool) existing.tools = existing.tools.filter((t: string) => t !== body.removeTool);
+      if (Array.isArray(body.tools)) existing.tools = body.tools;
+      writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
+      await reloadConfig();
+      invalidateHtmlCache();
+      log.info("[dashboard] Patched tools for agent %s", agentName);
+      json(req, res, { ok: true, tools: existing.tools });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT CLAUDE.MD ---
+  } else if (path.match(/^\/api\/agents\/[^/]+\/claude-md$/) && req.method === "PUT") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const body = await parseBody(req);
+      const claudePath = join(HOME, ".claude/jarvis/agents", agentName, "CLAUDE.md");
+      writeFileSync(claudePath, body.content ?? "", "utf-8");
+      invalidateHtmlCache();
+      log.info("[dashboard] Saved CLAUDE.md for agent: %s", agentName);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.match(/^\/api\/agents\/[^/]+\/claude-md$/) && req.method === "GET") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const claudePath = join(HOME, ".claude/jarvis/agents", agentName, "CLAUDE.md");
+      const content = safeReadFile(claudePath) ?? "";
+      json(req, res, { content });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- GLOBAL CLAUDE.MD ---
+  } else if (path === "/api/config/global-claude-md" && req.method === "PUT") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const body = await parseBody(req);
+      const claudePath = join(HOME, ".claude/CLAUDE.md");
+      writeFileSync(claudePath, body.content ?? "", "utf-8");
+      invalidateHtmlCache();
+      log.info("[dashboard] Saved global CLAUDE.md");
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/config/yaml" && req.method === "PUT") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const body = await parseBody(req);
+      const content = String(body.content ?? "");
+      parseYaml(content);
+      writeFileSync(join(HOME, ".claude/jarvis/router/config.yaml"), content, "utf-8");
+      await reloadConfig();
+      invalidateHtmlCache();
+      log.info("[dashboard] Saved config.yaml from editor");
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/config/global-claude-md" && req.method === "GET") {
+    try {
+      const content = safeReadFile(join(HOME, ".claude/CLAUDE.md")) ?? "";
+      json(req, res, { content });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MEMORY APIs ---
+  } else if (path.startsWith("/api/memory/search") && req.method === "GET") {
+    const reqUrl = new URL(req.url ?? "/", "http://localhost");
+    const q = reqUrl.searchParams.get("q") || "";
+    const scope = reqUrl.searchParams.get("scope") || undefined;
+    const limit = parseInt(reqUrl.searchParams.get("limit") || "5");
+    if (!q) { json(req, res, { error: "q required" }, 400); return; }
+    try {
+      const [docRes, memRes] = await Promise.all([
+        searchDocsDetailed(q, scope, limit),
+        searchMemoriesDetailed(q, scope || "business", limit),
+      ]);
+      const partial: string[] = [];
+      if (docRes.timedOut) partial.push("docs");
+      if (memRes.timedOut) partial.push("memories");
+      json(req, res, {
+        docs: docRes.results,
+        memories: memRes.results,
+        ...(partial.length ? { partial } : {}),
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/memory/stats") && req.method === "GET") {
+    try {
+      const stats = await getMemoryStats();
+      json(req, res, stats);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/memory/documents") && req.method === "GET") {
+    const reqUrl = new URL(req.url ?? "/", "http://localhost");
+    const scope = reqUrl.searchParams.get("scope") || undefined;
+    try {
+      const docs = await getDocuments(scope);
+      json(req, res, { documents: docs });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/memory/memories") && req.method === "GET") {
+    const reqUrl = new URL(req.url ?? "/", "http://localhost");
+    const scope = reqUrl.searchParams.get("scope") || undefined;
+    try {
+      const mems = await getMemories(scope);
+      json(req, res, { memories: mems });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/memory/reindex" && req.method === "POST") {
+    try {
+      const result = await reindexDocs();
+      json(req, res, result);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // -- Filesystem memory graph (~/.claude/jarvis/memory) --
+  } else if (path === "/api/memory/files" && req.method === "GET") {
+    try {
+      const root = join(HOME, ".claude/jarvis/memory");
+      const files = walkMemoryDir(root);
+      json(req, res, { root, files });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/memory/file" && req.method === "GET") {
+    try {
+      const reqUrl = new URL(req.url ?? "/", "http://localhost");
+      const rel = reqUrl.searchParams.get("path") || "";
+      const root = join(HOME, ".claude/jarvis/memory");
+      const abs = join(root, rel);
+      if (!abs.startsWith(root)) { json(req, res, { error: "invalid path" }, 400); return; }
+      if (!existsSync(abs)) { json(req, res, { error: "not found" }, 404); return; }
+      const content = readFileSync(abs, "utf-8");
+      json(req, res, { path: rel, content, size: content.length });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/memory/file" && req.method === "PUT") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const body = await parseBody(req);
+      const rel = String(body.path || "");
+      const root = join(HOME, ".claude/jarvis/memory");
+      const abs = join(root, rel);
+      if (!abs.startsWith(root)) { json(req, res, { error: "invalid path" }, 400); return; }
+      const dir = abs.split("/").slice(0, -1).join("/");
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(abs, body.content ?? "", "utf-8");
+      log.info("[dashboard] Saved memory file %s", rel);
+      scheduleReindex(`PUT ${rel}`);
+      invalidateGraphCache();
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/memory/doctor" && req.method === "GET") {
+    try {
+      const root = join(HOME, ".claude/jarvis/memory");
+      const files = walkMemoryDir(root);
+      const TINY_BYTES = 120;
+      // Duplicate basenames across folders.
+      // Skip legitimate per-project scaffolding files (e.g. projects/<slug>/overview.md)
+      // — those are expected siblings inside different project folders.
+      const byName = new Map<string, string[]>();
+      for (const f of files) {
+        const arr = byName.get(f.name) || [];
+        arr.push(f.path); byName.set(f.name, arr);
+      }
+      const SCAFFOLD_NAMES = new Set(["overview.md", "README.md", "notes.md", "todo.md"]);
+      const duplicateNames = [...byName.entries()]
+        .filter(([name, paths]) => {
+          if (paths.length < 2) return false;
+          if (SCAFFOLD_NAMES.has(name)) {
+            // Only flag if any two paths share the same parent (real collision, not per-project scaffolding)
+            const parents = new Set(paths.map((p) => p.split("/").slice(0, -1).join("/")));
+            return parents.size < paths.length;
+          }
+          return true;
+        })
+        .map(([name, paths]) => ({ name, paths }));
+      // Tiny files: only flag if small AND lacking structure (no body beyond title).
+      // Small-but-complete contact cards or lists stay clear.
+      const tinyFiles = files.filter((f) => {
+        if (f.size >= TINY_BYTES) return false;
+        try {
+          const content = readFileSync(join(root, f.path), "utf-8");
+          const bodyLines = content.split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l && !l.startsWith("#") && !l.startsWith("---") && !l.startsWith("*Ultimo"));
+          return bodyLines.length < 2;
+        } catch { return true; }
+      }).map((f) => ({ path: f.path, size: f.size }));
+      // Orphans: nodes with zero edges in the current graph
+      let orphans: string[] = [];
+      try {
+        const graphRes = await fetch(`http://localhost:${process.env.JARVIS_PORT || 3340}/api/memory/graph`).then((r) => r.json()).catch(() => null);
+        if (graphRes?.nodes && graphRes?.edges) {
+          const linked = new Set<string>();
+          for (const e of graphRes.edges) { linked.add(e.source); linked.add(e.target); }
+          orphans = graphRes.nodes.filter((n: any) => !linked.has(n.id)).map((n: any) => n.id);
+        }
+      } catch { /* graph compute failure — non-fatal for doctor */ }
+      // Daily-date collisions: same YYYY-MM-DD in root and daily/
+      const dateRe = /^(\d{4}-\d{2}-\d{2})\.md$/;
+      const dailyDates = new Map<string, string[]>();
+      for (const f of files) {
+        const m = f.name.match(dateRe);
+        if (!m) continue;
+        const d = m[1];
+        const arr = dailyDates.get(d) || [];
+        arr.push(f.path); dailyDates.set(d, arr);
+      }
+      const dailyCollisions = [...dailyDates.entries()]
+        .filter(([, paths]) => paths.length > 1)
+        .map(([date, paths]) => ({ date, paths }));
+      const issueCount = duplicateNames.length + tinyFiles.length + orphans.length + dailyCollisions.length;
+      json(req, res, {
+        totalFiles: files.length,
+        issueCount,
+        duplicateNames,
+        tinyFiles,
+        orphans,
+        dailyCollisions,
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/memory/graph" && req.method === "GET") {
+    try {
+      const now = Date.now();
+      if (_graphCache && now - _graphCache.at < GRAPH_CACHE_TTL_MS) {
+        json(req, res, _graphCache.payload);
+        return;
+      }
+      const root = join(HOME, ".claude/jarvis/memory");
+      const files = walkMemoryDir(root);
+      const nodes = files.map((f) => ({
+        id: f.path,
+        label: f.name.replace(/\.md$/, ""),
+        category: f.category,
+        size: f.size,
+      }));
+      const idSet = new Set(nodes.map((n) => n.id));
+      const edges: Array<{ source: string; target: string }> = [];
+      const patterns = [
+        /\bmemory\/([\w\-./]+\.md)/g,
+        /\]\(\.?\/?([\w\-./]+\.md)\)/g,
+        /\[\[([\w\- .]+)\]\]/g,
+        /~\/\.claude\/jarvis\/memory\/([\w\-./]+\.md)/g,
+      ];
+      // Index labels → all nodes sharing that label (for deterministic disambiguation)
+      const labelIndex = new Map<string, typeof nodes>();
+      for (const n of nodes) {
+        const k = n.label.toLowerCase();
+        const arr = labelIndex.get(k) || [];
+        arr.push(n); labelIndex.set(k, arr);
+      }
+      for (const f of files) {
+        try {
+          const content = readFileSync(join(root, f.path), "utf-8");
+          const sourceDir = f.path.includes("/") ? f.path.split("/").slice(0, -1).join("/") : "";
+          const sourceCat = f.category;
+          for (const re of patterns) {
+            for (const match of content.matchAll(re)) {
+              const target = match[1];
+              // 1. Exact path hit
+              if (idSet.has(target)) { edges.push({ source: f.path, target }); continue; }
+              // 2. Same-dir relative
+              const rel = (sourceDir ? sourceDir + "/" : "") + target;
+              if (idSet.has(rel)) { edges.push({ source: f.path, target: rel }); continue; }
+              // 3. Wikilink / label: resolve with precedence
+              //    a) same sub-directory, b) same category, c) unique global, d) warn if ambiguous
+              const candidates = labelIndex.get(target.toLowerCase()) || [];
+              if (candidates.length === 0) continue;
+              let chosen = candidates.find((n) => n.id.startsWith((sourceDir ? sourceDir + "/" : "")) && n.id !== f.path);
+              if (!chosen) chosen = candidates.find((n) => n.category === sourceCat && n.id !== f.path);
+              if (!chosen && candidates.length === 1) chosen = candidates[0];
+              if (!chosen) {
+                // Ambiguous: pick by stable sort (lexicographic path) to at least be deterministic
+                chosen = candidates.slice().sort((a, b) => a.id.localeCompare(b.id))[0];
+                log.warn("[memory/graph] wikilink '%s' from %s is ambiguous: %o", target, f.path, candidates.map((c) => c.id));
+              }
+              if (chosen) edges.push({ source: f.path, target: chosen.id });
+            }
+          }
+        } catch { /* skip unreadable files */ }
+      }
+      // ── Keyword edges: connect files that mention a project/person/tool by name ──
+      const nameIndex = new Map<string, string>();
+      for (const n of nodes) {
+        if (n.category === "projects" || n.category === "people" || n.category === "tools") {
+          const key = n.label.toLowerCase().replace(/[-_]/g, " ");
+          if (key.length > 3) nameIndex.set(key, n.id);
+        }
+      }
+      const edgeSet = new Set(edges.map(e => e.source + "\u2192" + e.target));
+      for (const f of files) {
+        try {
+          const content = readFileSync(join(root, f.path), "utf-8").toLowerCase();
+          for (const [keyword, targetId] of nameIndex) {
+            if (targetId === f.path) continue;
+            if (content.includes(keyword)) {
+              const key = f.path + "\u2192" + targetId;
+              const rev = targetId + "\u2192" + f.path;
+              if (!edgeSet.has(key) && !edgeSet.has(rev)) {
+                edges.push({ source: f.path, target: targetId });
+                edgeSet.add(key);
+              }
+            }
+          }
+        } catch { /* skip */ }
+      }
+
+      // ── Sub-folder edges: connect files in same subfolder (e.g. projects/*.md, daily/*.md) ──
+      for (const n of nodes) {
+        const parts = n.id.split("/");
+        if (parts.length >= 2) {
+          const siblings = nodes.filter(o => o.id !== n.id && o.id.startsWith(parts.slice(0, -1).join("/") + "/"));
+          for (const s of siblings) {
+            const key = n.id + "\u2192" + s.id;
+            const rev = s.id + "\u2192" + n.id;
+            if (!edgeSet.has(key) && !edgeSet.has(rev)) {
+              edges.push({ source: n.id, target: s.id });
+              edgeSet.add(key);
+            }
+          }
+        }
+      }
+
+      const payload = { nodes, edges };
+      _graphCache = { at: Date.now(), payload };
+      json(req, res, payload);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/memory/file" && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const reqUrl = new URL(req.url ?? "/", "http://localhost");
+      const rel = reqUrl.searchParams.get("path") || "";
+      const root = join(HOME, ".claude/jarvis/memory");
+      const abs = join(root, rel);
+      if (!abs.startsWith(root) || !rel) { json(req, res, { error: "invalid path" }, 400); return; }
+      if (!existsSync(abs)) { json(req, res, { error: "not found" }, 404); return; }
+      const { unlinkSync } = await import("fs");
+      unlinkSync(abs);
+      log.info("[dashboard] Deleted memory file %s", rel);
+      scheduleReindex(`DELETE ${rel}`);
+      invalidateGraphCache();
+      json(req, res, { ok: true, path: rel });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/memory/") && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    const id = decodeURIComponent(path.slice("/api/memory/".length));
+    try {
+      const ok = await deleteMemory(id);
+      json(req, res, { ok, id });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // -- Agent file CRUD (read/edit files inside ~/.claude/jarvis/agents/<name>/) --
+  } else if (path === "/api/agents/file" && req.method === "GET") {
+    try {
+      const reqUrl = new URL(req.url ?? "/", "http://localhost");
+      const agentName = (reqUrl.searchParams.get("name") || "").replace(/[^a-zA-Z0-9_-]/g, "");
+      const fileName = (reqUrl.searchParams.get("file") || "").replace(/[^a-zA-Z0-9._-]/g, "");
+      if (!agentName || !fileName) { json(req, res, { error: "name and file required" }, 400); return; }
+      if (agentName.startsWith("_") || agentName.startsWith(".")) { json(req, res, { error: "invalid name" }, 400); return; }
+      const abs = join(HOME, ".claude/jarvis/agents", agentName, fileName);
+      if (!existsSync(abs)) { json(req, res, { error: "not found" }, 404); return; }
+      json(req, res, { agent: agentName, file: fileName, content: readFileSync(abs, "utf-8") });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/agents/file" && req.method === "PUT") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const body = await parseBody(req);
+      const agentName = String(body.name || "").replace(/[^a-zA-Z0-9_-]/g, "");
+      const fileName = String(body.file || "").replace(/[^a-zA-Z0-9._-]/g, "");
+      if (!agentName || !fileName) { json(req, res, { error: "name and file required" }, 400); return; }
+      if (agentName.startsWith("_") || agentName.startsWith(".")) { json(req, res, { error: "invalid name" }, 400); return; }
+      const abs = join(HOME, ".claude/jarvis/agents", agentName, fileName);
+      writeFileSync(abs, body.content ?? "", "utf-8");
+      invalidateHtmlCache();
+      log.info("[dashboard] Saved agent file %s/%s", agentName, fileName);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // -- Shared files CRUD (~/.claude/jarvis/agents/_shared/) --
+  } else if (path === "/api/shared/files" && req.method === "GET") {
+    try {
+      const dir = join(HOME, ".claude/jarvis/agents/_shared");
+      const files: Array<{ name: string; size: number }> = [];
+      if (existsSync(dir)) {
+        for (const entry of readdirSync(dir)) {
+          if (!entry.endsWith(".md")) continue;
+          try {
+            const st = statSync(join(dir, entry));
+            if (st.isFile()) files.push({ name: entry, size: st.size });
+          } catch { /* skip */ }
+        }
+      }
+      files.sort((a, b) => a.name.localeCompare(b.name));
+      json(req, res, { files });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/shared/file" && req.method === "GET") {
+    try {
+      const reqUrl = new URL(req.url ?? "/", "http://localhost");
+      const fileName = (reqUrl.searchParams.get("file") || "").replace(/[^a-zA-Z0-9._-]/g, "");
+      if (!fileName) { json(req, res, { error: "file required" }, 400); return; }
+      const abs = join(HOME, ".claude/jarvis/agents/_shared", fileName);
+      if (!existsSync(abs)) { json(req, res, { error: "not found" }, 404); return; }
+      json(req, res, { file: fileName, content: readFileSync(abs, "utf-8") });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/shared/file" && req.method === "PUT") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const body = await parseBody(req);
+      const fileName = String(body.file || "").replace(/[^a-zA-Z0-9._-]/g, "");
+      if (!fileName) { json(req, res, { error: "file required" }, 400); return; }
+      const abs = join(HOME, ".claude/jarvis/agents/_shared", fileName);
+      const dir = join(HOME, ".claude/jarvis/agents/_shared");
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(abs, body.content ?? "", "utf-8");
+      invalidateHtmlCache();
+      log.info("[dashboard] Saved shared file %s", fileName);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/services") {
+    const services = getAllServices();
+    const httpMod = await import("http");
+    const httpsMod = await import("https");
+    const results = await Promise.all(services.map(async (svc) => {
+      try {
+        const mod = svc.healthUrl.startsWith("https") ? httpsMod : httpMod;
+        const ok = await new Promise<boolean>((resolve) => {
+          const opts: any = { timeout: 2000 };
+          if (svc.healthUrl.startsWith("https")) opts.rejectUnauthorized = false;
+          const r = mod.get(svc.healthUrl, opts, (resp: any) => { resolve(resp.statusCode < 500); });
+          r.on("error", () => resolve(false));
+          r.on("timeout", () => { r.destroy(); resolve(false); });
+        });
+        return { name: svc.name, port: svc.port, linkUrl: svc.linkUrl, status: ok ? "ok" : "down" };
+      } catch { return { name: svc.name, port: svc.port, linkUrl: svc.linkUrl, status: "down" }; }
+    }));
+    json(req, res, results);
+
+  } else if (path === "/api/tray-services") {
+    // Tray app fetches this on boot + polling. Returns only services with launchd
+    // config (ones the tray can start/stop/restart), with plist content pre-generated.
+    const services = getAllServices().filter(s => s.launchd);
+    const result = services.map(svc => ({
+      label: svc.launchd!.label,
+      name: svc.name,
+      port: svc.port,
+      healthURL: svc.healthUrl,
+      plistContent: generatePlist(svc),
+    }));
+    json(req, res, result);
+
+  } else if (path === "/api/channels" && req.method === "GET") {
+    try {
+      const raw = readRawConfig();
+      const channels = raw.channels || {};
+      const config = getConfig();
+      const routesList = config.routes || [];
+      const httpMod = await import("http");
+
+      const channelServiceMap: Record<string, { port: number; url: string }> = {
+        whatsapp: { port: 3340, url: "http://localhost:3340/api/stats" },
+        telegram: { port: 3340, url: "http://localhost:3340/api/stats" },
+        discord: { port: 3340, url: "http://localhost:3340/api/stats" },
+      };
+
+      const result = await Promise.all(Object.entries(channels).map(async ([name, chCfg]: [string, any]) => {
+        const routeCount = routesList.filter((r: any) => r.match?.channel === name).length;
+        const svcInfo = channelServiceMap[name];
+        let status = "unknown";
+        if (svcInfo) {
+          try {
+            status = await new Promise<string>((resolve) => {
+              const r = httpMod.get(svcInfo.url, { timeout: 2000 }, (resp: any) => {
+                resolve(resp.statusCode < 500 ? "ok" : "down");
+              });
+              r.on("error", () => resolve("down"));
+              r.on("timeout", () => { r.destroy(); resolve("down"); });
+            });
+          } catch { status = "down"; }
+        }
+        const safeConfig: Record<string, any> = {};
+        for (const [k, v] of Object.entries(chCfg as Record<string, any>)) {
+          if (k === "enabled") continue;
+          if (typeof v === "string" && (v.startsWith("$") || k.toLowerCase().includes("token"))) {
+            safeConfig[k] = "***set***";
+          } else {
+            safeConfig[k] = v;
+          }
+        }
+        return {
+          name,
+          enabled: chCfg.enabled !== false,
+          config: safeConfig,
+          status: chCfg.enabled !== false ? status : "disabled",
+          routeCount,
+        };
+      }));
+      json(req, res, result);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/channels/") && req.method === "PUT") {
+    try {
+      const channelName = decodeURIComponent(path.slice("/api/channels/".length));
+      const body = await parseBody(req);
+      const raw = readRawConfig();
+      if (!raw.channels) raw.channels = {};
+      if (!raw.channels[channelName]) { json(req, res, { error: "channel not found" }, 404); return; }
+      if (typeof body.enabled === "boolean") {
+        raw.channels[channelName].enabled = body.enabled;
+      }
+      if (body.config && typeof body.config === "object") {
+        for (const [k, v] of Object.entries(body.config)) {
+          if (k.toLowerCase().includes("token")) continue;
+          raw.channels[channelName][k] = v;
+        }
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Updated channel %s", channelName);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+
+  // --- EMAIL ACCOUNTS CRUD ---
+  } else if (path === "/api/config/email-accounts" && req.method === "GET") {
+    try {
+      const accounts = getEmailAccounts();
+      json(req, res, { accounts: Object.entries(accounts).map(([email, account]) => ({ email, account })) });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/config/email-accounts" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!body.email || !body.account) { json(req, res, { error: "email and account required" }, 400); return; }
+      const raw = readRawConfig();
+      if (!raw.jarvis) raw.jarvis = {};
+      if (!raw.jarvis.emailAccounts) raw.jarvis.emailAccounts = [];
+      const exists = raw.jarvis.emailAccounts.some((a: any) => a.email === body.email);
+      if (exists) { json(req, res, { error: "email already exists" }, 409); return; }
+      raw.jarvis.emailAccounts.push({ email: body.email, account: body.account });
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Added email account: %s -> %s", body.email, body.account);
+      json(req, res, { ok: true, accounts: raw.jarvis.emailAccounts });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.startsWith("/api/config/email-accounts/") && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const email = decodeURIComponent(path.slice("/api/config/email-accounts/".length));
+      const raw = readRawConfig();
+      if (raw.jarvis?.emailAccounts) {
+        raw.jarvis.emailAccounts = raw.jarvis.emailAccounts.filter((a: any) => a.email !== email);
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Removed email account: %s", email);
+      json(req, res, { ok: true, accounts: raw.jarvis?.emailAccounts ?? [] });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENTS CRUD ---
+  } else if (path === "/api/agents" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!body.name || !validateAgentName(body.name)) { json(req, res, { error: "valid agent name required" }, 400); return; }
+      const agentDir = join(HOME, ".claude/jarvis/agents", body.name);
+      if (existsSync(agentDir)) { json(req, res, { error: "agent already exists" }, 409); return; }
+      mkdirSync(agentDir, { recursive: true });
+      const template = body.template || `# ${body.name}\n\n## Role\nDescribe this agent's role here.\n\n## Rules\n- Rule 1\n`;
+      writeFileSync(join(agentDir, "CLAUDE.md"), template, "utf-8");
+      invalidateHtmlCache();
+      log.info("[dashboard] Created agent: %s", body.name);
+      json(req, res, { ok: true, name: body.name });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.match(/^\/api\/agents\/[^/]+$/) && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const agentName = decodeURIComponent(path.split("/")[3]);
+      if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+      const agentDir = join(HOME, ".claude/jarvis/agents", agentName);
+      if (!existsSync(agentDir)) { json(req, res, { error: "agent not found" }, 404); return; }
+      const raw2 = readRawConfig();
+      const inUse = (raw2.routes || []).some((r: any) => r.use === agentName);
+      if (inUse) { json(req, res, { error: "agent is in use by a route, remove the route first" }, 409); return; }
+      const raw = readRawConfig();
+      const cronRef = (raw.crons || []).find((c: any) => c.workspace?.endsWith("/" + agentName));
+      if (cronRef) { json(req, res, { error: `agent is referenced by cron job "${cronRef.name}", remove it first` }, 409); return; }
+      rmSync(agentDir, { recursive: true });
+      invalidateHtmlCache();
+      log.info("[dashboard] Deleted agent: %s", agentName);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- ROUTE DUPLICATE ---
+  } else if (path.match(/^\/api\/routes\/\d+\/duplicate$/) && req.method === "POST") {
+    try {
+      const idx = parseInt(path.split("/")[3], 10);
+      const raw = readRawConfig();
+      if (idx < 0 || idx >= raw.routes.length) { json(req, res, { error: "invalid index" }, 400); return; }
+      const original = JSON.parse(JSON.stringify(raw.routes[idx]));
+      if (original.match?.from && original.match.from !== "*" && original.match.from !== "self") {
+        original.match.from = original.match.from + "-copy";
+      }
+      if (original.match?.group) {
+        original.match.group = original.match.group + "-copy";
+      }
+      raw.routes.splice(idx + 1, 0, original);
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Duplicated route %d", idx);
+      json(req, res, { ok: true, newIndex: idx + 1 });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- CRON CRUD ---
+  } else if (path === "/api/crons" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!body.name || !body.schedule || !body.prompt) { json(req, res, { error: "name, schedule, and prompt required" }, 400); return; }
+      const raw = readRawConfig();
+      if (!raw.crons || !Array.isArray(raw.crons)) raw.crons = [];
+      const exists = raw.crons.some((c: any) => c.name === body.name);
+      if (exists) { json(req, res, { error: "cron job with this name already exists" }, 409); return; }
+      const cronJob: any = {
+        name: body.name,
+        schedule: body.schedule,
+        timezone: body.timezone || "Europe/Rome",
+        workspace: body.workspace || "~/.claude/jarvis/agents/business",
+        model: body.model || "opus",
+        prompt: body.prompt,
+        timeout: body.timeout || 300,
+      };
+      if (body.delivery?.channel && body.delivery?.target) {
+        cronJob.delivery = { channel: body.delivery.channel, target: body.delivery.target };
+      }
+      raw.crons.push(cronJob);
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Added cron job: %s", body.name);
+      json(req, res, { ok: true, name: body.name });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.match(/^\/api\/crons\/[^/]+$/) && !path.includes("/run") && req.method === "PUT") {
+    try {
+      const name = decodeURIComponent(path.split("/")[3]);
+      const body = await parseBody(req);
+      const raw = readRawConfig();
+      if (!raw.crons || !Array.isArray(raw.crons)) { json(req, res, { error: "no crons configured" }, 404); return; }
+      const idx = raw.crons.findIndex((c: any) => c.name === name);
+      if (idx < 0) { json(req, res, { error: "cron not found" }, 404); return; }
+      if (body.schedule !== undefined) raw.crons[idx].schedule = body.schedule;
+      if (body.timezone !== undefined) raw.crons[idx].timezone = body.timezone;
+      if (body.model !== undefined) raw.crons[idx].model = body.model;
+      if (body.workspace !== undefined) raw.crons[idx].workspace = body.workspace;
+      if (body.prompt !== undefined) raw.crons[idx].prompt = body.prompt;
+      if (body.timeout !== undefined) raw.crons[idx].timeout = body.timeout;
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Updated cron job: %s", name);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path.match(/^\/api\/crons\/[^/]+$/) && !path.includes("/run") && req.method === "DELETE") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const name = decodeURIComponent(path.split("/")[3]);
+      const raw = readRawConfig();
+      if (!raw.crons || !Array.isArray(raw.crons)) { json(req, res, { error: "no crons configured" }, 404); return; }
+      const idx = raw.crons.findIndex((c: any) => c.name === name);
+      if (idx < 0) { json(req, res, { error: "cron not found" }, 404); return; }
+      raw.crons.splice(idx, 1);
+      if (raw.crons.length === 0) raw.crons = null;
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Deleted cron job: %s", name);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MEMORY SCOPES ---
+  } else if (path === "/api/config/memory-scopes" && req.method === "GET") {
+    try {
+      const raw = readRawConfig();
+      const scopes = raw.jarvis?.memoryScopes ?? Object.keys(SCOPE_HELP).filter(Boolean);
+      json(req, res, { scopes });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/config/memory-scopes" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!body.scope) { json(req, res, { error: "scope required" }, 400); return; }
+      const raw = readRawConfig();
+      if (!raw.jarvis) raw.jarvis = {};
+      if (!raw.jarvis.memoryScopes) raw.jarvis.memoryScopes = Object.keys(SCOPE_HELP).filter(Boolean);
+      if (!raw.jarvis.memoryScopes.includes(body.scope)) {
+        raw.jarvis.memoryScopes.push(body.scope);
+      }
+      await writeRawConfig(raw);
+      invalidateHtmlCache();
+      log.info("[dashboard] Added memory scope: %s", body.scope);
+      json(req, res, { ok: true, scopes: raw.jarvis.memoryScopes });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/agents/full" && req.method === "GET") {
+    try {
+      const agents = getAgentsData();
+      const routes = getRoutesData();
+      const result = agents.map(a => {
+        const agentRoutes = routes
+          .filter((r: any) => r.workspace === a.name)
+          .map((r: any, _i: number, _arr: any[]) => {
+            const idx = routes.indexOf(r);
+            return { index: idx, channel: r.channel, from: r.from, group: r.group, fullAccess: r.fullAccess };
+          });
+        return {
+          ...a,
+          routes: agentRoutes,
+        };
+      });
+      json(req, res, result);
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/agents-list") {
+    const agents = getAgentsData();
+    const routes = getRoutesData();
+    const list = agents.map(a => {
+      const usedBy = routes
+        .filter((r: any) => r.workspace === a.name)
+        .map((r: any) => `${r.channel}${r.group ? " (group)" : r.from !== "*" ? ` (${r.from})` : ""}`);
+      return { name: a.name, hasClaudeMd: a.size > 0, size: a.size, usedBy };
+    });
+    json(req, res, list);
+
+  } else if (path === "/api/logs" && req.method === "DELETE") {
+    clearLogEntries();
+    json(req, res, { ok: true });
+
+  } else {
+    json(req, res, { error: "not found" }, 404);
+  }
+}

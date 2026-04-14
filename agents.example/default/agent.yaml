@@ -1,0 +1,39 @@
+# Agent Configuration — Example
+#
+# Each agent lives in agents/<name>/ and must have:
+#   - agent.yaml (this file) — model, tools, permissions
+#   - CLAUDE.md — agent identity and instructions (loaded automatically by Claude Code)
+#
+# Routes in config.yaml reference agents by folder name: `use: default`
+
+# Model to use (claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5)
+model: opus
+
+# Thinking effort: low, medium, high, max
+effort: high
+
+# Model fallback chain — tried in order on rate limits
+fallbacks:
+  - haiku
+
+# Full access mode (DANGEROUS — gives Claude unrestricted file/bash access)
+# Only enable for trusted personal agents. Default: false
+# fullAccess: true
+
+# Tool list — controls what the agent can do
+# Omit for minimal (read-only, no tools). List specific capabilities:
+tools:
+  - vision          # Analyze images sent by user
+  - voice           # Transcribe voice messages
+  # - email:myaccount       # Email via gws-mail (account name)
+  # - calendar:myaccount    # Calendar via gws-mail
+  - fileAccess:readonly     # readonly | full
+  - memory:global           # Memory scope (business, global, custom)
+  # - documents             # Search ChromaDB document index
+  # - mcp:brave-search      # MCP server (must exist in ~/.claude/settings.json)
+  # - mcp:github
+  # - mcp:context7
+
+# Custom environment variables for this agent's Claude Code process
+# env:
+#   CUSTOM_VAR: value

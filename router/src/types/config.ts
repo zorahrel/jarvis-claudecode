@@ -1,0 +1,149 @@
+/** Channel types */
+export type Channel = "whatsapp" | "telegram" | "discord";
+
+/** Route match criteria */
+export interface RouteMatch {
+  channel: Channel | "*";
+  from?: string | number | "self";
+  group?: string;
+  guild?: string;
+  jid?: string;  // Direct JID match (for WhatsApp LID format, self-chat, etc.)
+}
+
+/** Tool registry entry describing an available tool in the system */
+export interface ToolDef {
+  id: string;           // e.g. "vision", "email:myaccount", "mcp:github"
+  type: "builtin" | "cli" | "mcp";
+  label: string;        // Human-readable: "Vision", "user@example.com", "GitHub"
+  /** Optional emoji for legacy surfaces. Dashboard renders via lucide (see dashboard/src/icons.tsx). */
+  icon?: string;
+  description: string;
+  /** For mcp tools: server config from ~/.claude.json mcpServers */
+  mcpConfig?: { command?: string; args?: string[]; url?: string; type?: string; env?: Record<string, string> };
+  /** For cli tools: the shell command */
+  command?: string;
+}
+
+/** Agent configuration (from agents/<name>/agent.yaml + workspace auto-resolved). */
+export interface AgentConfig {
+  /** Agent name (from folder). Injected at load time, not present in agent.yaml. */
+  name?: string;
+  /** Absolute workspace path. Injected at load time. */
+  workspace: string;
+  model?: string;
+  /** Granular tool list: ["vision", "email:myaccount", "mcp:github", "memory:business"] */
+  tools?: string[];
+  fallbacks?: string[];
+  env?: Record<string, string>;
+  alwaysReply?: boolean;
+  effort?: "low" | "medium" | "high" | "max";
+  /** When true, the spawned CLI gets all MCP servers, no tool restrictions, and bypassPermissions. Ignores `tools`. */
+  fullAccess?: boolean;
+  /** Inherit ~/.claude/ user-scope settings (CLAUDE.md, hooks, skills). Default true. Set false for external/client agents that must not see the user's global config. */
+  inheritUserScope?: boolean;
+}
+
+/** A single route definition — thin matcher that references an agent by name. */
+export interface Route {
+  match: RouteMatch;
+  /** Name of the agent to use, matching a folder in ~/.claude/jarvis/agents/. */
+  use?: string;
+  /** Set to "ignore" to swallow messages matching this route. */
+  action?: "ignore";
+  /** Populated at resolution time by findRoute(). Not persisted in YAML. */
+  agent?: AgentConfig;
+}
+
+/** Channel-specific configuration */
+export interface ChannelConfig {
+  whatsapp?: {
+    enabled: boolean;
+    authDir?: string;
+  };
+  telegram?: {
+    enabled: boolean;
+    botToken?: string;
+  };
+  discord?: {
+    enabled: boolean;
+    botToken?: string;
+  };
+}
+
+/** User definition */
+export interface User {
+  type: "owner" | "team" | "family" | "personal" | "client";
+  ids: Partial<Record<Channel, string | number>>;
+  access?: string[] | "full";
+}
+
+/** Cron job delivery target */
+export interface CronDelivery {
+  channel: Channel;
+  target: string;
+}
+
+/** Cron job definition */
+export interface CronJob {
+  name: string;
+  schedule: string;
+  timezone?: string;
+  workspace: string;
+  model?: string;
+  prompt: string;
+  timeout?: number;
+  delivery?: CronDelivery;
+}
+
+/** Rate limit config */
+export interface RateLimitConfig {
+  maxMessages: number;
+  windowSeconds: number;
+}
+
+/** Rate limits section */
+export interface RateLimits {
+  incoming?: RateLimitConfig;
+  outgoing?: RateLimitConfig;
+}
+
+/** Jarvis-specific config */
+export interface JarvisConfig {
+  allowedCallers?: string[];
+  alwaysReplyGroups?: string[];
+}
+
+/** Launchd configuration for a user-defined service (optional — tray can manage it) */
+export interface ServiceLaunchd {
+  /** launchd label, e.g. "com.example.myservice". Must match ^[a-z][a-z0-9._-]{0,63}$ */
+  label: string;
+  /** Argv array for the service process. First element is the executable. */
+  args: string[];
+  /** Working directory. Supports ~/ expansion. */
+  cwd: string;
+  /** Filename for StandardOutPath/StandardErrorPath (under logs/). Defaults to label. */
+  logName?: string;
+}
+
+/** User-defined service shown in the dashboard service ribbon and optionally managed by the tray */
+export interface ServiceDef {
+  name: string;
+  port: number;
+  /** Health endpoint used for up/down check. HTTPS endpoints are accepted with self-signed certs. */
+  healthUrl: string;
+  /** Optional link opened when clicking the service chip in the dashboard. */
+  linkUrl?: string;
+  /** Optional launchd config. If present, tray app can start/stop/restart the service. */
+  launchd?: ServiceLaunchd;
+}
+
+/** Top-level config */
+export interface Config {
+  jarvis?: JarvisConfig;
+  channels: ChannelConfig;
+  routes: Route[];
+  users: Record<string, User>;
+  crons?: CronJob[];
+  rateLimits?: RateLimits;
+  services?: ServiceDef[];
+}

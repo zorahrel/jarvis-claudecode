@@ -1,0 +1,147 @@
+# Jarvis Router — Example Configuration
+# Copy this to config.yaml and customize for your setup.
+
+jarvis:
+  # Phone numbers allowed to send @jarvis mentions in WhatsApp groups
+  allowedCallers:
+    - "+1234567890"
+
+  # Groups where Jarvis replies to all messages (not just @mentions)
+  alwaysReplyGroups: []
+
+  # Email accounts accessible via gws-mail tool
+  # Each entry maps an email to a gws-mail account name
+  emailAccounts:
+    - email: you@gmail.com
+      account: personal
+    # - email: you@company.com
+    #   account: work
+
+# ─── Channels ────────────────────────────────────────────────
+# Enable/disable each messaging channel.
+# Bot tokens are read from environment variables (see .env.example).
+
+channels:
+  whatsapp:
+    enabled: true
+    authDir: ./wa-auth  # QR code auth state saved here
+
+  telegram:
+    enabled: true
+    botToken: $TELEGRAM_BOT_TOKEN
+
+  discord:
+    enabled: true
+    botToken: $DISCORD_BOT_TOKEN
+
+# ─── Routes ──────────────────────────────────────────────────
+# Routes are thin matchers. Each route maps (channel, from/group/guild)
+# to an agent defined by folder name under agents/<name>/.
+# Agent behavior (model, tools, MCP, fullAccess, effort) lives in
+# each agent folder's agent.yaml — not here.
+#
+# Routes are evaluated in order. First match wins.
+
+routes:
+  # Personal WhatsApp DM → full-access agent
+  - match:
+      channel: whatsapp
+      from: "+1234567890"           # your phone number
+    use: default
+
+  # WhatsApp group → scoped agent
+  # - match:
+  #     channel: whatsapp
+  #     group: "120363000000000000@g.us"  # WhatsApp group JID
+  #   use: team
+
+  # WhatsApp self-chat → full-access agent
+  - match:
+      channel: whatsapp
+      from: self
+    use: default
+
+  # Telegram DM → full-access agent
+  - match:
+      channel: telegram
+      from: 123456789               # your Telegram user ID
+    use: default
+
+  # Discord DM → full-access agent
+  - match:
+      channel: discord
+      from: "123456789012345678"    # your Discord user ID
+    use: default
+
+  # Discord server → scoped agent
+  # - match:
+  #     channel: discord
+  #     guild: "123456789012345678"  # Discord guild/server ID
+  #   use: team
+
+  # Catch-all: ignore unmatched messages
+  - match:
+      channel: "*"
+    action: ignore
+
+# ─── Rate Limits ─────────────────────────────────────────────
+
+rateLimits:
+  incoming:
+    maxMessages: 10
+    windowSeconds: 60
+  outgoing:
+    maxMessages: 20
+    windowSeconds: 60
+
+# ─── Cron Jobs ───────────────────────────────────────────────
+# Schedule Claude tasks that run on a cron and deliver results to a channel.
+#
+# crons:
+#   - name: daily-report
+#     schedule: "0 9 * * *"           # every day at 9am
+#     timezone: Europe/Rome
+#     workspace: ./agents/default
+#     model: opus
+#     prompt: "Generate a daily summary of pending tasks."
+#     timeout: 300
+#     delivery:
+#       channel: telegram
+#       target: "123456789"           # Telegram chat ID
+
+crons: null
+
+# ─── Users ───────────────────────────────────────────────────
+# Map human-readable names to platform IDs.
+# Used for dashboard display and contact resolution.
+
+users:
+  you:
+    type: owner
+    ids:
+      telegram: 123456789
+      discord: "123456789012345678"
+      whatsapp: "+1234567890"
+  # teammate:
+  #   type: team
+  #   ids:
+  #     whatsapp: "+1234567891"
+
+# ─── Services (optional) ─────────────────────────────────────
+# Extra services shown in the dashboard service ribbon and optionally
+# managed by the tray app (start/stop/restart via launchd).
+#
+# Core services (Router, ChromaDB, Mem0) are always present — don't list them here.
+#
+# services:
+#   - name: MyService
+#     port: 3335
+#     healthUrl: http://localhost:3335/health
+#     linkUrl: http://localhost:3335       # optional, adds "open" icon in dashboard
+#     launchd:                              # optional, enables tray app management
+#       label: com.example.myservice       # must match ^[a-z][a-z0-9._-]{0,63}$
+#       args:
+#         - node
+#         - ~/path/to/app.js
+#       cwd: ~/path/to
+#       logName: myservice                  # optional, defaults to label

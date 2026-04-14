@@ -1,0 +1,291 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@import "tailwindcss";
+
+:root {
+  /* ── Surfaces ── */
+  --bg-0: #08090a;
+  --bg-1: #0f1011;
+  --bg-2: #141418;
+  --bg-3: #191a1b;
+
+  /* ── Text ── */
+  --text-1: #f7f8f8;
+  --text-2: #d0d6e0;
+  --text-3: #8a8f98;
+  --text-4: #62666d;
+
+  /* ── Brand ── */
+  --accent: #5e6ad2;
+  --accent-bright: #7170ff;
+  --accent-hover: #828fff;
+
+  /* ── Status ── */
+  --ok: #27a644;
+  --warn: #f5a623;
+  --err: #e5534b;
+
+  /* ── Borders ── */
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.10);
+  --border-focus: rgba(94, 106, 210, 0.45);
+
+  /* ── Surface tints (for hover, subtle backgrounds) ── */
+  --surface-subtle: rgba(255, 255, 255, 0.02);
+  --surface-hover: rgba(255, 255, 255, 0.04);
+  --surface-hover-strong: rgba(255, 255, 255, 0.08);
+
+  /* ── Semantic tints (badges, callouts, status backgrounds) ── */
+  --ok-tint: rgba(39, 166, 68, 0.10);
+  --ok-tint-strong: rgba(39, 166, 68, 0.22);
+  --ok-border: rgba(39, 166, 68, 0.25);
+  --warn-tint: rgba(245, 166, 35, 0.10);
+  --warn-tint-strong: rgba(245, 166, 35, 0.22);
+  --warn-border: rgba(245, 166, 35, 0.30);
+  --err-tint: rgba(229, 83, 75, 0.10);
+  --err-tint-strong: rgba(229, 83, 75, 0.22);
+  --err-border: rgba(229, 83, 75, 0.30);
+  --accent-tint: rgba(94, 106, 210, 0.10);
+  --accent-tint-strong: rgba(94, 106, 210, 0.22);
+  --accent-border: rgba(94, 106, 210, 0.30);
+
+  /* ── Jarvis identity (used for the orchestrator agent across surfaces) ── */
+  --jarvis-tint: rgba(113, 112, 255, 0.10);
+  --jarvis-tint-strong: rgba(113, 112, 255, 0.18);
+  --jarvis-border: rgba(113, 112, 255, 0.40);
+  --jarvis-glow: 0 0 0 1px rgba(113, 112, 255, 0.30), 0 0 14px rgba(113, 112, 255, 0.15);
+  --jarvis-gradient: linear-gradient(135deg, #7170ff 0%, #5e6ad2 100%);
+
+  /* ── Radii ── */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* ── Type ── */
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+
+  /* ── Layout (used by content pages) ── */
+  --page-pad-x: 32px;
+  --page-pad-y: 24px;
+  --content-max: 1280px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+code, pre, .font-mono {
+  font-family: var(--mono);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-4);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+}
+
+/* ── Animations ── */
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slideInFromRight {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes jarvisShimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+/* ── Panel slide-in ── */
+
+.panel-overlay {
+  animation: fadeIn 0.2s ease;
+}
+
+.panel-slide {
+  animation: slideInRight 0.25s ease;
+}
+
+/* ── Toast ── */
+
+.toast {
+  animation: slideInFromRight 0.3s ease;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* ── Spinner ── */
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+/* ── Health dots ── */
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(39, 166, 68, 0.4);
+}
+
+.health-dot.down {
+  background: var(--err);
+  box-shadow: 0 0 6px rgba(229, 83, 75, 0.4);
+}
+
+.health-dot.checking {
+  background: var(--warn);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* ── Page titles ── */
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -0.5px;
+  margin: 0 0 4px;
+}
+
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-4);
+  font-weight: 400;
+  margin-left: 8px;
+}
+
+/* ── Subsection headers ── */
+
+.subsection {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 16px 0 8px;
+}
+
+/* ── Info callout boxes ── */
+
+.info-box {
+  padding: 10px 14px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.info-box strong {
+  color: var(--text-2);
+}
+
+.info-box code {
+  background: var(--bg-2);
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+}
+
+/* ── Empty states ── */
+
+.empty-state {
+  color: var(--text-4);
+  padding: 24px 0;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ── Jarvis identity helpers ── */
+
+.jarvis-text {
+  background: var(--jarvis-gradient);
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  font-weight: 600;
+}
+
+.jarvis-text:hover {
+  animation: jarvisShimmer 2.5s linear infinite;
+}
+
+/* ── Responsive ── */
+
+@media (max-width: 768px) {
+  .sidebar-nav {
+    width: 56px;
+  }
+  .sidebar-nav .nav-label {
+    display: none;
+  }
+  .sidebar-nav .nav-item {
+    justify-content: center;
+    padding: 10px;
+  }
+}
+
+@media (max-width: 480px) {
+  .sidebar-nav {
+    display: none;
+  }
+}

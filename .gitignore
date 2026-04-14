@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+dist/
+
+# Secrets
+.env
+router/.env
+
+# Personal data (create your own from examples)
+config.yaml
+router/config.yaml
+agents/
+
+# Runtime data
+memory/
+media/
+logs/
+data/
+router/wa-auth/
+router/certs/
+router/data/
+router/logs/
+router/cli-sessions.json
+router/session-stats.json
+router/*.pid
+chroma-data/
+mem0-data/
+mem0-history.db
+cron-stats.json
+stats.json
+
+# Build artifacts
+tray-app/.build/
+
+# Local Claude settings (never commit)
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Backup files
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Screenshots (keep docs/images/ if present)
+*.png
+!docs/images/*.png
