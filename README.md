@@ -19,6 +19,7 @@
 ## Table of Contents
 
 - [Why jarvis-claudecode](#why-jarvis-claudecode)
+- [Use Cases](#use-cases)
 - [Features](#features)
 - [Architecture at a Glance](#architecture-at-a-glance)
 - [Requirements](#requirements)
@@ -39,6 +40,21 @@ The Claude Code CLI is powerful on the desktop — but chat apps are where most 
 - **Real conversation memory** — ChromaDB indexes your notes, Mem0 extracts facts from conversation history.
 - **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
 - **Native and local** — no Docker, no cloud router. Services run as macOS LaunchAgents and are controlled from a tray app.
+- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. The only API cost is ~$0.02/mo of OpenAI embeddings for memory. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
+
+## Use Cases
+
+`jarvis-claudecode` started as a personal assistant, but one router can host an arbitrary number of specialized agents — each with its own identity, tools, and chat audience. A few patterns that work well:
+
+- **Personal productivity hub** — one agent in your Telegram DM with full memory, calendar, email, and file access. Voice a task while walking and get a reply with the output file attached.
+- **Family agents** — a dedicated agent per family member (or a shared family-group agent), each with their own `agents/<name>/CLAUDE.md` personality and scoped memory. Kids get a read-only agent, parents get a full-access one.
+- **Direct client channel on WhatsApp** — give clients a WhatsApp number that routes to a scoped agent with read-only access to their project folder. They chat in natural language, the agent answers from project context; you review the logs in the dashboard.
+- **Team coordination** — a Telegram or Discord group where an agent takes standup notes, answers repo questions from embedded docs, and pings you on Slack-style mentions. Per-route rate limits keep the noise down.
+- **On-demand code review on Discord** — a `/review` agent in a dev Discord that reads a PR link, runs a focused review with its own MCP toolchain, and posts structured feedback back to the thread.
+- **Always-on cron agents** — daily report at 9am, weekly digest on Friday evening, nightly backup verification — each cron is a fresh Claude Code session with a clean context window, delivering its output to the channel of your choice.
+- **Customer support triage** — route unknown WhatsApp senders to a pairing flow, then to a tier-1 triage agent that either resolves or escalates by DMing you.
+
+Because each route maps to an agent folder (`agents/<name>/`) and each agent declares its own tool list, MCP servers, model, and CLAUDE.md, adding a new use case is typically a 5-minute copy-and-edit of the `default` template.
 
 ## Features
 
@@ -175,6 +191,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 
 **Pros**
 
+- **Subscription-powered, not API-metered** — because the backend is the Claude Code CLI authenticated via OAuth, agents run on your Claude Max / Pro / Team subscription at flat cost. Alternatives that use the Anthropic API or multi-provider routers (OpenClaw) bill per token — at heavy use that is an order of magnitude more expensive.
 - **Claude Code CLI, not Agent SDK** — keeps the full ecosystem: skills, hooks, slash commands, sub-agents, MCP, settings layering. Agent SDK wrappers re-implement a subset of that.
 - **Two-layer identity that survives `--resume`** — `~/.claude/CLAUDE.md` (user global) + `<workspace>/CLAUDE.md` (agent). No fragile `--append-system-prompt` hacks.
 - **Per-route scoping with real enforcement** — `--strict-mcp-config` + `--disallowed-tools` + `fileAccess: readonly` gate actions at spawn time, per chat context.
