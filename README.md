@@ -1,4 +1,6 @@
-# jarvis-claudecode
+# Jarvis Claude Code
+
+<sub>`jarvis-claudecode` · zorahrel/jarvis-claudecode</sub>
 
 > Multi-channel router that brings the **Claude Code CLI** to Telegram, WhatsApp, and Discord — with per-route agents, persistent memory, media processing, a web dashboard, and a native macOS tray app.
 
@@ -12,7 +14,7 @@
   <img src="https://img.shields.io/badge/status-personal%20project-orange" alt="Personal project" />
 </p>
 
-`jarvis-claudecode` is a personal AI gateway. Messages arriving on any chat platform are matched against per-route agents — each with its own identity (`CLAUDE.md`), tool scope, memory, and model. A persistent Claude Code process runs per session key, so conversations retain context across messages.
+Jarvis Claude Code is a personal AI gateway. Messages arriving on any chat platform are matched against per-route agents — each with its own identity (`CLAUDE.md`), tool scope, memory, and model. A persistent Claude Code process runs per session key, so conversations retain context across messages.
 
 **Keywords**: Claude Code, Claude Code CLI, Telegram bot, WhatsApp bot, Discord bot, MCP, ChromaDB, Mem0, multi-channel AI assistant, personal AI agent, macOS menu bar.
 
@@ -20,7 +22,7 @@
 
 ## Table of Contents
 
-- [Why jarvis-claudecode](#why-jarvis-claudecode)
+- [Why Jarvis Claude Code](#why-jarvis-claude-code)
 - [Use Cases](#use-cases)
 - [Features](#features)
 - [Architecture at a Glance](#architecture-at-a-glance)
@@ -34,19 +36,19 @@
 - [Contributing](#contributing)
 - [License](#license)
 
-## Why jarvis-claudecode
+## Why Jarvis Claude Code
 
-The Claude Code CLI is powerful on the desktop — but chat apps are where most real-world requests happen. `jarvis-claudecode` exposes that same CLI through the messaging channels you already use, while keeping:
+The Claude Code CLI is powerful on the desktop — but chat apps are where most real-world requests happen. Jarvis Claude Code exposes that same CLI through the messaging channels you already use, while keeping:
 
 - **One agent per context** — personal DM, work group, and public channel can each run a different agent with different tools, memory, and permissions.
 - **Real conversation memory** — ChromaDB indexes your notes, Mem0 extracts facts from conversation history.
 - **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
 - **Native and local** — no Docker, no cloud router. Services run as macOS LaunchAgents and are controlled from a tray app.
-- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. The only API cost is ~$0.02/mo of OpenAI embeddings for memory. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
+- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Memory runs locally by default (ChromaDB on-device embeddings); a small OpenAI cost (~$0.02/mo) applies only if you enable the Mem0 fact-extraction layer, and that too can be swapped for Ollama. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
 
 ## Use Cases
 
-`jarvis-claudecode` started as a personal assistant, but one router can host an arbitrary number of specialized agents — each with its own identity, tools, and chat audience. A few patterns that work well:
+Jarvis Claude Code started as a personal assistant, but one router can host an arbitrary number of specialized agents — each with its own identity, tools, and chat audience. A few patterns that work well:
 
 - **Personal productivity hub** — one agent in your Telegram DM with full memory, calendar, email, and file access. Voice a task while walking and get a reply with the output file attached.
 - **Family agents** — a dedicated agent per family member (or a shared family-group agent), each with their own `agents/<name>/CLAUDE.md` personality and scoped memory. Kids get a read-only agent, parents get a full-access one.
@@ -123,7 +125,7 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 - Python 3.11+ (for ChromaDB and Mem0 servers)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 - `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing
-- OpenAI API key (used only for embeddings and Mem0 fact extraction)
+- **Optional**: OpenAI API key — only needed if you enable Mem0 conversation fact extraction. ChromaDB uses local embeddings (`all-MiniLM-L6-v2` via onnxruntime, no key required). You can also point Mem0 at Ollama for fully local memory.
 
 ## Quick Start
 
@@ -187,9 +189,9 @@ services:
 
 ## How it Compares
 
-There are a few excellent projects in the "Claude Code as a bot backend" space. Here is how `jarvis-claudecode` positions itself against them, so you can pick the right tool for your use case:
+There are a few excellent projects in the "Claude Code as a bot backend" space. Here is how Jarvis Claude Code positions itself against them, so you can pick the right tool for your use case:
 
-| | **jarvis-claudecode** | [sbusso/claudeclaw][s] | [openclaw/openclaw][o] | [moazbuilds/claudeclaw][m] |
+| | **Jarvis Claude Code** | [sbusso/claudeclaw][s] | [openclaw/openclaw][o] | [moazbuilds/claudeclaw][m] |
 |---|---|---|---|---|
 | **Agent engine** | Claude Code CLI spawn | Claude Agent SDK (`query()`) | Pi runtime (proprietary) | Claude Code CLI spawn (Bun) |
 | **Models** | Claude only | Claude only | Multi-provider | Claude only |
@@ -206,7 +208,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 [o]: https://github.com/openclaw/openclaw
 [m]: https://github.com/moazbuilds/claudeclaw
 
-### What `jarvis-claudecode` does differently
+### What Jarvis Claude Code does differently
 
 **Pros**
 
@@ -226,7 +228,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 - **Claude-only** — if you need OpenAI/Gemini/local models as peers, OpenClaw is a better fit.
 - **Fewer channels than OpenClaw** — Telegram, WhatsApp, and Discord cover most personal use, but there's no Matrix/Signal/Slack out of the box.
 
-Use `jarvis-claudecode` if you want a personal, Claude-Code-native, config-driven router on your own Mac. Use the alternatives if you need kernel sandboxing, multi-provider model support, or 20+ channels.
+Use Jarvis Claude Code if you want a personal, Claude-Code-native, config-driven router on your own Mac. Use the alternatives if you need kernel sandboxing, multi-provider model support, or 20+ channels.
 
 ## Project Layout
 
