@@ -44,7 +44,7 @@ The Claude Code CLI is powerful on the desktop — but chat apps are where most 
 - **Real conversation memory** — ChromaDB indexes your notes, Mem0 extracts facts from conversation history.
 - **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
 - **Native and local** — no Docker, no cloud router. Services run as macOS LaunchAgents and are controlled from a tray app.
-- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Memory runs locally by default (ChromaDB on-device embeddings); a small OpenAI cost (~$0.02/mo) applies only if you enable the Mem0 fact-extraction layer, and that too can be swapped for Ollama. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
+- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Everything else is local by default: ChromaDB document memory runs on-device, Whisper transcription is local, and the router gracefully works without any external API key. A tiny OpenAI cost (~$0.02/mo) only shows up if you choose to enable the optional Mem0 conversation-memory service — and that can be swapped for Ollama. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
 
 ## Use Cases
 
@@ -125,7 +125,8 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 - Python 3.11+ (for ChromaDB and Mem0 servers)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 - `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing
-- **Optional**: OpenAI API key — only needed if you enable Mem0 conversation fact extraction. ChromaDB uses local embeddings (`all-MiniLM-L6-v2` via onnxruntime, no key required). You can also point Mem0 at Ollama for fully local memory.
+
+**No required external keys**. Document memory (ChromaDB) uses `all-MiniLM-L6-v2` via onnxruntime and runs entirely on-device. The only keys the router itself needs are your channel bot tokens (Telegram / Discord). The **conversation-memory** layer (Mem0) is optional — its shipped config uses OpenAI (`gpt-4.1-nano` + `text-embedding-3-small`, ~$0.02/mo at typical personal use), but the router gracefully degrades when Mem0 is offline, so you can skip the `com.jarvis.mem0` LaunchAgent entirely. Mem0 can also be reconfigured to run against Ollama for fully local conversation memory.
 
 ## Quick Start
 
