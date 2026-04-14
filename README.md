@@ -2,6 +2,8 @@
 
 > Multi-channel router that brings the **Claude Code CLI** to Telegram, WhatsApp, and Discord — with per-route agents, persistent memory, media processing, a web dashboard, and a native macOS tray app.
 
+![Dashboard overview](docs/images/dashboard-overview.png)
+
 <p align="left">
   <img src="https://img.shields.io/badge/runtime-Node.js%2020+-339933?logo=node.js&logoColor=white" alt="Node.js 20+" />
   <img src="https://img.shields.io/badge/language-TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
@@ -56,6 +58,10 @@ The Claude Code CLI is powerful on the desktop — but chat apps are where most 
 
 Because each route maps to an agent folder (`agents/<name>/`) and each agent declares its own tool list, MCP servers, model, and CLAUDE.md, adding a new use case is typically a 5-minute copy-and-edit of the `default` template.
 
+![Chat demos — Telegram personal, WhatsApp family group, Discord code review](docs/images/chats.png)
+
+> Left to right: a personal Telegram agent handling voice notes and calendar, a shared family WhatsApp agent managing shopping and childcare, and an on-demand code-review agent on Discord. All three use the same router — only the `agents/<name>/` folder differs.
+
 ## Features
 
 - **Channels**: Telegram, WhatsApp (via Baileys), Discord
@@ -67,6 +73,15 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 - **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard and tray
 - **Native launchd**: no Docker, no pm2 — services are managed as LaunchAgents
 - **Spawn discipline**: `--strict-mcp-config`, per-route tool filtering, readonly file access, user-scope inheritance toggle
+
+### Dashboard tour
+
+| | |
+|---|---|
+| ![Routes](docs/images/dashboard-routes.png) | ![Agents](docs/images/dashboard-agents.png) |
+| **Routes** — one row per `(channel, match) → agent` mapping. Evaluated top-down, first match wins. | **Agents** — each agent is a folder with its own `CLAUDE.md`, tool list, memory scope, and model. |
+| ![Memory graph](docs/images/dashboard-memory.png) | ![Logs](docs/images/dashboard-logs.png) |
+| **Memory** — live 3D graph over ChromaDB documents and Mem0 facts, scoped per agent. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
 
 ## Architecture at a Glance
 

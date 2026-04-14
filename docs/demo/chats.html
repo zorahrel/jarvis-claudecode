@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>jarvis-claudecode — Chat demos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;font-family:'Inter',-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
+  body{background:#08090a;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:60px 40px;gap:28px;flex-wrap:wrap}
+
+  .device{width:340px;height:640px;background:#000;border-radius:38px;padding:10px;box-shadow:0 30px 90px rgba(0,0,0,0.6),0 0 0 1px rgba(255,255,255,0.05);position:relative}
+  .screen{width:100%;height:100%;border-radius:30px;overflow:hidden;display:flex;flex-direction:column;position:relative}
+  .notch{position:absolute;top:12px;left:50%;transform:translateX(-50%);width:100px;height:24px;background:#000;border-radius:14px;z-index:10}
+
+  /* Telegram */
+  .tg .screen{background:#0e1621;color:#e4e6eb}
+  .tg .top{background:#17212b;padding:44px 14px 10px;display:flex;align-items:center;gap:10px;border-bottom:1px solid rgba(255,255,255,0.05)}
+  .tg .avatar{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#7170ff,#5e6ad2);display:flex;align-items:center;justify-content:center;font-weight:700;color:white;font-size:13px}
+  .tg .name{font-weight:500;font-size:14px}
+  .tg .status{font-size:11px;color:#5cbd6f}
+  .tg .body{flex:1;padding:12px;display:flex;flex-direction:column;gap:6px;overflow-y:hidden;background:#0e1621}
+  .tg .msg{max-width:78%;padding:7px 10px 5px;border-radius:14px;font-size:14px;line-height:1.4;position:relative}
+  .tg .msg.u{background:#2b5278;color:white;align-self:flex-end;border-bottom-right-radius:4px}
+  .tg .msg.a{background:#182533;align-self:flex-start;border-bottom-left-radius:4px}
+  .tg .msg .t{font-size:9px;opacity:0.6;text-align:right;margin-top:2px;font-family:'JetBrains Mono',monospace}
+  .tg .voice{display:flex;align-items:center;gap:8px}
+  .tg .voice .play{width:22px;height:22px;background:rgba(255,255,255,0.12);border-radius:50%;display:flex;align-items:center;justify-content:center}
+  .tg .wave{flex:1;height:16px;display:flex;gap:2px;align-items:center}
+  .tg .wave span{flex:1;background:#7fb9df;border-radius:1px;opacity:0.7}
+  .tg .input{padding:10px 14px;background:#17212b;border-top:1px solid rgba(255,255,255,0.05);display:flex;align-items:center;gap:10px}
+  .tg .input-box{flex:1;background:#242f3d;border-radius:18px;padding:8px 14px;color:#aaa;font-size:13px}
+
+  /* WhatsApp */
+  .wa .screen{background:#0b141a;color:#e9edef}
+  .wa .top{background:#202c33;padding:44px 14px 10px;display:flex;align-items:center;gap:10px}
+  .wa .avatar{width:32px;height:32px;border-radius:50%;background:#25d366;display:flex;align-items:center;justify-content:center;font-weight:700;color:white;font-size:13px}
+  .wa .name{font-weight:500;font-size:14px}
+  .wa .status{font-size:11px;color:#8696a0}
+  .wa .body{flex:1;padding:10px 8px;display:flex;flex-direction:column;gap:3px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 60 60'%3E%3Cpath fill='%230b141a' d='M0 0h60v60H0z'/%3E%3Cpath fill='%23111b21' fill-opacity='0.4' d='M15 15h2v2h-2zM32 22h2v2h-2zM45 40h2v2h-2zM9 48h2v2h-2zM52 10h2v2h-2zM20 52h2v2h-2z'/%3E%3C/svg%3E");background-color:#0b141a}
+  .wa .msg{max-width:78%;padding:6px 8px 4px;border-radius:8px;font-size:14px;line-height:1.4;position:relative;box-shadow:0 1px 0.5px rgba(0,0,0,0.13)}
+  .wa .msg.u{background:#005c4b;color:#e9edef;align-self:flex-end}
+  .wa .msg.a{background:#202c33;align-self:flex-start}
+  .wa .msg .t{font-size:9px;color:#8696a0;text-align:right;margin-top:2px;font-family:'JetBrains Mono',monospace;display:flex;justify-content:flex-end;align-items:center;gap:3px}
+  .wa .msg .t .check{color:#53bdeb}
+  .wa .msg .sender{font-size:11px;color:#7db9d0;font-weight:600;margin-bottom:2px}
+  .wa .input{padding:8px;background:#1f2c33;display:flex;gap:8px;align-items:center}
+  .wa .input-box{flex:1;background:#2a3942;border-radius:22px;padding:8px 14px;color:#8696a0;font-size:13px}
+  .wa .send-btn{width:36px;height:36px;background:#25d366;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white}
+
+  /* Discord */
+  .dc .screen{background:#313338;color:#dbdee1}
+  .dc .top{background:#2b2d31;padding:44px 14px 10px;border-bottom:1px solid rgba(0,0,0,0.2)}
+  .dc .channel{font-weight:600;font-size:14px;color:white;display:flex;align-items:center;gap:6px}
+  .dc .channel-sub{font-size:11px;color:#949ba4;margin-top:2px}
+  .dc .body{flex:1;padding:10px 14px;display:flex;flex-direction:column;gap:14px;overflow-y:hidden;background:#313338}
+  .dc .msg-group{display:flex;gap:10px}
+  .dc .avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#7170ff,#5e6ad2);display:flex;align-items:center;justify-content:center;font-weight:700;color:white;font-size:14px;flex-shrink:0}
+  .dc .avatar.user{background:#3ba55c}
+  .dc .msg-body{flex:1;min-width:0}
+  .dc .msg-head{display:flex;align-items:baseline;gap:8px;margin-bottom:3px}
+  .dc .msg-name{font-weight:600;font-size:14px;color:white}
+  .dc .msg-name.bot{color:#7289da}
+  .dc .msg-bot-tag{background:#5865f2;color:white;font-size:9px;padding:1px 4px;border-radius:3px;font-weight:600;letter-spacing:0.3px;text-transform:uppercase;margin-left:-2px}
+  .dc .msg-time{font-size:10px;color:#949ba4;font-family:'JetBrains Mono',monospace}
+  .dc .msg-text{font-size:14px;line-height:1.4;color:#dbdee1}
+  .dc .embed{margin-top:6px;border-left:3px solid #5865f2;background:#2b2d31;border-radius:4px;padding:8px 10px;font-size:12px}
+  .dc .embed-title{font-weight:600;color:white;font-size:13px;margin-bottom:4px}
+  .dc .embed-fields{display:flex;gap:14px;margin-top:6px;font-size:11px}
+  .dc .embed-field strong{color:white;display:block;margin-bottom:1px}
+  .dc .embed-field span{color:#949ba4}
+  .dc .input{padding:10px 14px;background:#383a40;margin:0 14px 14px;border-radius:8px;display:flex;align-items:center;gap:10px;color:#6d6f78;font-size:13px}
+
+  .label{position:absolute;top:-26px;left:0;right:0;text-align:center;color:#62666d;font-size:11px;font-weight:500;letter-spacing:0.3px;text-transform:uppercase}
+</style>
+</head>
+<body>
+
+<!-- TELEGRAM -->
+<div class="device tg">
+  <div class="label">Telegram · personal</div>
+  <div class="screen">
+    <div class="notch"></div>
+    <div class="top">
+      <div class="avatar">J</div>
+      <div>
+        <div class="name">Jarvis · default</div>
+        <div class="status">online</div>
+      </div>
+    </div>
+    <div class="body">
+      <div class="msg u">tomorrow 9am remind me to review the PR from yesterday<div class="t">18:42</div></div>
+      <div class="msg a">✓ set. I'll ping you at 9am with the PR link and a 3-line summary of what changed.<div class="t">18:42</div></div>
+      <div class="msg u">
+        <div class="voice">
+          <div class="play">▶</div>
+          <div class="wave">
+            <span style="height:40%"></span><span style="height:80%"></span><span style="height:55%"></span><span style="height:90%"></span><span style="height:65%"></span><span style="height:45%"></span><span style="height:75%"></span><span style="height:50%"></span><span style="height:85%"></span><span style="height:60%"></span><span style="height:30%"></span><span style="height:70%"></span><span style="height:55%"></span>
+          </div>
+          <span style="font-size:11px;opacity:0.7">0:08</span>
+        </div>
+        <div class="t">18:43</div>
+      </div>
+      <div class="msg a">📝 transcript: "add the groceries to the family list"<div class="t">18:43</div></div>
+      <div class="msg a">done. added to family shopping list (7 items total).<div class="t">18:43</div></div>
+      <div class="msg u">what's on my calendar for friday?<div class="t">18:44</div></div>
+      <div class="msg a">Friday · 3 events:<br>• 10:00 — 1:1 with Marco<br>• 14:30 — design review<br>• 19:00 — dinner w/ Sofia<div class="t">18:44</div></div>
+    </div>
+    <div class="input">
+      <div class="input-box">Message</div>
+      <span style="color:#7fb9df">🎤</span>
+    </div>
+  </div>
+</div>
+
+<!-- WHATSAPP -->
+<div class="device wa">
+  <div class="label">WhatsApp · family group</div>
+  <div class="screen">
+    <div class="notch"></div>
+    <div class="top">
+      <div class="avatar">♥</div>
+      <div>
+        <div class="name">Family</div>
+        <div class="status">4 members · Jarvis + 3</div>
+      </div>
+    </div>
+    <div class="body">
+      <div class="msg u">
+        <div class="sender">Sofia</div>
+        we're out of milk, coffee, and diapers
+        <div class="t">18:30 <span class="check">✓✓</span></div>
+      </div>
+      <div class="msg a">
+        <div class="sender" style="color:#a9d5ff">Jarvis</div>
+        added to shopping list ✓<br>• milk<br>• coffee<br>• diapers<br><br>shall I order the diapers online?
+        <div class="t">18:30</div>
+      </div>
+      <div class="msg u">
+        <div class="sender">Sofia</div>
+        yes please, same brand as last time
+        <div class="t">18:31 <span class="check">✓✓</span></div>
+      </div>
+      <div class="msg a">
+        <div class="sender" style="color:#a9d5ff">Jarvis</div>
+        ordered. Pampers size 4 · 2 packs · €24.90 · delivery Thursday
+        <div class="t">18:31</div>
+      </div>
+      <div class="msg u">
+        <div class="sender">Luca</div>
+        pickup kids at 17 today or 18?
+        <div class="t">18:35 <span class="check">✓✓</span></div>
+      </div>
+      <div class="msg a">
+        <div class="sender" style="color:#a9d5ff">Jarvis</div>
+        17:00 — Sofia's calendar shows yoga 18–19
+        <div class="t">18:35</div>
+      </div>
+    </div>
+    <div class="input">
+      <div class="input-box">Message</div>
+      <div class="send-btn">🎤</div>
+    </div>
+  </div>
+</div>
+
+<!-- DISCORD -->
+<div class="device dc">
+  <div class="label">Discord · code review</div>
+  <div class="screen">
+    <div class="notch"></div>
+    <div class="top">
+      <div class="channel"># reviews</div>
+      <div class="channel-sub">on-demand PR reviewer · agent: code-review</div>
+    </div>
+    <div class="body">
+      <div class="msg-group">
+        <div class="avatar user">M</div>
+        <div class="msg-body">
+          <div class="msg-head">
+            <span class="msg-name" style="color:#3ba55c">marco</span>
+            <span class="msg-time">18:40</span>
+          </div>
+          <div class="msg-text">/review https://github.com/acme/api/pull/142</div>
+        </div>
+      </div>
+
+      <div class="msg-group">
+        <div class="avatar">J</div>
+        <div class="msg-body">
+          <div class="msg-head">
+            <span class="msg-name bot">Jarvis</span>
+            <span class="msg-bot-tag">bot</span>
+            <span class="msg-time">18:41</span>
+          </div>
+          <div class="msg-text">Reviewing PR #142 — "Add rate limiting middleware"…</div>
+          <div class="embed">
+            <div class="embed-title">✓ Review complete · 7 comments · request changes</div>
+            <div style="color:#b5bac1;margin-top:4px">Middleware logic is solid, but the Redis client isn't being shared across requests. Under load this will open one connection per request. Also missing tests for the 429 path.</div>
+            <div class="embed-fields">
+              <div class="embed-field"><strong>Files</strong><span>4 changed</span></div>
+              <div class="embed-field"><strong>Risk</strong><span style="color:#faa61a">medium</span></div>
+              <div class="embed-field"><strong>Tests</strong><span style="color:#ed4245">missing</span></div>
+              <div class="embed-field"><strong>Approve</strong><span style="color:#ed4245">no</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg-group">
+        <div class="avatar user">M</div>
+        <div class="msg-body">
+          <div class="msg-head">
+            <span class="msg-name" style="color:#3ba55c">marco</span>
+            <span class="msg-time">18:42</span>
+          </div>
+          <div class="msg-text">ok fix it</div>
+        </div>
+      </div>
+
+      <div class="msg-group">
+        <div class="avatar">J</div>
+        <div class="msg-body">
+          <div class="msg-head">
+            <span class="msg-name bot">Jarvis</span>
+            <span class="msg-bot-tag">bot</span>
+            <span class="msg-time">18:42</span>
+          </div>
+          <div class="msg-text">pushing fix branch `fix/rate-limit-redis-pool`… done. Opened PR #143 with shared client + 429 tests. Over to you.</div>
+        </div>
+      </div>
+    </div>
+    <div class="input">/review or @Jarvis &lt;question&gt;</div>
+  </div>
+</div>
+
+</body>
+</html>
