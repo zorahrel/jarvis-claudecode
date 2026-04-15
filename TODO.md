@@ -2,16 +2,15 @@
 
 ## Done
 - [x] ChromaDB server (:3342) — doc RAG
-- [x] Mem0 server (:3343) — conversation memory
+- [x] OMEGA server (:3343) — conversation memory
 - [x] Dashboard Memory section (search, docs, memories, stats, 3D force graph)
 - [x] Voice/images/files on all channels (Telegram, WhatsApp, Discord)
 - [x] Quoted messages context
-- [x] Native LaunchAgents (router, chroma, mem0)
+- [x] Native LaunchAgents (router, chroma, omega)
 - [x] macOS tray app (SwiftUI popover, SF Symbols, health checks)
 - [x] Vision via Claude content blocks
 - [x] Per-route configurable MCP
 - [x] Visible/editable capabilities per route
-- [x] Mem0 stale Qdrant lock auto-cleanup on startup
 - [x] Dashboard Services section (live health checks)
 - [x] CLI session tracking via hooks
 - [x] Health endpoint: `GET /api/services`

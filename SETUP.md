@@ -8,10 +8,10 @@
 
 ## Quick Start
 ```bash
-# Start core services via launchctl (Router, ChromaDB, Mem0)
+# Start core services via launchctl (Router, ChromaDB, OMEGA)
 launchctl load ~/Library/LaunchAgents/com.jarvis.router.plist
 launchctl load ~/Library/LaunchAgents/com.jarvis.chroma.plist
-launchctl load ~/Library/LaunchAgents/com.jarvis.mem0.plist
+launchctl load ~/Library/LaunchAgents/com.jarvis.omega.plist
 
 # Tray app (manages start/stop/restart of services)
 ~/.claude/jarvis/tray-app/.build/release/JarvisTray &
@@ -32,7 +32,7 @@ Core (always present, hardcoded):
 |---------|------|-------------|--------|
 | Router | 3340/3341 | com.jarvis.router | `curl localhost:3340/api/stats` |
 | ChromaDB | 3342 | com.jarvis.chroma | `curl localhost:3342/health` |
-| Mem0 | 3343 | com.jarvis.mem0 | `curl localhost:3343/health` |
+| OMEGA | 3343 | com.jarvis.omega | `curl localhost:3343/health` |
 
 Extra services: add a `services:` section in `router/config.yaml` (see `config.example.yaml`).
 They appear in the dashboard and are managed by the tray if they provide `launchd:`.
@@ -55,21 +55,22 @@ tail -30 ~/.claude/jarvis/logs/router.log
 launchctl kickstart -k gui/$(id -u)/com.jarvis.router
 ```
 
-### ChromaDB/Mem0 down
+### ChromaDB/OMEGA down
 ```bash
 curl localhost:3342/health
 curl localhost:3343/health
 # Restart:
-launchctl kickstart -k gui/$(id -u)/com.jarvis.mem0
+launchctl kickstart -k gui/$(id -u)/com.jarvis.omega
 launchctl kickstart -k gui/$(id -u)/com.jarvis.chroma
 ```
 
-### Mem0 Qdrant lock error
-`mem0-server.py` auto-clears stale locks at startup. If it persists:
+### OMEGA DB locked
+OMEGA uses SQLite; concurrent writers can occasionally leave a stray lock.
+Stop the service and let it restart cleanly:
 ```bash
-launchctl stop com.jarvis.mem0
-rm ~/.claude/jarvis/mem0-data/.lock
-launchctl start com.jarvis.mem0
+launchctl stop com.jarvis.omega
+rm -f ~/.omega/omega.db-journal
+launchctl start com.jarvis.omega
 ```
 
 ### WhatsApp disconnected (Bad MAC)
@@ -119,9 +120,9 @@ Edit `CLAUDE.md` agents → process auto-reads on next spawn
 Edit dashboard → `npm run build` inside `router/dashboard/` and restart the router
 
 ## OpenAI Key
-Used for: ChromaDB embeddings, Mem0 embeddings/LLM.
+Used for: nothing mandatory. Both ChromaDB and OMEGA use local ONNX embeddings.
 Set via env in `.env`: `OPENAI_API_KEY=sk-...`.
-Models: `text-embedding-3-small` (embeddings), `gpt-4.1-nano` (Mem0 fact extraction).
+Models (local): `all-MiniLM-L6-v2` (ChromaDB), `bge-small-en-v1.5` (OMEGA).
 
 ## Whisper
 - Binary: `/opt/homebrew/bin/whisper-cli`

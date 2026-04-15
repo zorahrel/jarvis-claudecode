@@ -16,7 +16,7 @@
 
 Jarvis Claude Code is a personal AI gateway. Messages arriving on any chat platform are matched against per-route agents — each with its own identity (`CLAUDE.md`), tool scope, memory, and model. A persistent Claude Code process runs per session key, so conversations retain context across messages.
 
-**Keywords**: Claude Code, Claude Code CLI, Telegram bot, WhatsApp bot, Discord bot, MCP, ChromaDB, Mem0, multi-channel AI assistant, personal AI agent, macOS menu bar.
+**Keywords**: Claude Code, Claude Code CLI, Telegram bot, WhatsApp bot, Discord bot, MCP, ChromaDB, OMEGA, multi-channel AI assistant, personal AI agent, macOS menu bar.
 
 ---
 
@@ -41,10 +41,10 @@ Jarvis Claude Code is a personal AI gateway. Messages arriving on any chat platf
 The Claude Code CLI is powerful on the desktop — but chat apps are where most real-world requests happen. Jarvis Claude Code exposes that same CLI through the messaging channels you already use, while keeping:
 
 - **One agent per context** — personal DM, work group, and public channel can each run a different agent with different tools, memory, and permissions.
-- **Real conversation memory** — ChromaDB indexes your notes, Mem0 extracts facts from conversation history.
+- **Real conversation memory** — ChromaDB indexes your notes, OMEGA extracts and indexes facts from conversation history.
 - **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
 - **Native and local** — no Docker, no cloud router. Services run as macOS LaunchAgents and are controlled from a tray app.
-- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Everything else is local by default: ChromaDB document memory runs on-device, Whisper transcription is local, and the router gracefully works without any external API key. A tiny OpenAI cost (~$0.02/mo) only shows up if you choose to enable the optional Mem0 conversation-memory service — and that can be swapped for Ollama. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
+- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Everything else is local: ChromaDB document memory runs on-device, OMEGA conversation memory runs on-device, Whisper transcription runs on-device. The router needs no external API key at all. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
 
 ## Use Cases
 
@@ -69,7 +69,7 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 - **Channels**: Telegram, WhatsApp (via Baileys), Discord
 - **Per-route agents**: each agent lives in `agents/<name>/` with its own `agent.yaml` + `CLAUDE.md`
 - **Media pipeline**: voice → Whisper, images → Claude vision, PDFs/docs → text, quoted replies as context
-- **Memory**: ChromaDB (document RAG) + Mem0 (conversation fact extraction)
+- **Memory**: ChromaDB (document RAG) + OMEGA (conversation fact extraction)
 - **Dashboard**: React SPA at `http://localhost:3340` — routes, agents, tools, memory, costs, logs
 - **macOS tray app**: SwiftUI menu bar app to start/stop/restart services
 - **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard and tray
@@ -85,7 +85,7 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 | ![Tools](docs/images/dashboard-tools.png) | ![Analytics](docs/images/dashboard-analytics.png) |
 | **Tools** — per-capability view across vision, voice, docs, email accounts, calendar, memory, system, and MCP. | **Analytics** — token usage and cost over time, broken down by agent / channel / model. |
 | ![Memory](docs/images/dashboard-memory.png) | ![Logs](docs/images/dashboard-logs.png) |
-| **Memory** — ChromaDB docs and Mem0 conversation facts scoped per agent, browsable as grid / list / graph. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
+| **Memory** — ChromaDB docs and OMEGA conversation facts scoped per agent, browsable as grid / list / graph. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
 | ![Sessions](docs/images/dashboard-sessions.png) | |
 | **Sessions** — active and past Claude Code CLI sessions, one per `(channel, from)` key, killable from the UI. | |
 
@@ -105,7 +105,7 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
        │                            │                │
        ▼                            ▼                ▼
 ┌───────────────┐        ┌───────────────┐   ┌───────────────┐
-│ Claude Code   │        │  ChromaDB     │   │   Mem0        │
+│ Claude Code   │        │  ChromaDB     │   │   OMEGA       │
 │ CLI processes │        │  (:3342)      │   │   (:3343)     │
 │ (1 per key)   │        │  Doc RAG      │   │   Conv. facts │
 └───────────────┘        └───────────────┘   └───────────────┘
@@ -122,11 +122,11 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 - macOS (tested on 15+) — the tray app is macOS-only; the router itself is cross-platform
 - Node.js 20+ (via [nvm](https://github.com/nvm-sh/nvm) recommended) and `tsx`
-- Python 3.11+ (for ChromaDB and Mem0 servers)
+- Python 3.11+ (for the ChromaDB and OMEGA servers)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 - `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing
 
-**No required external keys**. Document memory (ChromaDB) uses `all-MiniLM-L6-v2` via onnxruntime and runs entirely on-device. The only keys the router itself needs are your channel bot tokens (Telegram / Discord). The **conversation-memory** layer (Mem0) is optional — its shipped config uses OpenAI (`gpt-4.1-nano` + `text-embedding-3-small`, ~$0.02/mo at typical personal use), but the router gracefully degrades when Mem0 is offline, so you can skip the `com.jarvis.mem0` LaunchAgent entirely. Mem0 can also be reconfigured to run against Ollama for fully local conversation memory.
+**No required external keys**. Both memory layers run entirely on-device: ChromaDB indexes Markdown documents with `all-MiniLM-L6-v2` ONNX, OMEGA stores conversation memory in SQLite + `sqlite-vec` + FTS5 with `bge-small-en-v1.5` ONNX. The only keys the router needs are your channel bot tokens (Telegram, Discord).
 
 ## Quick Start
 
@@ -198,7 +198,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 | **Models** | Claude only | Claude only | Multi-provider | Claude only |
 | **Channels** | Telegram, WhatsApp, Discord | Telegram, WhatsApp, Slack | 23+ channels | Telegram, Discord |
 | **Runtime** | Node.js + tsx | Node.js | Node.js (pnpm) | Bun |
-| **Memory** | ChromaDB + Mem0 | Filesystem + grep | SQLite + FTS5 + sqlite-vec | Claude sessions + CLAUDE.md |
+| **Memory** | ChromaDB + OMEGA | Filesystem + grep | SQLite + FTS5 + sqlite-vec | Claude sessions + CLAUDE.md |
 | **Isolation** | `--strict-mcp-config` + per-route tool deny list | `@anthropic-ai/sandbox-runtime` (kernel) | Docker containers | `--dangerously-skip-permissions` |
 | **Config** | YAML | SQLite + `.env` | Typed config (zod) + wizard | JSON settings |
 | **Dashboard** | React SPA + macOS tray | — (TUI on roadmap) | Control UI + macOS menu bar | Local web UI |
@@ -217,7 +217,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 - **Claude Code CLI, not Agent SDK** — keeps the full ecosystem: skills, hooks, slash commands, sub-agents, MCP, settings layering. Agent SDK wrappers re-implement a subset of that.
 - **Two-layer identity that survives `--resume`** — `~/.claude/CLAUDE.md` (user global) + `<workspace>/CLAUDE.md` (agent). No fragile `--append-system-prompt` hacks.
 - **Per-route scoping with real enforcement** — `--strict-mcp-config` + `--disallowed-tools` + `fileAccess: readonly` gate actions at spawn time, per chat context.
-- **Hybrid memory out of the box** — document RAG (ChromaDB) and conversation fact extraction (Mem0) as first-class services, auto-managed by launchd.
+- **Hybrid memory out of the box** — document RAG (ChromaDB) and conversation fact extraction (OMEGA) as first-class services, both fully local, auto-managed by launchd.
 - **End-to-end media pipeline** — voice → Whisper, images → Claude vision content blocks, PDFs → text, quoted replies kept as context, file outputs auto-sent back as attachments.
 - **Native macOS integration** — LaunchAgents for every service, SwiftUI tray app for start/stop/health, no Docker daemon required.
 
@@ -238,7 +238,7 @@ Use Jarvis Claude Code if you want a personal, Claude-Code-native, config-driven
 ├── router/               # TypeScript router (entry point, channels, dashboard API)
 │   ├── src/              # Router source
 │   ├── dashboard/        # React SPA (Vite)
-│   ├── scripts/          # ChromaDB + Mem0 Python servers
+│   ├── scripts/          # ChromaDB + OMEGA Python servers
 │   └── config.example.yaml
 ├── agents.example/       # Agent template — copy to agents/<name>/
 ├── tray-app/             # macOS SwiftUI menu bar app
