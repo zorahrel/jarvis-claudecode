@@ -249,7 +249,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     // Persist exchange for session continuity across restarts
     recordExchange(key, fullText, response.text);
 
-    // Save conversation to Mem0 using tool-derived scope
+    // Save conversation to memory using tool-derived scope
     if (memoryScope) {
       addMemory(`User: ${msg.text}\nAssistant: ${response.text}`, memoryScope).catch(() => {});
     }
