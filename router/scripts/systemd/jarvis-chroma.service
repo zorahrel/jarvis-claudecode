@@ -1,0 +1,15 @@
+[Unit]
+Description=Jarvis ChromaDB document-memory server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.claude/jarvis/router
+ExecStart=__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python -u scripts/chroma-server.py
+Restart=always
+RestartSec=2
+StandardOutput=append:__HOME__/.claude/jarvis/logs/chroma.log
+StandardError=append:__HOME__/.claude/jarvis/logs/chroma.err.log
+
+[Install]
+WantedBy=default.target

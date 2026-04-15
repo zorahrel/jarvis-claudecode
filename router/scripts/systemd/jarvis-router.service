@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis router (multi-channel + dashboard)
+After=network.target jarvis-chroma.service jarvis-omega.service
+Wants=jarvis-chroma.service jarvis-omega.service
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.claude/jarvis/router
+Environment=PATH=__NODE_DIR__:/usr/local/bin:/usr/bin:/bin
+ExecStart=__NODE_BIN__ __HOME__/.claude/jarvis/router/node_modules/.bin/tsx src/index.ts
+Restart=always
+RestartSec=3
+StandardOutput=append:__HOME__/.claude/jarvis/logs/router.log
+StandardError=append:__HOME__/.claude/jarvis/logs/router.err.log
+
+[Install]
+WantedBy=default.target
