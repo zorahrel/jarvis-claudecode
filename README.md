@@ -161,14 +161,59 @@ For persistent router startup (launchd + tray-app control), see
 
 ## Configuration
 
-Two files you own:
+Two files and one folder are all you touch:
 
-| File | Purpose |
+| Where | What |
 |------|---------|
-| `router/.env` | Secrets (Telegram + Discord bot tokens). Never commit. |
-| `router/config.yaml` | Routes, channels, rate limits, extra services, cron jobs. |
+| `router/.env` | Bot tokens (`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`). Never commit. |
+| `router/config.yaml` | Channels, routes, rate limits, crons, extra services. |
+| `agents/<name>/` | One folder per agent — `agent.yaml` (model, tools, MCP) + `CLAUDE.md` (identity). |
 
-Agents live in `~/.claude/jarvis/agents/<name>/` and are referenced from `config.yaml` routes via `use: <name>`. See `agents.example/default/` for a template.
+### Anatomy of `config.yaml`
+
+The full annotated version is [`router/config.example.yaml`](router/config.example.yaml). Here is the shape:
+
+```yaml
+jarvis:
+  allowedCallers: ["+391234567890"]     # phones that can @jarvis in WA groups
+
+channels:
+  telegram: { enabled: true, botToken: $TELEGRAM_BOT_TOKEN }
+  whatsapp: { enabled: true, authDir: ./wa-auth }
+  discord:  { enabled: true, botToken: $DISCORD_BOT_TOKEN }
+
+routes:                                  # top-down, first match wins
+  - match: { channel: telegram, from: 123456789 }           # your TG user ID
+    use: default                                            # → agents/default/
+  - match: { channel: whatsapp, group: "120363...@g.us" }
+    use: family
+  - match: { channel: discord, guild: "987654321098765432" }
+    use: code-review
+  - match: { channel: "*" }                                 # catch-all
+    action: ignore
+
+crons:
+  - name: morning-brief
+    schedule: "0 8 * * *"
+    timezone: Europe/Rome
+    workspace: ./agents/default
+    prompt: "Summarize today's calendar and top 3 unread emails."
+    delivery: { channel: telegram, target: "123456789" }
+```
+
+Each agent folder declares **what** the agent is (model, tools, memory scope, MCP servers) — routes only say **who** talks to **which** agent on **which** channel.
+
+### Customize Jarvis without reading all the docs
+
+The repo ships a Claude Code skill, **`jarvis-config`**, that edits `config.yaml`, scaffolds agents, and wires channels for you. `./setup.sh` symlinks it into `~/.claude/skills/` — then in any Claude Code session:
+
+```
+/jarvis-config add a Telegram route for my phone to agent "family"
+/jarvis-config create a new agent "code-review" with readonly access and brave-search
+/jarvis-config schedule a daily 9am digest to my Telegram
+```
+
+Skill source: [`skills/jarvis-config/SKILL.md`](skills/jarvis-config/SKILL.md).
 
 ### Extra services
 

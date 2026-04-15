@@ -181,7 +181,24 @@ else
   info "edit agents/default/CLAUDE.md and agent.yaml to customize"
 fi
 
-# --- 6. LaunchAgents (macOS, auto-start services) ---------------------------
+# --- 6. Install the jarvis-config skill -------------------------------------
+step "Installing jarvis-config skill"
+SKILL_SRC="$REPO_ROOT/skills/jarvis-config"
+SKILL_DST="$HOME/.claude/skills/jarvis-config"
+if [ -d "$SKILL_SRC" ]; then
+  mkdir -p "$HOME/.claude/skills"
+  if [ -L "$SKILL_DST" ] || [ -d "$SKILL_DST" ]; then
+    skip "~/.claude/skills/jarvis-config already present"
+  else
+    ln -s "$SKILL_SRC" "$SKILL_DST"
+    ok "linked skill → ~/.claude/skills/jarvis-config"
+    info "use from any Claude Code session with /jarvis-config"
+  fi
+else
+  warn "skill source missing at $SKILL_SRC"
+fi
+
+# --- 7. LaunchAgents (macOS, auto-start services) ---------------------------
 AGENTS_INSTALLED=0
 if [ "$(uname)" = "Darwin" ] && [ "$NO_AGENTS" = "0" ]; then
   step "Installing LaunchAgents (memory services will auto-start)"
