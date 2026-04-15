@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis OMEGA conversation-memory server
+After=network.target
+
+[Service]
+Type=simple
+Environment=OMEGA_HTTP_PORT=3343
+WorkingDirectory=__HOME__/.claude/jarvis/router/scripts
+ExecStart=__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python __HOME__/.claude/jarvis/router/scripts/omega-server.py
+Restart=always
+RestartSec=2
+StandardOutput=append:__HOME__/.claude/jarvis/logs/omega.log
+StandardError=append:__HOME__/.claude/jarvis/logs/omega.err.log
+
+[Install]
+WantedBy=default.target

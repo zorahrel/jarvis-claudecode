@@ -121,11 +121,11 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requirements
 
-- macOS (tested on 15+) — the tray app is macOS-only; the router itself is cross-platform
-- Node.js 20+ (via [nvm](https://github.com/nvm-sh/nvm) recommended) and `tsx`
+- **OS**: macOS 13+, Linux (systemd), or Windows 10/11. The SwiftUI tray app is macOS-only; the router, dashboard, and memory services are fully cross-platform.
+- Node.js 20+ and `tsx`
 - Python 3.11+ (for the ChromaDB and OMEGA servers)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
-- `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing
+- `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing (optional — media pipeline features that need them are auto-disabled if missing)
 
 **No required external keys**. Both memory layers run entirely on-device: ChromaDB indexes Markdown documents with `all-MiniLM-L6-v2` ONNX, OMEGA stores conversation memory in SQLite + `sqlite-vec` + FTS5 with `bge-small-en-v1.5` ONNX. The only keys the router needs are your channel bot tokens (Telegram, Discord).
 
@@ -137,27 +137,41 @@ git clone https://github.com/zorahrel/jarvis-claudecode.git ~/.claude/jarvis
 cd ~/.claude/jarvis
 
 # 2. One-shot setup. Installs deps, builds the dashboard, downloads the ONNX
-#    model, scaffolds .env / config.yaml / agents/default, and on macOS loads
-#    the ChromaDB + OMEGA LaunchAgents so the memory services auto-start at
-#    login. Idempotent — safe to re-run.
+#    model, scaffolds .env / config.yaml / agents/default, and registers
+#    the three services (ChromaDB, OMEGA, router) with the platform's service
+#    manager so they auto-start at login. Idempotent — safe to re-run.
+#
+#    macOS / Linux:
 ./setup.sh
+#    Windows (PowerShell):
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 
-# 3. Fill in tokens and routes, then customize your agent
-#    - router/.env         → TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN
-#    - router/config.yaml  → phone / Telegram ID / Discord ID / routes
-#    - agents/default/     → CLAUDE.md + agent.yaml
+# 3. Fill in tokens and routes
+#    router/.env         → TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN
+#    router/config.yaml  → phone / Telegram ID / Discord ID / routes
+#    agents/default/     → CLAUDE.md + agent.yaml
 
-# 4. Start the router (memory services already running via launchd)
-cd router && npm start
+# 4. Restart the router so it picks up your tokens (services already run)
+#    macOS:   launchctl kickstart -k gui/$(id -u)/com.jarvis.router
+#    Linux:   systemctl --user restart jarvis-router
+#    Windows: Stop-ScheduledTask -TaskName JarvisRouter; Start-ScheduledTask -TaskName JarvisRouter
 ```
 
-Dashboard: <http://localhost:3340>. Memory service logs: `~/.claude/jarvis/logs/{chroma,omega}.log`.
+Dashboard: <http://localhost:3340>. Logs: `~/.claude/jarvis/logs/`.
 
-> On non-macOS platforms, or if you pass `./setup.sh --no-agents`, start the
-> memory services manually — setup prints the exact commands.
+### Platform coverage
 
-For persistent router startup (launchd + tray-app control), see
-[`SETUP.md`](SETUP.md) and [`router/scripts/README.md`](router/scripts/README.md).
+| Platform | Service manager | Units installed |
+|----------|-----------------|-----------------|
+| macOS    | `launchd` (LaunchAgents) | `com.jarvis.chroma`, `com.jarvis.omega`, `com.jarvis.router` |
+| Linux    | `systemd --user` | `jarvis-chroma.service`, `jarvis-omega.service`, `jarvis-router.service` |
+| Windows  | Task Scheduler (hidden, at-logon) | `JarvisChroma`, `JarvisOmega`, `JarvisRouter` |
+
+Pass `--no-agents` (bash) or `-NoAgents` (PowerShell) to skip the service
+registration step if you want to run the stack manually.
+
+> On Linux, run `loginctl enable-linger $USER` once so the services keep
+> running after you log out. The SwiftUI tray app only builds on macOS.
 
 ## Configuration
 

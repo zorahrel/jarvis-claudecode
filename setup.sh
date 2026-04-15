@@ -198,32 +198,87 @@ else
   warn "skill source missing at $SKILL_SRC"
 fi
 
-# --- 7. LaunchAgents (macOS, auto-start services) ---------------------------
-AGENTS_INSTALLED=0
-if [ "$(uname)" = "Darwin" ] && [ "$NO_AGENTS" = "0" ]; then
-  step "Installing LaunchAgents (memory services will auto-start)"
-  LA_DIR="$HOME/Library/LaunchAgents"
-  LOGS_DIR="$HOME/.claude/jarvis/logs"
-  mkdir -p "$LA_DIR" "$LOGS_DIR"
+# --- 7. System services (auto-start router + memory servers) ---------------
+#
+# Three services registered per platform so the user never has to keep a
+# terminal open:
+#   chroma (:3342)  ·  omega (:3343)  ·  router (:3340/:3341)
+#
+# macOS → LaunchAgents (launchctl)     Linux → systemd user units
+# Windows setup is handled by setup.ps1.
+#
+SERVICES_INSTALLED=0
+LOGS_DIR="$HOME/.claude/jarvis/logs"
+mkdir -p "$LOGS_DIR"
 
-  for svc in chroma omega; do
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+NODE_DIR="$(dirname "$NODE_BIN" 2>/dev/null || true)"
+
+PLATFORM="$(uname -s)"
+
+render_template() {
+  # $1 = source, $2 = destination
+  sed -e "s|__HOME__|$HOME|g" \
+      -e "s|__NODE_BIN__|$NODE_BIN|g" \
+      -e "s|__NODE_DIR__|$NODE_DIR|g" \
+      "$1" > "$2"
+}
+
+if [ "$NO_AGENTS" = "1" ]; then
+  step "System services"
+  skip "auto-start disabled (--no-agents)"
+elif [ "$PLATFORM" = "Darwin" ]; then
+  step "Installing LaunchAgents (chroma + omega + router)"
+  LA_DIR="$HOME/Library/LaunchAgents"
+  mkdir -p "$LA_DIR"
+
+  for svc in chroma omega router; do
     template="$SCRIPTS/com.jarvis.${svc}.plist.example"
     target="$LA_DIR/com.jarvis.${svc}.plist"
     if [ ! -f "$template" ]; then
       warn "missing template: $template"; continue
     fi
-    sed "s|__HOME__|$HOME|g" "$template" > "$target"
-    # Reload: unload-if-loaded then load, so re-runs pick up template changes.
+    render_template "$template" "$target"
     launchctl unload "$target" 2>/dev/null || true
     if launchctl load "$target" 2>/dev/null; then
       ok "com.jarvis.${svc} loaded"
     else
-      warn "com.jarvis.${svc} failed to load (already running? check: launchctl list | grep jarvis)"
+      warn "com.jarvis.${svc} failed to load (check: launchctl list | grep jarvis)"
     fi
   done
-  AGENTS_INSTALLED=1
-elif [ "$(uname)" = "Darwin" ]; then
-  skip "LaunchAgents (--no-agents set)"
+  SERVICES_INSTALLED=1
+
+elif [ "$PLATFORM" = "Linux" ]; then
+  step "Installing systemd user units (chroma + omega + router)"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found — skipping (install services manually)"
+  else
+    UNIT_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$UNIT_DIR"
+    for svc in chroma omega router; do
+      template="$SCRIPTS/systemd/jarvis-${svc}.service"
+      target="$UNIT_DIR/jarvis-${svc}.service"
+      if [ ! -f "$template" ]; then
+        warn "missing template: $template"; continue
+      fi
+      render_template "$template" "$target"
+      ok "wrote $target"
+    done
+    systemctl --user daemon-reload
+    for svc in chroma omega router; do
+      if [ -f "$UNIT_DIR/jarvis-${svc}.service" ]; then
+        systemctl --user enable --now "jarvis-${svc}.service" 2>&1 \
+          | sed 's/^/    /' || true
+        ok "jarvis-${svc} enabled + started"
+      fi
+    done
+    info "tip: run 'loginctl enable-linger $USER' to keep services alive after logout"
+    SERVICES_INSTALLED=1
+  fi
+
+else
+  step "System services"
+  warn "platform '$PLATFORM' not handled — start services manually"
 fi
 
 # --- Done --------------------------------------------------------------------
@@ -237,19 +292,32 @@ ${BOLD}Next:${RESET}
   3. Customize your first agent:  ${DIM}agents/default/${RESET}
 EOF
 
-if [ "$AGENTS_INSTALLED" = "1" ]; then
+if [ "$SERVICES_INSTALLED" = "1" ]; then
+  if [ "$PLATFORM" = "Darwin" ]; then
+    MANAGE_CMD="launchctl list | grep jarvis"
+    RESTART_CMD="launchctl kickstart -k gui/\$(id -u)/com.jarvis.router"
+  else
+    MANAGE_CMD="systemctl --user status 'jarvis-*'"
+    RESTART_CMD="systemctl --user restart jarvis-router"
+  fi
   cat <<EOF
 
-${BOLD}Memory services are running in the background:${RESET}
-  ${DIM}ChromaDB (docs)        :3342${RESET}
-  ${DIM}OMEGA    (conversation):3343${RESET}
-  Logs: ${DIM}~/.claude/jarvis/logs/{chroma,omega}.log${RESET}
-  Manage: ${BLUE}launchctl list | grep jarvis${RESET}
+${BOLD}All services are running and auto-start at login:${RESET}
+  ${DIM}ChromaDB (docs)          :3342${RESET}
+  ${DIM}OMEGA    (conversation)  :3343${RESET}
+  ${DIM}Router   (bots + web UI) :3340 / :3341${RESET}
 
-${BOLD}Start the router:${RESET}
-  ${BLUE}cd router && npm start${RESET}   ${DIM}# or install the router LaunchAgent — see SETUP.md${RESET}
+  Logs:     ${DIM}~/.claude/jarvis/logs/${RESET}
+  Manage:   ${BLUE}${MANAGE_CMD}${RESET}
+  Restart:  ${BLUE}${RESTART_CMD}${RESET}
 
 Dashboard: ${BLUE}http://localhost:3340${RESET}
+
+${BOLD}${YELLOW}Important:${RESET} the router is live now, but it won't connect to any
+channel until you fill in tokens and restart it:
+  1. Edit ${DIM}router/.env${RESET} with TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN
+  2. Edit ${DIM}router/config.yaml${RESET} with your chat IDs
+  3. ${BLUE}${RESTART_CMD}${RESET}
 EOF
 else
   cat <<EOF
