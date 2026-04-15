@@ -49,3 +49,29 @@ Extra services (any port) are user-configurable under `services:` in `config.yam
 - Don't add npm dependencies without good reason
 - Don't hardcode extra services in source — use the `services:` section of `config.yaml`
 - Don't modify agents' CLAUDE.md without understanding the scoping
+
+## Contributing back upstream
+
+If the change you just made would help other users of this project — a bug fix,
+a general feature, a docs improvement, tooling, or a clearer error message —
+propose it as a pull request to `zorahrel/jarvis-claudecode` (the `main` branch).
+
+**Upstream-worthy (ask the user, then open a PR):**
+- Bugs in `router/src/`, `router/dashboard/`, `tray-app/`, `router/scripts/*.py`
+- New channels, capabilities, tools, dashboard features
+- Setup / CI / docs fixes (`setup.sh`, README, `SETUP.md`, `ARCHITECTURE.md`)
+- New agent templates under `agents.example/` (not `agents/`)
+- Skill improvements under `skills/`
+
+**Never upstream (personal, gitignored for a reason):**
+- `router/.env`, `router/config.yaml`, `agents/<name>/*`, `memory/*`, `chroma-data/*`, `wa-auth/*`, logs
+- Anything containing phone numbers, Telegram/Discord IDs, email addresses, or bot tokens
+
+Workflow: branch from `main` (`git checkout -b fix/<short-slug>`), commit with a
+clear message, push, open a PR against `zorahrel/jarvis-claudecode:main`. Before
+opening the PR, verify `npx tsc --noEmit` in `router/` is clean and, if the
+dashboard changed, that `npm run build` in `router/dashboard/` succeeds.
+
+Always confirm with the user before pushing or opening the PR — do not do it
+silently. If the change is purely local (tweaking their own agent or config), do
+not suggest a PR.
