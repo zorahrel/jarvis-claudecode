@@ -10,11 +10,18 @@
 set -euo pipefail
 
 QUIET=0
+NO_AGENTS=0
 for arg in "$@"; do
   case "$arg" in
-    --quiet|-q) QUIET=1 ;;
+    --quiet|-q)    QUIET=1 ;;
+    --no-agents)   NO_AGENTS=1 ;;
     --help|-h)
-      echo "Usage: $0 [--quiet]"
+      cat <<USAGE
+Usage: $0 [--no-agents] [--quiet]
+
+  --no-agents   Skip LaunchAgent install (macOS only — services must be started manually)
+  --quiet       Fewer prompts
+USAGE
       exit 0
       ;;
   esac
@@ -128,6 +135,14 @@ else
   skip "omega-memory already installed"
 fi
 
+if ! python -c "import chromadb, dotenv" 2>/dev/null; then
+  info "installing chromadb + python-dotenv (≈30s)"
+  pip install --quiet chromadb python-dotenv
+  ok "chromadb installed"
+else
+  skip "chromadb already installed"
+fi
+
 MODEL_CACHE="$HOME/.cache/omega/models/bge-small-en-v1.5-onnx"
 if [ ! -d "$MODEL_CACHE" ] || [ -z "$(ls -A "$MODEL_CACHE" 2>/dev/null)" ]; then
   info "downloading ONNX embedding model (≈90 MB, one-time)"
@@ -166,6 +181,34 @@ else
   info "edit agents/default/CLAUDE.md and agent.yaml to customize"
 fi
 
+# --- 6. LaunchAgents (macOS, auto-start services) ---------------------------
+AGENTS_INSTALLED=0
+if [ "$(uname)" = "Darwin" ] && [ "$NO_AGENTS" = "0" ]; then
+  step "Installing LaunchAgents (memory services will auto-start)"
+  LA_DIR="$HOME/Library/LaunchAgents"
+  LOGS_DIR="$HOME/.claude/jarvis/logs"
+  mkdir -p "$LA_DIR" "$LOGS_DIR"
+
+  for svc in chroma omega; do
+    template="$SCRIPTS/com.jarvis.${svc}.plist.example"
+    target="$LA_DIR/com.jarvis.${svc}.plist"
+    if [ ! -f "$template" ]; then
+      warn "missing template: $template"; continue
+    fi
+    sed "s|__HOME__|$HOME|g" "$template" > "$target"
+    # Reload: unload-if-loaded then load, so re-runs pick up template changes.
+    launchctl unload "$target" 2>/dev/null || true
+    if launchctl load "$target" 2>/dev/null; then
+      ok "com.jarvis.${svc} loaded"
+    else
+      warn "com.jarvis.${svc} failed to load (already running? check: launchctl list | grep jarvis)"
+    fi
+  done
+  AGENTS_INSTALLED=1
+elif [ "$(uname)" = "Darwin" ]; then
+  skip "LaunchAgents (--no-agents set)"
+fi
+
 # --- Done --------------------------------------------------------------------
 cat <<EOF
 
@@ -175,14 +218,30 @@ ${BOLD}Next:${RESET}
   1. Fill in bot tokens:          ${DIM}router/.env${RESET}
   2. Review routes & channels:    ${DIM}router/config.yaml${RESET}
   3. Customize your first agent:  ${DIM}agents/default/${RESET}
-
-${BOLD}Start everything:${RESET}
-  ${BLUE}cd router${RESET}
-  ${BLUE}./scripts/omega-env/bin/python scripts/chroma-server.py &${RESET}   ${DIM}# :3342 doc RAG${RESET}
-  ${BLUE}./scripts/omega-env/bin/python scripts/omega-server.py &${RESET}    ${DIM}# :3343 conv memory${RESET}
-  ${BLUE}npm start${RESET}                                                   ${DIM}# router + dashboard on :3340${RESET}
-
-For persistent startup on macOS, see ${DIM}SETUP.md${RESET} and
-${DIM}router/scripts/README.md${RESET} (LaunchAgent plists).
-
 EOF
+
+if [ "$AGENTS_INSTALLED" = "1" ]; then
+  cat <<EOF
+
+${BOLD}Memory services are running in the background:${RESET}
+  ${DIM}ChromaDB (docs)        :3342${RESET}
+  ${DIM}OMEGA    (conversation):3343${RESET}
+  Logs: ${DIM}~/.claude/jarvis/logs/{chroma,omega}.log${RESET}
+  Manage: ${BLUE}launchctl list | grep jarvis${RESET}
+
+${BOLD}Start the router:${RESET}
+  ${BLUE}cd router && npm start${RESET}   ${DIM}# or install the router LaunchAgent — see SETUP.md${RESET}
+
+Dashboard: ${BLUE}http://localhost:3340${RESET}
+EOF
+else
+  cat <<EOF
+
+${BOLD}Start the stack manually:${RESET}
+  ${BLUE}cd router${RESET}
+  ${BLUE}./scripts/omega-env/bin/python scripts/chroma-server.py &${RESET}   ${DIM}# :3342${RESET}
+  ${BLUE}./scripts/omega-env/bin/python scripts/omega-server.py &${RESET}    ${DIM}# :3343${RESET}
+  ${BLUE}npm start${RESET}                                                   ${DIM}# :3340${RESET}
+EOF
+fi
+echo

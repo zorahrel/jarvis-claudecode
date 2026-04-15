@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example LaunchAgent for ChromaDB HTTP server (document RAG, local).
+
+  Install:
+    sed "s|__HOME__|$HOME|g" com.jarvis.chroma.plist.example \
+      > ~/Library/LaunchAgents/com.jarvis.chroma.plist
+    launchctl load ~/Library/LaunchAgents/com.jarvis.chroma.plist
+
+  Uses the same venv as OMEGA (router/scripts/omega-env) — setup.sh installs
+  chromadb there alongside omega-memory.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.chroma</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python3</string>
+    <string>-u</string>
+    <string>__HOME__/.claude/jarvis/router/scripts/chroma-server.py</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.claude/jarvis/logs/chroma.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.claude/jarvis/logs/chroma.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.claude/jarvis/router</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
