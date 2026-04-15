@@ -9,7 +9,7 @@
 <p align="left">
   <img src="https://img.shields.io/badge/runtime-Node.js%2020+-339933?logo=node.js&logoColor=white" alt="Node.js 20+" />
   <img src="https://img.shields.io/badge/language-TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white" alt="macOS" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-2E8B57" alt="macOS | Linux | Windows" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
   <img src="https://img.shields.io/badge/status-personal%20project-orange" alt="Personal project" />
 </p>
@@ -43,7 +43,7 @@ The Claude Code CLI is powerful on the desktop — but chat apps are where most 
 - **One agent per context** — personal DM, work group, and public channel can each run a different agent with different tools, memory, and permissions.
 - **Real conversation memory** — ChromaDB indexes your notes, OMEGA extracts and indexes facts from conversation history.
 - **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
-- **Native and local** — no Docker, no cloud router. Services run as macOS LaunchAgents and are controlled from a tray app.
+- **Native and local** — no Docker, no cloud router. Services run under the platform's native service manager (`launchd` on macOS, `systemd --user` on Linux, Task Scheduler on Windows). On macOS they're also controllable from a SwiftUI tray app.
 - **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Everything else is local: ChromaDB document memory runs on-device, OMEGA conversation memory runs on-device, Whisper transcription runs on-device. The router needs no external API key at all. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
 
 ## Use Cases
@@ -73,7 +73,7 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 - **Dashboard**: React SPA at `http://localhost:3340` — routes, agents, tools, memory, costs, logs
 - **macOS tray app**: SwiftUI menu bar app to start/stop/restart services
 - **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard and tray
-- **Native launchd**: no Docker, no pm2 — services are managed as LaunchAgents
+- **Native service managers**: no Docker, no pm2 — services run under `launchd` (macOS), `systemd --user` (Linux), or Task Scheduler (Windows), registered automatically by `setup.sh` / `setup.ps1`
 - **Spawn discipline**: `--strict-mcp-config`, per-route tool filtering, readonly file access, user-scope inheritance toggle
 - **No external API keys required**: ChromaDB and OMEGA run locally with ONNX embeddings; Claude Code CLI is OAuth-authenticated against your subscription
 
@@ -278,13 +278,13 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 - **Per-route scoping with real enforcement** — `--strict-mcp-config` + `--disallowed-tools` + `fileAccess: readonly` gate actions at spawn time, per chat context.
 - **Hybrid memory out of the box** — document RAG (ChromaDB) and conversation fact extraction (OMEGA) as first-class services, both fully local, auto-managed by launchd.
 - **End-to-end media pipeline** — voice → Whisper, images → Claude vision content blocks, PDFs → text, quoted replies kept as context, file outputs auto-sent back as attachments.
-- **Native macOS integration** — LaunchAgents for every service, SwiftUI tray app for start/stop/health, no Docker daemon required.
+- **Native service-manager integration** — `launchd` / `systemd --user` / Task Scheduler units are registered automatically by the setup script, with restart-on-failure. On macOS there's also a SwiftUI tray app for start/stop/health. No Docker daemon required.
 
 **Cons (today)**
 
 - **No process-level sandbox** — isolation is at the CLI-argument level, not kernel-level like sbusso's sandbox-runtime or OpenClaw's Docker. A hardened sandbox mode is on the roadmap.
 - **No built-in cost tracking** — `--output-format stream-json` usage logging is planned, not implemented.
-- **macOS-first** — the router itself is cross-platform, but the tray app and LaunchAgent integration assume macOS.
+- **Tray app is macOS-only** — the core router, dashboard, and autostart work on macOS, Linux, and Windows; the SwiftUI menu-bar app is macOS-exclusive.
 - **Claude-only** — if you need OpenAI/Gemini/local models as peers, OpenClaw is a better fit.
 - **Fewer channels than OpenClaw** — Telegram, WhatsApp, and Discord cover most personal use, but there's no Matrix/Signal/Slack out of the box.
 
