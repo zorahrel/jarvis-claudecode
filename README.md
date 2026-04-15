@@ -134,47 +134,28 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ```bash
 # 1. Clone
 git clone https://github.com/zorahrel/jarvis-claudecode.git ~/.claude/jarvis
-cd ~/.claude/jarvis/router
+cd ~/.claude/jarvis
 
-# 2. Install TypeScript router deps
-npm install
+# 2. One-shot setup — installs deps, builds dashboard, downloads the ONNX model,
+#    scaffolds your .env, config.yaml, and first agent. Idempotent.
+./setup.sh
 
-# 3. Set up the OMEGA conversation-memory server (one-time)
-cd scripts
-python3 -m venv omega-env
-source omega-env/bin/activate
-pip install 'omega-memory[server]'
-omega setup --download-model --client venv      # downloads the 90 MB ONNX model
-cd ..
+# 3. Fill in your bot tokens and routes
+#    - router/.env         → TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN
+#    - router/config.yaml  → phone / Telegram ID / Discord ID / routes
+#    - agents/default/     → CLAUDE.md + agent.yaml for your first agent
 
-# 4. Build the dashboard SPA
-cd dashboard && npm install && npm run build && cd ..
-
-# 5. Copy example configs
-cp .env.example .env
-cp config.example.yaml config.yaml
-
-# 6. Fill in:
-#    - .env         → TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN (no external API key required)
-#    - config.yaml  → your phone number / Telegram ID / Discord ID / routes
-
-# 7. Create your first agent from the template
-mkdir -p ../agents
-cp -r ../agents.example/default ../agents/default
-#    edit ../agents/default/CLAUDE.md and agent.yaml
-
-# 8. Start the memory services (separate terminals or backgrounded)
-source scripts/omega-env/bin/activate
-python3 scripts/chroma-server.py &              # :3342 — document RAG
-python3 scripts/omega-server.py &               # :3343 — conversation memory
-
-# 9. Run the router
-npm start
+# 4. Start the stack (memory services + router)
+cd router
+./scripts/omega-env/bin/python scripts/chroma-server.py &    # :3342 doc RAG
+./scripts/omega-env/bin/python scripts/omega-server.py &     # :3343 conv memory
+npm start                                                    # :3340 router + dashboard
 ```
 
 Dashboard: <http://localhost:3340>.
 
-To run everything persistently on macOS, register the LaunchAgents described in
+To run everything persistently on macOS (memory services + router managed by launchd,
+controllable from the tray app), follow the LaunchAgent setup in
 [`SETUP.md`](SETUP.md) and [`router/scripts/README.md`](router/scripts/README.md).
 
 ## Configuration
