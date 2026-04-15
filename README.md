@@ -136,26 +136,27 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 git clone https://github.com/zorahrel/jarvis-claudecode.git ~/.claude/jarvis
 cd ~/.claude/jarvis
 
-# 2. One-shot setup — installs deps, builds dashboard, downloads the ONNX model,
-#    scaffolds your .env, config.yaml, and first agent. Idempotent.
+# 2. One-shot setup. Installs deps, builds the dashboard, downloads the ONNX
+#    model, scaffolds .env / config.yaml / agents/default, and on macOS loads
+#    the ChromaDB + OMEGA LaunchAgents so the memory services auto-start at
+#    login. Idempotent — safe to re-run.
 ./setup.sh
 
-# 3. Fill in your bot tokens and routes
+# 3. Fill in tokens and routes, then customize your agent
 #    - router/.env         → TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN
 #    - router/config.yaml  → phone / Telegram ID / Discord ID / routes
-#    - agents/default/     → CLAUDE.md + agent.yaml for your first agent
+#    - agents/default/     → CLAUDE.md + agent.yaml
 
-# 4. Start the stack (memory services + router)
-cd router
-./scripts/omega-env/bin/python scripts/chroma-server.py &    # :3342 doc RAG
-./scripts/omega-env/bin/python scripts/omega-server.py &     # :3343 conv memory
-npm start                                                    # :3340 router + dashboard
+# 4. Start the router (memory services already running via launchd)
+cd router && npm start
 ```
 
-Dashboard: <http://localhost:3340>.
+Dashboard: <http://localhost:3340>. Memory service logs: `~/.claude/jarvis/logs/{chroma,omega}.log`.
 
-To run everything persistently on macOS (memory services + router managed by launchd,
-controllable from the tray app), follow the LaunchAgent setup in
+> On non-macOS platforms, or if you pass `./setup.sh --no-agents`, start the
+> memory services manually — setup prints the exact commands.
+
+For persistent router startup (launchd + tray-app control), see
 [`SETUP.md`](SETUP.md) and [`router/scripts/README.md`](router/scripts/README.md).
 
 ## Configuration
