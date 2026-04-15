@@ -1,9 +1,13 @@
 /**
- * Memory service - bridges to ChromaDB (docs) and Mem0 (conversations) Python servers.
+ * Memory service - bridges to the two local Python HTTP servers:
+ *   - ChromaDB on :3342 — document memory over memory/*.md
+ *   - OMEGA    on :3343 — conversation memory (SQLite + sqlite-vec + ONNX)
+ *
+ * Both run entirely on-device. No external APIs.
  */
 
 const CHROMA_URL = "http://localhost:3342";
-const MEM0_URL = "http://localhost:3343";
+const MEMORY_URL = process.env.MEMORY_URL || "http://localhost:3343";
 
 export interface DocResult {
   id: string;
@@ -61,22 +65,22 @@ export async function searchDocsDetailed(query: string, scope?: string, limit = 
   return { results: data?.results ?? [], timedOut };
 }
 
-/** Search Mem0 memories */
+/** Search memories */
 export async function searchMemories(query: string, userId = "business", limit = 5): Promise<MemoryResult[]> {
   const r = await searchMemoriesDetailed(query, userId, limit);
   return r.results;
 }
 
-/** Search Mem0 with timeout signal */
+/** Search with timeout signal */
 export async function searchMemoriesDetailed(query: string, userId = "business", limit = 5): Promise<{ results: MemoryResult[]; timedOut: boolean }> {
   const params = new URLSearchParams({ q: query, user_id: userId, limit: String(limit) });
-  const { data, timedOut } = await fetchJsonTimed<{ results: MemoryResult[] }>(`${MEM0_URL}/search?${params}`);
+  const { data, timedOut } = await fetchJsonTimed<{ results: MemoryResult[] }>(`${MEMORY_URL}/search?${params}`);
   return { results: data?.results ?? [], timedOut };
 }
 
-/** Add a memory to Mem0 */
+/** Add a memory */
 export async function addMemory(text: string, userId = "business", metadata?: Record<string, string>): Promise<void> {
-  await fetchJson(`${MEM0_URL}/add`, {
+  await fetchJson(`${MEMORY_URL}/add`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, user_id: userId, metadata }),
@@ -87,7 +91,7 @@ export async function addMemory(text: string, userId = "business", metadata?: Re
 export async function getMemoryStats(): Promise<{ docs: any; memories: any }> {
   const [docs, memories] = await Promise.all([
     fetchJson(`${CHROMA_URL}/stats`),
-    fetchJson(`${MEM0_URL}/stats`),
+    fetchJson(`${MEMORY_URL}/stats`),
   ]);
   return { docs, memories };
 }
@@ -99,16 +103,16 @@ export async function getDocuments(scope?: string): Promise<any[]> {
   return data?.documents ?? [];
 }
 
-/** Get all memories from Mem0 */
+/** Get all memories */
 export async function getMemories(userId?: string): Promise<MemoryResult[]> {
   const params = userId ? `?user_id=${userId}` : "";
-  const data = await fetchJson(`${MEM0_URL}/memories${params}`);
+  const data = await fetchJson(`${MEMORY_URL}/memories${params}`);
   return data?.memories ?? [];
 }
 
-/** Delete a memory from Mem0 */
+/** Delete a memory */
 export async function deleteMemory(id: string): Promise<boolean> {
-  const data = await fetchJson(`${MEM0_URL}/memory/${id}`, { method: "DELETE" });
+  const data = await fetchJson(`${MEMORY_URL}/memory/${id}`, { method: "DELETE" });
   return data?.ok ?? false;
 }
 
@@ -118,7 +122,7 @@ export async function reindexDocs(): Promise<any> {
 }
 
 /**
- * Map session key to Mem0 user_id / scope.
+ * Map session key to a / scope.
  * Reads scope patterns from config.yaml jarvis.memoryScopePatterns.
  * Each entry maps a scope name to an array of substrings to match in the session key.
  * Example config:

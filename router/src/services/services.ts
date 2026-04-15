@@ -42,14 +42,14 @@ export function getCoreServices(): ServiceDef[] {
       },
     },
     {
-      name: "Mem0",
+      name: "OMEGA",
       port: 3343,
       healthUrl: "http://localhost:3343/health",
       launchd: {
-        label: "com.jarvis.mem0",
-        args: ["/opt/homebrew/bin/python3", "-u", "scripts/mem0-server.py"],
+        label: "com.jarvis.omega",
+        args: ["scripts/omega-env/bin/python3", "-u", "scripts/omega-server.py"],
         cwd: ROUTER_DIR,
-        logName: "mem0",
+        logName: "omega",
       },
     },
   ];

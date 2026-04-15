@@ -225,8 +225,8 @@ export interface CostEntry {
 }
 
 export interface MemoryStats {
-  chromadb: Record<string, unknown>
-  mem0: Record<string, unknown>
+  docs: Record<string, unknown>
+  memories: Record<string, unknown>
 }
 
 export interface MemorySearchResult {

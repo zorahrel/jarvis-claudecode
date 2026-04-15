@@ -131,7 +131,7 @@ users:
 # Extra services shown in the dashboard service ribbon and optionally
 # managed by the tray app (start/stop/restart via launchd).
 #
-# Core services (Router, ChromaDB, Mem0) are always present — don't list them here.
+# Core services (Router, ChromaDB, OMEGA) are always present — don't list them here.
 #
 # services:
 #   - name: MyService

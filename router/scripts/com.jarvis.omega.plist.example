@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example LaunchAgent for OMEGA HTTP server (conversational memory, local).
+
+  Install:
+    cp com.jarvis.omega.plist.example ~/Library/LaunchAgents/com.jarvis.omega.plist
+    launchctl load ~/Library/LaunchAgents/com.jarvis.omega.plist
+
+  Customize the Python path below to match the venv under router/scripts/omega-env/.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.omega</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python3</string>
+    <string>__HOME__/.claude/jarvis/router/scripts/omega-server.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OMEGA_HTTP_PORT</key>
+    <string>3343</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.claude/jarvis/logs/omega.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.claude/jarvis/logs/omega.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.claude/jarvis/router/scripts</string>
+</dict>
+</plist>

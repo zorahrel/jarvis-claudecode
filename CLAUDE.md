@@ -2,7 +2,7 @@
 
 ## What is this
 Multi-channel AI assistant router. Connects Telegram, WhatsApp, Discord to Claude Code CLI
-with per-route agents, capabilities, memory (ChromaDB + Mem0), media processing, and a web dashboard.
+with per-route agents, capabilities, memory (ChromaDB + OMEGA), media processing, and a web dashboard.
 
 ## Key files
 - `ARCHITECTURE.md` — full system architecture, ports, directory structure
@@ -40,7 +40,7 @@ with per-route agents, capabilities, memory (ChromaDB + Mem0), media processing,
 - Dashboard is a React SPA in `router/dashboard/` (Vite) — run `npm run build` there before restarting router
 
 ## Port map
-3340: Router HTTP | 3341: Router HTTPS | 3342: ChromaDB | 3343: Mem0
+3340: Router HTTP | 3341: Router HTTPS | 3342: ChromaDB | 3343: OMEGA
 
 Extra services (any port) are user-configurable under `services:` in `config.yaml`.
 

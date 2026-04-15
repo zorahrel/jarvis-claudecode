@@ -170,7 +170,7 @@ class ServiceManager: ObservableObject {
         switch name {
         case "Router": return "network"
         case "ChromaDB": return "internaldrive"
-        case "Mem0": return "brain"
+        case "OMEGA": return "brain"
         default: return "server.rack"
         }
     }

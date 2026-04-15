@@ -13,11 +13,11 @@ Each channel has routes with per-agent capabilities and scoping.
 
 ## Core Services (always present)
 
-| Servizio | Porta | Processo | Path |
-|----------|-------|----------|------|
+| Service | Port | Process | Path |
+|---------|------|---------|------|
 | Router | 3340/3341 | com.jarvis.router (launchd) | `~/.claude/jarvis/router/` |
 | ChromaDB | 3342 | com.jarvis.chroma (launchd) | `scripts/chroma-server.py` |
-| Mem0 | 3343 | com.jarvis.mem0 (launchd) | `scripts/mem0-server.py` |
+| OMEGA | 3343 | com.jarvis.omega (launchd) | `scripts/omega-server.py` |
 | Tray App | — | JarvisTray | `~/.claude/jarvis/tray-app/` |
 
 Extra services can be added via a `services:` section in `router/config.yaml`
@@ -35,7 +35,7 @@ managed by the tray app if they provide a `launchd:` config.
 │   │   │   ├── claude.ts     # Persistent process manager
 │   │   │   ├── handler.ts    # Message handler + media compose
 │   │   │   ├── media.ts      # Whisper, vision, file extract
-│   │   │   ├── memory.ts     # ChromaDB + Mem0 client
+│   │   │   ├── memory.ts     # ChromaDB + OMEGA client
 │   │   │   ├── router.ts     # Route matching
 │   │   │   ├── services.ts   # Service registry + launchd plist builder
 │   │   │   ├── config-loader.ts
@@ -47,7 +47,7 @@ managed by the tray app if they provide a `launchd:` config.
 │   │       └── message.ts    # IncomingMessage, Media
 │   ├── scripts/
 │   │   ├── chroma-server.py  # ChromaDB HTTP API
-│   │   └── mem0-server.py    # Mem0 HTTP API
+│   │   └── omega-server.py   # OMEGA HTTP API
 │   ├── config.yaml           # Route config (gitignored)
 │   ├── certs/                # Self-signed TLS
 │   └── wa-auth/              # WhatsApp session
@@ -57,8 +57,7 @@ managed by the tray app if they provide a `launchd:` config.
 ├── media/                    # Temp media files (gitignored)
 ├── logs/                     # Service logs (gitignored)
 ├── chroma-data/              # ChromaDB persistence (gitignored)
-├── mem0-data/                # Qdrant vectors (gitignored)
-└── mem0-history.db           # Mem0 SQLite (gitignored)
+└── ~/.omega/                  # OMEGA SQLite store (user home, gitignored)
 ```
 
 ## Routing
@@ -91,10 +90,10 @@ Connector receives media
 ```
 
 ## Memory System
-- **ChromaDB** (localhost:3342): indexes `.md` files scoped by agent
-- **Mem0** (localhost:3343): extracts facts from conversations, auto-saved after each reply
-- **Embeddings**: OpenAI text-embedding-3-small
-- **LLM for facts**: OpenAI gpt-4.1-nano
+- **ChromaDB** (localhost:3342): indexes `.md` files scoped by agent, `all-MiniLM-L6-v2` ONNX locally
+- **OMEGA** (localhost:3343): conversation memory in SQLite + `sqlite-vec` + FTS5 + `bge-small-en-v1.5` ONNX locally
+- **Embeddings**: fully on-device, no external API
+- **Ingestion**: auto-saved after each reply, scope-tagged by session key
 
 ## Process Model
 - 1 persistent Claude CLI process per session key
@@ -107,7 +106,7 @@ Connector receives media
 Core (always present) in `~/Library/LaunchAgents/`:
 - `com.jarvis.router` — KeepAlive
 - `com.jarvis.chroma` — KeepAlive
-- `com.jarvis.mem0` — KeepAlive
+- `com.jarvis.omega` — KeepAlive
 - `com.jarvis.tray` — RunAtLoad
 
 User services from `config.yaml` generate their own `com.<user>.<name>.plist`.
@@ -125,6 +124,6 @@ User services from `config.yaml` generate their own `com.<user>.<name>.plist`.
   - `<workspace>/CLAUDE.md` → agent-specific identity (auto-loaded from cwd)
 - MCP servers live in `~/.claude/settings.json` — single source of truth between the interactive CLI and Jarvis
 - MCP only on routes that require it (per-route filter via `mcp:<name>` tool entries, or all via `fullAccess: true`)
-- No Docker — fully native (embedded Qdrant, SQLite)
-- OpenAI for embeddings only (cheap), Claude for everything else
-- Vision via Claude content blocks (not GPT-4 Vision)
+- No Docker — fully native (SQLite + sqlite-vec, ONNX embeddings)
+- No external API keys required; Claude Code CLI uses OAuth subscription
+- Vision via Claude content blocks
