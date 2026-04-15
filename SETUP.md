@@ -128,3 +128,16 @@ Models (local): `all-MiniLM-L6-v2` (ChromaDB), `bge-small-en-v1.5` (OMEGA).
 - Binary: `/opt/homebrew/bin/whisper-cli`
 - Model: download `ggml-large-v3.bin` and point the router at the file
 - Used for: voice messages on all channels
+
+## Channel caveats
+
+- **Telegram / Discord** — both officially support bots. Create a bot via
+  @BotFather / the Discord developer portal, keep the token in `router/.env`.
+- **WhatsApp (Baileys)** — Baileys is an **unofficial** WhatsApp Web client
+  (reverse-engineered protocol). Meta's Terms of Service don't allow automated
+  clients on consumer accounts, and connecting your main number carries a
+  non-zero risk of a ban. For anything beyond personal experimentation, or any
+  client-facing / commercial use, migrate to the official [WhatsApp Business
+  Platform / Cloud API](https://developers.facebook.com/docs/whatsapp). Also
+  remember that bots on any channel should disclose that they are AI powered
+  by Claude (see `README.md` → Responsible use).

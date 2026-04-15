@@ -324,6 +324,16 @@ See [`TODO.md`](TODO.md) for the full list. Highlights on deck:
 - Cron runtime: schedule Claude jobs from `config.yaml` with channel delivery
 - Dashboard auth for exposure outside localhost/LAN
 
+## Responsible use
+
+Jarvis Claude Code orchestrates the **Claude Code CLI**, which is a commercial product of Anthropic. Before running it:
+
+- **Bring your own Claude subscription.** Jarvis spawns `claude` processes authenticated against whatever subscription (Max / Pro / Team) or API credentials are configured in your local Claude Code install. Usage is subject to Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) and the terms of your plan — including the "reasonable personal/professional use" expectations of consumer plans. If you plan to expose an agent to many external users, consider switching that agent to API-backed billing rather than sharing a personal subscription.
+- **Disclose that your bot is AI.** If a Jarvis route serves anyone other than yourself — family, clients, a public Discord, a support channel — the agent should tell users, at least once per conversation, that they are talking to an AI assistant powered by Claude. Impersonating a human, or hiding the AI-in-the-loop, violates Anthropic's Usage Policy and most platform ToS. See `agents.example/default/CLAUDE.md` for the default rule.
+- **Follow each channel's platform ToS.** Telegram and Discord officially support bots. WhatsApp does not: the Baileys integration is an unofficial WhatsApp Web client, and using it on your main number carries a non-zero risk of a Meta ban. For production or client-facing WhatsApp use, migrate to the official WhatsApp Business API.
+
+None of this is legal advice — it's the same operational discipline the maintainer applies. When in doubt, read the upstream policy and ask a lawyer, not your chatbot.
+
 ## Contributing
 
 This is a personal project, but ideas and patches are welcome. Please open an issue first for anything non-trivial so we can align on scope. Before submitting a PR:
