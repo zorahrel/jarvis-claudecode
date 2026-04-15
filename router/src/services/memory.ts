@@ -65,15 +65,16 @@ export async function searchDocsDetailed(query: string, scope?: string, limit = 
   return { results: data?.results ?? [], timedOut };
 }
 
-/** Search memories */
-export async function searchMemories(query: string, userId = "business", limit = 5): Promise<MemoryResult[]> {
+/** Search memories. When userId is omitted, search across all scopes. */
+export async function searchMemories(query: string, userId?: string, limit = 5): Promise<MemoryResult[]> {
   const r = await searchMemoriesDetailed(query, userId, limit);
   return r.results;
 }
 
-/** Search with timeout signal */
-export async function searchMemoriesDetailed(query: string, userId = "business", limit = 5): Promise<{ results: MemoryResult[]; timedOut: boolean }> {
-  const params = new URLSearchParams({ q: query, user_id: userId, limit: String(limit) });
+/** Search with timeout signal. When userId is omitted, search across all scopes. */
+export async function searchMemoriesDetailed(query: string, userId?: string, limit = 5): Promise<{ results: MemoryResult[]; timedOut: boolean }> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (userId) params.set("user_id", userId);
   const { data, timedOut } = await fetchJsonTimed<{ results: MemoryResult[] }>(`${MEMORY_URL}/search?${params}`);
   return { results: data?.results ?? [], timedOut };
 }

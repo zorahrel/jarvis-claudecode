@@ -293,8 +293,20 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   }, [memories, memsUserFilter, memsSort])
 
   const sortedGridFiles = useMemo(() => {
+    // When a search is active, restrict the grid to docs that matched the query.
+    // Match against the file path or basename so we surface exactly the search hits.
+    const docHits = searchResults.docs ?? []
+    if (docHits.length > 0) {
+      const hitPaths = new Set(docHits.map((d) => d.metadata?.path).filter(Boolean) as string[])
+      const hitFiles = new Set(docHits.map((d) => d.metadata?.file).filter(Boolean) as string[])
+      const filtered = filteredFiles.filter((f) => hitPaths.has(f.path) || hitFiles.has(f.name))
+      // Order grid by search score (highest first) when available.
+      const scoreFor = (path: string, name: string) =>
+        docHits.find((d) => d.metadata?.path === path || d.metadata?.file === name)?.score ?? 0
+      return filtered.sort((a, b) => scoreFor(b.path, b.name) - scoreFor(a.path, a.name))
+    }
     return [...filteredFiles].sort((a, b) => (b.mtime || 0) - (a.mtime || 0))
-  }, [filteredFiles])
+  }, [filteredFiles, searchResults])
 
   // ── API calls ──
   const loadStats = useCallback(async () => {

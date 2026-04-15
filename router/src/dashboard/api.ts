@@ -854,7 +854,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     try {
       const [docRes, memRes] = await Promise.all([
         searchDocsDetailed(q, scope, limit),
-        searchMemoriesDetailed(q, scope || "business", limit),
+        searchMemoriesDetailed(q, scope, limit),
       ]);
       const partial: string[] = [];
       if (docRes.timedOut) partial.push("docs");
