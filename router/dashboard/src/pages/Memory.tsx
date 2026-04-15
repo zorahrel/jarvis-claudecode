@@ -1614,16 +1614,18 @@ function KebabMenu({
         onClick={() => setOpen(o => !o)}
         title="More actions"
         style={{
-          width: 32,
+          width: 30,
           height: 30,
           padding: 0,
-          fontSize: 16,
-          lineHeight: 1,
           background: 'transparent',
           color: 'var(--text-3)',
           border: '1px solid var(--border-strong)',
           borderRadius: 'var(--radius)',
           cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
         }}
       ><MoreHorizontal size={14} /></button>
       {open && (

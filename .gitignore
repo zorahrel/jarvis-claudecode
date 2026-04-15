@@ -67,3 +67,6 @@ docs/migration/mem0-export-*.json
 docs/migration/omega-export-*.json
 docs/migration/chroma-full-*.json
 mem0-history.db
+
+# Local promo/marketing material
+promo/
