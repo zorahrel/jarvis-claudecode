@@ -29,8 +29,8 @@ Jarvis Claude Code is a personal AI gateway. Messages arriving on any chat platf
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
-- [Project Layout](#project-layout)
 - [How it Compares](#how-it-compares)
+- [Project Layout](#project-layout)
 - [Documentation](#documentation)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
@@ -75,6 +75,7 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 - **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard and tray
 - **Native launchd**: no Docker, no pm2 — services are managed as LaunchAgents
 - **Spawn discipline**: `--strict-mcp-config`, per-route tool filtering, readonly file access, user-scope inheritance toggle
+- **No external API keys required**: ChromaDB and OMEGA run locally with ONNX embeddings; Claude Code CLI is OAuth-authenticated against your subscription
 
 ### Dashboard tour
 
@@ -132,32 +133,49 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ```bash
 # 1. Clone
-git clone https://github.com/<you>/jarvis.git ~/.claude/jarvis
+git clone https://github.com/zorahrel/jarvis-claudecode.git ~/.claude/jarvis
 cd ~/.claude/jarvis/router
 
-# 2. Install deps
+# 2. Install TypeScript router deps
 npm install
 
-# 3. Copy example configs
+# 3. Set up the OMEGA conversation-memory server (one-time)
+cd scripts
+python3 -m venv omega-env
+source omega-env/bin/activate
+pip install 'omega-memory[server]'
+omega setup --download-model --client venv      # downloads the 90 MB ONNX model
+cd ..
+
+# 4. Build the dashboard SPA
+cd dashboard && npm install && npm run build && cd ..
+
+# 5. Copy example configs
 cp .env.example .env
 cp config.example.yaml config.yaml
 
-# 4. Fill in:
-#    - .env:          bot tokens, OpenAI key
-#    - config.yaml:   your phone number / Telegram ID / Discord ID / routes
+# 6. Fill in:
+#    - .env         → TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN (no external API key required)
+#    - config.yaml  → your phone number / Telegram ID / Discord ID / routes
 
-# 5. Create your first agent from the template
+# 7. Create your first agent from the template
 mkdir -p ../agents
 cp -r ../agents.example/default ../agents/default
 #    edit ../agents/default/CLAUDE.md and agent.yaml
 
-# 6. Run
+# 8. Start the memory services (separate terminals or backgrounded)
+source scripts/omega-env/bin/activate
+python3 scripts/chroma-server.py &              # :3342 — document RAG
+python3 scripts/omega-server.py &               # :3343 — conversation memory
+
+# 9. Run the router
 npm start
 ```
 
 Dashboard: <http://localhost:3340>.
 
-To auto-start on login, register the LaunchAgent plists described in [`SETUP.md`](SETUP.md).
+To run everything persistently on macOS, register the LaunchAgents described in
+[`SETUP.md`](SETUP.md) and [`router/scripts/README.md`](router/scripts/README.md).
 
 ## Configuration
 
@@ -165,7 +183,7 @@ Two files you own:
 
 | File | Purpose |
 |------|---------|
-| `router/.env` | Secrets (bot tokens, OpenAI key). Never commit. |
+| `router/.env` | Secrets (Telegram + Discord bot tokens). Never commit. |
 | `router/config.yaml` | Routes, channels, rate limits, extra services, cron jobs. |
 
 Agents live in `~/.claude/jarvis/agents/<name>/` and are referenced from `config.yaml` routes via `use: <name>`. See `agents.example/default/` for a template.
@@ -271,7 +289,8 @@ This is a personal project, but ideas and patches are welcome. Please open an is
 
 - Run `npx tsc --noEmit` inside `router/` — there must be no new TypeScript errors
 - Rebuild the dashboard if you touched it: `cd router/dashboard && npm run build`
-- Keep code and docs in English
+- Keep code, commit messages, and docs in English — see `CLAUDE.md` for project conventions
+- Never commit `router/.env`, `router/config.yaml`, `agents/*`, `memory/*`, `mem0-export-*.json`, or anything under `docs/migration/mem0-export-*.json` — they contain personal data and are gitignored by default
 
 ## License
 
