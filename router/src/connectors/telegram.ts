@@ -8,6 +8,7 @@ import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
 import { processMedia, downloadMedia, saveMedia, cleanupMedia } from "../services/media";
+import { loadSlashCommands, rewriteIncomingSlash, type SlashCommand } from "../services/slash-commands";
 import { basename } from "path";
 
 const log = logger.child({ module: "telegram" });
@@ -15,6 +16,7 @@ const log = logger.child({ module: "telegram" });
 export class TelegramConnector implements Connector {
   readonly channel = "telegram" as const;
   private bot: Bot | null = null;
+  private slashCatalog: SlashCommand[] = [];
 
   constructor(private config: Config) {}
 
@@ -33,8 +35,12 @@ export class TelegramConnector implements Connector {
       // Start pipeline timings
       const timings: MessageTimings = { received: Date.now() };
 
-      // Extract text
+      // Extract text — rewrite TG-safe slash names (e.g. /caveman_compress) back
+      // to the CLI form (/caveman-compress) so Claude Code recognizes them.
       let text = m.text ?? m.caption ?? "";
+      if (text && this.slashCatalog.length > 0) {
+        text = rewriteIncomingSlash(text, this.slashCatalog);
+      }
 
       // Cache contact/group names for dashboard
       if (ctx.from) {
@@ -218,6 +224,28 @@ export class TelegramConnector implements Connector {
     this.bot.start({
       onStart: () => log.info("Telegram bot started"),
     });
+
+    // Publish slash commands to Telegram's native `/` menu. Runs after start
+    // so failures don't block the bot — it's a UX polish, not critical path.
+    this.syncSlashCommands().catch(err =>
+      log.warn({ err }, "Failed to sync Telegram slash commands"),
+    );
+  }
+
+  /** Register the user's Claude Code slash commands with Telegram's /-menu. */
+  private async syncSlashCommands(): Promise<void> {
+    if (!this.bot) return;
+    this.slashCatalog = loadSlashCommands();
+    if (this.slashCatalog.length === 0) {
+      log.debug("No slash commands to register");
+      return;
+    }
+    const payload = this.slashCatalog.map(c => ({
+      command: c.tgName,
+      description: c.description,
+    }));
+    await this.bot.api.setMyCommands(payload);
+    log.info({ count: payload.length }, "Registered Telegram slash commands");
   }
 
   /** Download a Telegram file by file_id */
