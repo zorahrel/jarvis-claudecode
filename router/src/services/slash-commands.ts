@@ -239,36 +239,58 @@ export interface RouterCommandContext {
   group?: string;
 }
 
-function formatHelp(catalog: SlashCommand[]): string {
-  const MAX_LEN = 3800; // < Telegram's 4096 text limit, leave headroom for markdown
+/**
+ * Build the full help as a flat list of pre-formatted lines, tagged with
+ * group headers. Pagination is applied by `formatHelp` below.
+ */
+function buildHelpLines(catalog: SlashCommand[]): string[] {
   const short = (s: string) => s.length > 80 ? s.slice(0, 77) + "…" : s;
-  const lines = ["*Comandi disponibili*", ""];
-  let usedLen = lines.join("\n").length;
-  let overflow = 0;
-
+  const lines: string[] = [];
   const group = (src: SlashCommand["source"], label: string) => {
     const items = catalog.filter(c => c.source === src);
     if (items.length === 0) return;
-    const header = `_${label}_ (${items.length})`;
-    const buf: string[] = [header];
+    lines.push(`_${label}_ (${items.length})`);
     for (const c of items) {
-      const line = `• /${c.tgName} — ${short(c.description)}`;
-      if (usedLen + buf.join("\n").length + line.length + 2 > MAX_LEN) {
-        overflow += items.length - (buf.length - 1);
-        break;
-      }
-      buf.push(line);
+      lines.push(`• /${c.tgName} — ${short(c.description)}`);
     }
-    buf.push("");
-    lines.push(...buf);
-    usedLen = lines.join("\n").length;
+    lines.push("");
   };
-
   group("router", "Router");
   group("user", "Utente");
   group("plugin", "Plugin");
-  if (overflow > 0) lines.push(`_… e altri ${overflow} comandi. Scrivi /nome direttamente._`);
-  return lines.join("\n").trim();
+  return lines;
+}
+
+/** Split lines into pages that each fit under Telegram's 4096-char cap. */
+function paginateHelp(lines: string[], maxLen = 3600): string[][] {
+  const pages: string[][] = [];
+  let current: string[] = [];
+  let currentLen = 0;
+  for (const line of lines) {
+    const lineLen = line.length + 1;
+    if (currentLen + lineLen > maxLen && current.length > 0) {
+      pages.push(current);
+      current = [];
+      currentLen = 0;
+    }
+    current.push(line);
+    currentLen += lineLen;
+  }
+  if (current.length > 0) pages.push(current);
+  return pages;
+}
+
+function formatHelp(catalog: SlashCommand[], pageArg: string): string {
+  const pages = paginateHelp(buildHelpLines(catalog));
+  const totalPages = Math.max(1, pages.length);
+  const requested = parseInt(pageArg, 10);
+  const page = Number.isFinite(requested) && requested >= 1
+    ? Math.min(requested, totalPages)
+    : 1;
+  const header = `*Comandi disponibili* — pagina ${page}/${totalPages}`;
+  const body = (pages[page - 1] ?? []).join("\n").trimEnd();
+  const footer = page < totalPages ? `\n\n_Scrivi /help ${page + 1} per la pagina successiva._` : "";
+  return `${header}\n\n${body}${footer}`;
 }
 
 function formatClear(ctx: RouterCommandContext): string {
@@ -344,13 +366,14 @@ export function handleRouterCommand(
   ctx: RouterCommandContext,
 ): string | null {
   if (!text.startsWith("/")) return null;
-  const match = text.match(/^\/([a-z0-9_-]+)/i);
+  const match = text.match(/^\/([a-z0-9_-]+)(?:\s+(.+))?/i);
   if (!match) return null;
   const token = match[1].toLowerCase();
+  const arg = (match[2] ?? "").trim();
   if (!ROUTER_COMMAND_NAMES.has(token)) return null;
 
   switch (token) {
-    case "help":   return formatHelp(catalog);
+    case "help":   return formatHelp(catalog, arg);
     case "clear":  return formatClear(ctx);
     case "cost":   return formatCost();
     case "status": return formatStatus(ctx);
