@@ -14,7 +14,7 @@ const CACHE_DIR = join(process.cwd(), "data", "sessions");
 const MAX_EXCHANGES = 10; // keep last 10 exchanges per session
 const MAX_CHARS = 8000; // max chars for context injection (avoid blowing up prompt)
 
-interface Exchange {
+export interface Exchange {
   user: string;
   assistant: string;
   timestamp: number;
@@ -22,6 +22,13 @@ interface Exchange {
 
 interface SessionData {
   exchanges: Exchange[];
+}
+
+export interface SessionThread {
+  key: string;
+  exchanges: Exchange[];
+  truncated: boolean;
+  total: number;
 }
 
 /** Ensure cache directory exists */
@@ -102,6 +109,39 @@ export function buildContextFromCache(key: string): string {
     "[End of previous context — new message follows]",
     "",
   ].join("\n\n");
+}
+
+/**
+ * Load the last N exchanges for a session (read-only, for dashboard drill-down).
+ * Returns null when the session file does not exist.
+ */
+export function loadSessionThread(key: string, limit = 50): SessionThread | null {
+  if (!isValidKey(key)) return null;
+  const file = keyToFile(key);
+  if (!existsSync(file)) return null;
+  try {
+    const raw = readFileSync(file, "utf-8");
+    const parsed = JSON.parse(raw) as SessionData;
+    const all = Array.isArray(parsed.exchanges) ? parsed.exchanges : [];
+    const total = all.length;
+    const slice = limit > 0 && total > limit ? all.slice(-limit) : all;
+    return {
+      key,
+      exchanges: slice,
+      truncated: total > slice.length,
+      total,
+    };
+  } catch (err) {
+    log.warn({ err, key }, "Failed to load session thread");
+    return { key, exchanges: [], truncated: false, total: 0 };
+  }
+}
+
+/** Validate session key to prevent path traversal */
+export function isValidKey(key: string): boolean {
+  if (!key) return false;
+  if (key.includes("..") || key.includes("/") || key.includes("\\")) return false;
+  return /^[a-zA-Z0-9:+._-]+$/.test(key);
 }
 
 /** Clear session cache for a key */

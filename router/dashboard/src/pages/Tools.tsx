@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { Plus, RefreshCw } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -13,8 +13,15 @@ import { AgentName } from '../components/ui/AgentName'
 import { EmptyState } from '../components/ui/EmptyState'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Field, Input } from '../components/ui/Field'
-import type { Tool, ToolsResponse, FullRoute } from '../api/client'
+import { BadgeLink } from '../components/BadgeLink'
+import type { Tool, ToolsResponse, FullRoute, FullAgent } from '../api/client'
 import { ChannelIcon, ToolIcon } from '../icons'
+
+const MCP_STATUS_HELP: Record<string, string> = {
+  connected: 'Handshake succeeded — server is reachable and tools are live.',
+  auth: 'Server reachable but asked for OAuth / an API key. Run the server\'s `authenticate` tool from a privileged agent, or set the token in config.yaml.',
+  failed: 'Could not reach the MCP server — command missing, port closed, or crashed at startup. Check the router logs.',
+}
 
 interface EmailAccount {
   email: string
@@ -69,6 +76,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
   const { data, loading, refresh } = usePolling<ToolsResponse>(fetchTools, 10000)
 
   const [routes, setRoutes] = useState<FullRoute[]>([])
+  const [agents, setAgents] = useState<FullAgent[]>([])
   const [selectedTool, setSelectedTool] = useState<ToolDef | null>(null)
 
   // MCP auth/connection status from `claude mcp list`
@@ -104,8 +112,20 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
 
   useEffect(() => {
     api.routesFull().then(setRoutes).catch(() => {})
+    api.agentsFull().then(setAgents).catch(() => {})
     loadEmailAccounts()
   }, [loadEmailAccounts])
+
+  const agentsByTool = useMemo(() => {
+    const map: Record<string, string[]> = {}
+    for (const a of agents) {
+      for (const tid of a.tools || []) {
+        if (!map[tid]) map[tid] = []
+        map[tid].push(a.name)
+      }
+    }
+    return map
+  }, [agents])
 
   const addEmailAccount = async () => {
     const email = newEmailAddr.trim()
@@ -226,7 +246,8 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                       if (!st) return null
                       const tone = st.status === 'connected' ? 'ok' : st.status === 'auth' ? 'warn' : 'err'
                       const label = st.status === 'connected' ? 'connected' : st.status === 'auth' ? 'needs auth' : 'failed'
-                      return <Badge tone={tone} size="xs" title={st.statusText}>{label}</Badge>
+                      const help = MCP_STATUS_HELP[st.status] || ''
+                      return <Badge tone={tone} size="xs" title={`${st.statusText}${help ? '\n\n' + help : ''}`}>{label}</Badge>
                     })()}
                     <Badge tone="neutral" size="xs">{typeBadge(t)}</Badge>
                   </div>
@@ -258,18 +279,29 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
 
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                     <Badge tone="accent" size="xs">{toolRoutesCount(t.id)} routes</Badge>
-                    {(routeMap[t.id] || []).map((rIdx: number) => {
+                    {(agentsByTool[t.id] || []).length > 0 && (
+                      <BadgeLink
+                        href={`#/agents?filter=tool:${encodeURIComponent(t.id)}`}
+                        tone="neutral"
+                        size="xs"
+                        count={agentsByTool[t.id].length}
+                        label="agents"
+                        title={`Agents using this tool: ${agentsByTool[t.id].join(', ')}`}
+                        stopPropagation
+                      />
+                    )}
+                    {(routeMap[t.id] || []).slice(0, 6).map((rIdx: number) => {
                       const workspace = routes[rIdx]?.workspace
                       const isJarvis = workspace === 'jarvis'
                       return (
-                        <Badge
+                        <BadgeLink
                           key={rIdx}
+                          href={`#/agents?focus=${encodeURIComponent(workspace || '')}`}
                           tone={isJarvis ? 'jarvis' : 'muted'}
                           size="xs"
-                          onClick={(e) => { e.stopPropagation(); window.location.hash = 'routes' }}
-                        >
-                          {workspace || `#${rIdx}`}
-                        </Badge>
+                          label={workspace || `#${rIdx}`}
+                          stopPropagation
+                        />
                       )
                     })}
                   </div>
@@ -372,7 +404,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                         padding="10px 12px"
                         onClick={() => {
                           setSelectedTool(null)
-                          window.location.hash = 'routes'
+                          window.location.hash = `#/agents?focus=${encodeURIComponent(route?.workspace || '')}`
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

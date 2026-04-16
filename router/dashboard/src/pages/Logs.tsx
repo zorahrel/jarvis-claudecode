@@ -17,7 +17,7 @@ function formatTimestamp(ts: number): string {
   try {
     const d = new Date(ts)
     if (isNaN(d.getTime())) return String(ts)
-    return d.toLocaleString('it-IT', {
+    return d.toLocaleString('en-US', {
       day: '2-digit',
       month: '2-digit',
       hour: '2-digit',

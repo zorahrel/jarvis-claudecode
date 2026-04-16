@@ -4,7 +4,9 @@ import { askClaude, sessionKey } from "./claude";
 import { canVoice, canVision } from "./capabilities";
 import { logger } from "./logger";
 import { checkIncomingRate } from "./rate-limiter";
-import { trackMessage, trackResponseTime, pushLog } from "../dashboard/server";
+import { trackMessage, trackResponseTime, pushLog, broadcast, clientCount } from "../dashboard/server";
+import { getConfig } from "./config-loader";
+import type { ResponseStatus } from "../dashboard/state";
 import { addMemory } from "./memory";
 import { existsSync, statSync } from "fs";
 import { basename, extname } from "path";
@@ -97,22 +99,28 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     return;
   }
 
-  // Owner-only @jarvis override: skip route matching, use the injected agent directly
+  // Owner-only @jarvis override: skip route matching, use the injected agent directly.
+  // When the user forces an agent, there is no underlying route → routeIndex stays undefined.
+  let routeIndex: number | undefined;
   const agent = msg.agentOverride ?? (() => {
-    const route = findRoute(msg);
-    if (!route) {
+    const matched = findRoute(msg);
+    if (!matched) {
       log.debug({ channel: msg.channel, from: msg.from }, "No route — ignoring");
       return null;
     }
-    if (route.action === "ignore") {
+    if (matched.action === "ignore") {
       log.debug({ channel: msg.channel, from: msg.from }, "Route action: ignore");
       return null;
     }
-    if (!route.agent) {
+    if (!matched.agent) {
       log.warn({ channel: msg.channel, from: msg.from }, "Route matched but no agent configured");
       return null;
     }
-    return route.agent;
+    try {
+      const idx = getConfig().routes.indexOf(matched);
+      if (idx >= 0) routeIndex = idx;
+    } catch { /* config unavailable — leave routeIndex undefined */ }
+    return matched.agent;
   })();
 
   if (!agent) return;
@@ -121,6 +129,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   const route = { agent } as { agent: typeof agent; action?: undefined };
 
   const key = sessionKey(msg.channel, msg.from, msg.group);
+  const agentName = basename(route.agent.workspace);
 
   // Initialize timings (media phase already populated by connector if present)
   const timings: MessageTimings = msg.timings ?? { received: Date.now() };
@@ -183,6 +192,22 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     }
 
     timings.llmStart = Date.now();
+    if (clientCount() > 0) {
+      broadcast({
+        type: "session.updated",
+        data: {
+          key,
+          channel: msg.channel,
+          target: String(msg.from ?? ""),
+          agent: agentName,
+          model: route.agent.model ?? null,
+          alive: true,
+          pending: true,
+          reason: "message-start",
+          ts: Date.now(),
+        },
+      });
+    }
     const response = await askClaude(route.agent, messageForClaude, key)
       .finally(() => endJob(jobId));
     timings.llmEnd = Date.now();
@@ -194,13 +219,54 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     // Convert markdown to platform-native formatting, then append footer
     const formatted = formatForChannel(response.text, msg.channel);
     const model = response.model ?? "—";
-    const agentName = basename(route.agent.workspace);
     const footer = formatTimingFooter(timings, agentName, model, response.inputTokens, response.outputTokens);
     const finalResponse = `${formatted}\n\n${footer}`;
 
     const wallMs = (timings.llmEnd ?? Date.now()) - startTime;
     const apiMs = response.apiDurationMs ?? 0;
-    trackResponseTime(key, wallMs, apiMs, model);
+    trackResponseTime(key, wallMs, apiMs, model, {
+      channel: msg.channel,
+      agent: agentName,
+      routeIndex,
+      status: "ok",
+    });
+    if (clientCount() > 0) {
+      broadcast({
+        type: "response.timing",
+        data: { ts: Date.now(), key, wallMs, apiMs, model },
+      });
+      broadcast({
+        type: "exchange.new",
+        data: {
+          key,
+          user: fullText.slice(0, 2000),
+          assistant: response.text.slice(0, 3000),
+          timestamp: Date.now(),
+          agent: agentName,
+          channel: msg.channel,
+          model,
+          wallMs,
+          apiMs,
+          inputTokens: response.inputTokens,
+          outputTokens: response.outputTokens,
+          costUsd: response.costUsd,
+        },
+      });
+      broadcast({
+        type: "session.updated",
+        data: {
+          key,
+          channel: msg.channel,
+          target: String(msg.from ?? ""),
+          agent: agentName,
+          model,
+          alive: true,
+          pending: false,
+          reason: "message-end",
+          ts: Date.now(),
+        },
+      });
+    }
 
     // Persist cost data
     if (response.costUsd !== undefined) {
@@ -258,9 +324,36 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     await msg.react?.("👎").catch(() => {});
 
     log.error({ err, channel: msg.channel, from: msg.from }, "Handler error");
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const status: ResponseStatus = errMsg.includes("TIMEOUT") ? "timeout" : "error";
+    const wallMs = Date.now() - startTime;
+    trackResponseTime(key, wallMs, 0, "—", {
+      channel: msg.channel,
+      agent: agentName,
+      routeIndex,
+      status,
+    });
+    if (clientCount() > 0) {
+      broadcast({
+        type: "response.timing",
+        data: { ts: Date.now(), key, wallMs, apiMs: 0, model: "—" },
+      });
+      broadcast({
+        type: "session.updated",
+        data: {
+          key,
+          channel: msg.channel,
+          target: String(msg.from ?? ""),
+          agent: agentName,
+          alive: true,
+          pending: false,
+          reason: status === "timeout" ? "timeout" : "killed",
+          ts: Date.now(),
+        },
+      });
+    }
     try {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes("TIMEOUT")) {
+      if (status === "timeout") {
         await msg.reply("› timeout — please try again in a moment");
       } else if (errMsg.includes("ALL_MODELS_EXHAUSTED")) {
         await msg.reply("› all models are busy — please try again in a few minutes");
