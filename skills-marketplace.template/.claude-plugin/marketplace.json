@@ -1,0 +1,20 @@
+{
+  "name": "jarvis-skills",
+  "owner": {
+    "name": "Jarvis user",
+    "email": "replace-me@example.com"
+  },
+  "metadata": {
+    "description": "Local Claude Code plugin marketplace for Jarvis custom skills. Lives outside ~/.claude/ so Jarvis agents running from remote channels (Telegram/WhatsApp/Discord) can create and edit skills without hitting Claude Code's ~/.claude/** safetyCheck.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "jarvis-custom-skills",
+      "description": "User's custom skill collection. Agents write new skills here; Claude Code loads them transparently in every session.",
+      "source": "./",
+      "strict": false,
+      "skills": []
+    }
+  ]
+}
