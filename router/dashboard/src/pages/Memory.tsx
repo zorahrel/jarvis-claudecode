@@ -6,6 +6,7 @@ import { Panel } from '../components/Panel'
 import { SectionHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { Input, Field } from '../components/ui/Field'
+import { parseHashParam } from '../lib/hashFilter'
 
 // ── Types ──
 
@@ -155,7 +156,7 @@ function formatMemDate(d?: string) {
   if (!d) return ''
   try {
     const dt = new Date(d)
-    return dt.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    return dt.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
   } catch {
     return d
   }
@@ -164,7 +165,7 @@ function formatMemDate(d?: string) {
 function formatFileDate(mtime?: number) {
   if (!mtime) return ''
   try {
-    return new Date(mtime).toLocaleDateString('it-IT', { day: '2-digit', month: 'short' })
+    return new Date(mtime).toLocaleDateString('en-US', { day: '2-digit', month: 'short' })
   } catch { return '' }
 }
 
@@ -180,6 +181,20 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   // ── State ──
   const [memQuery, setMemQuery] = useState('')
   const [memScope, setMemScope] = useState('')
+  const [agentFilter, setAgentFilter] = useState<string>(() => parseHashParam(window.location.hash, 'agent'))
+
+  useEffect(() => {
+    const onHash = () => setAgentFilter(parseHashParam(window.location.hash, 'agent'))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  const clearAgentFilter = useCallback(() => {
+    setAgentFilter('')
+    if (window.location.hash.includes('agent=')) {
+      window.history.replaceState(null, '', '#/memory')
+    }
+  }, [])
   const [scopeHelp, setScopeHelp] = useState<Record<string, string>>({})
   const [reindexing, setReindexing] = useState(false)
   const [scopesPanelOpen, setScopesPanelOpen] = useState(false)
@@ -252,9 +267,22 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   }, [graphNodes, graphEdges])
 
   const filteredFiles = useMemo(() => {
-    if (!memScope) return files
-    return files.filter((f) => f.path.includes(`/${memScope}/`) || f.category === memScope)
-  }, [files, memScope])
+    let out = files
+    if (memScope) out = out.filter((f) => f.path.includes(`/${memScope}/`) || f.category === memScope)
+    if (agentFilter) {
+      const needles = [
+        `agents/${agentFilter}/`,
+        `/${agentFilter}/`,
+        `${agentFilter}.md`,
+      ]
+      out = out.filter((f) =>
+        needles.some((n) => f.path.includes(n)) ||
+        f.name.toLowerCase().includes(agentFilter.toLowerCase()) ||
+        (f.preview || '').toLowerCase().includes(agentFilter.toLowerCase()),
+      )
+    }
+    return out
+  }, [files, memScope, agentFilter])
 
   const scopeChips = useMemo(() => {
     const counts: Record<string, number> = {}
@@ -1078,7 +1106,32 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
       )}
 
       {/* Scope chips */}
-      <div style={{ display: 'flex', gap: 4, padding: '4px 20px 10px', flexShrink: 0, overflowX: 'auto', position: 'relative' as const, zIndex: 10 }}>
+      <div style={{ display: 'flex', gap: 4, padding: '4px 20px 10px', flexShrink: 0, overflowX: 'auto', position: 'relative' as const, zIndex: 10, alignItems: 'center' }}>
+        {agentFilter && (
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '3px 10px',
+              fontSize: 11,
+              background: 'rgba(94,106,210,0.18)',
+              border: '1px solid var(--accent)',
+              borderRadius: 999,
+              color: 'var(--text-1)',
+              marginRight: 4,
+            }}
+          >
+            <span>agent: <strong>{agentFilter}</strong></span>
+            <button
+              onClick={clearAgentFilter}
+              aria-label="Clear agent filter"
+              style={{ background: 'transparent', border: 'none', color: 'var(--text-3)', cursor: 'pointer', padding: 0, display: 'inline-flex' }}
+            >
+              <X size={11} />
+            </button>
+          </div>
+        )}
         <Chip active={!memScope} onClick={() => setMemScope('')} label={`All (${files.length})`} />
         {scopeChips.map((c) => (
           <Chip

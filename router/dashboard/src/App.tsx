@@ -16,7 +16,11 @@ import { Cron } from './pages/Cron'
 import { Analytics } from './pages/Analytics'
 
 function getHash() {
-  return window.location.hash.replace('#', '') || 'overview'
+  // Strip leading `#`, optional `/`, and query string: `#/routes?filter=agent:foo` → `routes`.
+  const raw = window.location.hash.replace(/^#\/?/, '')
+  const qIdx = raw.indexOf('?')
+  const page = (qIdx < 0 ? raw : raw.slice(0, qIdx)) || 'overview'
+  return page
 }
 
 function App() {

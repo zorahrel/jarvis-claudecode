@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSy
 import { join } from "path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getProcesses, killProcessByKey, resolveCliPath } from "../services/claude";
+import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
 import { getCronStates, triggerCronJob } from "../services/cron";
@@ -175,6 +176,17 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
 
   } else if (path === "/api/cli-sessions") {
     json(req, res, getCliSessions());
+
+  // --- SESSION THREAD (conversation drill-down) ---
+  } else if (path.match(/^\/api\/sessions\/[^/]+\/thread$/) && req.method === "GET") {
+    const key = decodeURIComponent(path.split("/")[3]);
+    if (!isValidKey(key)) { json(req, res, { error: "invalid session key" }, 400); return; }
+    const reqUrl = new URL(req.url ?? "/", "http://localhost");
+    const limitParam = parseInt(reqUrl.searchParams.get("limit") || "50", 10);
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 500) : 50;
+    const thread = loadSessionThread(key, limit);
+    if (!thread) { json(req, res, { error: "session not found" }, 404); return; }
+    json(req, res, thread);
 
   // --- READ APIs ---
   } else if (path === "/api/processes") {

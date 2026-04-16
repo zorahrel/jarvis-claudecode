@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
+import { Tooltip } from './Tooltip'
 
 type Variant = 'ghost' | 'primary' | 'danger-ghost'
 type Size = 'xs' | 'sm' | 'md'
@@ -9,6 +10,8 @@ interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 
   size?: Size
   active?: boolean
   label: string
+  /** Placement for the tooltip bubble. */
+  tooltipPlacement?: 'top' | 'bottom' | 'left' | 'right'
 }
 
 const box: Record<Size, CSSProperties> = {
@@ -43,6 +46,7 @@ export function IconButton({
   label,
   disabled,
   style,
+  tooltipPlacement = 'bottom',
   ...rest
 }: IconButtonProps) {
   const combined: CSSProperties = {
@@ -58,15 +62,16 @@ export function IconButton({
     ...style,
   }
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      style={combined}
-      disabled={disabled}
-      {...rest}
-    >
-      {icon}
-    </button>
+    <Tooltip content={label} placement={tooltipPlacement}>
+      <button
+        type="button"
+        aria-label={label}
+        style={combined}
+        disabled={disabled}
+        {...rest}
+      >
+        {icon}
+      </button>
+    </Tooltip>
   )
 }
