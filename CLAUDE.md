@@ -44,6 +44,12 @@ with per-route agents, capabilities, memory (ChromaDB + OMEGA), media processing
 
 Extra services (any port) are user-configurable under `services:` in `config.yaml`.
 
+## Changelog
+
+Update `CHANGELOG.md` → `[Unreleased]` on user-facing changes (router, dashboard,
+setup, user-facing docs). Match the style of existing entries. Skip internal
+refactors, typos, and gitignored files.
+
 ## Don't
 - Don't use Docker
 - Don't add npm dependencies without good reason

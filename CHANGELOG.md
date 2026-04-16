@@ -3,6 +3,20 @@
 All notable changes to Jarvis. Versioning follows [SemVer](https://semver.org/).
 Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+### Added
+- _(nothing yet)_
+
+### Changed
+- _(nothing yet)_
+
+### Fixed
+- _(nothing yet)_
+
+### Removed
+- _(nothing yet)_
+
 ## [1.1.0] — 2026-04-16
 
 ### Added
