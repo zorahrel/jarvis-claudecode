@@ -219,7 +219,7 @@ Each agent folder declares **what** the agent is (model, tools, memory scope, MC
 
 ### Customize Jarvis without reading all the docs
 
-The repo ships a Claude Code skill, **`jarvis-config`**, that edits `config.yaml`, scaffolds agents, and wires channels for you. `./setup.sh` symlinks it into `~/.claude/skills/` — then in any Claude Code session:
+The repo ships a Claude Code skill, **`jarvis-config`**, that edits `config.yaml`, scaffolds agents, and wires channels for you. `./setup.sh` installs it via the Jarvis skills marketplace at `~/jarvis/skills-marketplace/`, which Claude Code loads automatically in every session (CLI, router-spawned agents, and any remote channel). Then:
 
 ```
 /jarvis-config add a Telegram route for my phone to agent "family"
@@ -228,6 +228,8 @@ The repo ships a Claude Code skill, **`jarvis-config`**, that edits `config.yaml
 ```
 
 Skill source: [`skills/jarvis-config/SKILL.md`](skills/jarvis-config/SKILL.md).
+
+Custom skills added by Jarvis agents (from Telegram/WhatsApp/Discord) also land in the marketplace and are available in the next session. Existing users on the pre-1.1 layout can migrate with `bash scripts/migrate-to-marketplace.sh`.
 
 ### Extra services
 
