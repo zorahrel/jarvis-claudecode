@@ -5,6 +5,7 @@ import { Search, MoreHorizontal, RefreshCw, Layers, X } from 'lucide-react'
 import { Panel } from '../components/Panel'
 import { SectionHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
+import { Tooltip } from '../components/ui/Tooltip'
 import { Input, Field } from '../components/ui/Field'
 import { parseHashParam } from '../lib/hashFilter'
 
@@ -941,23 +942,24 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   )
 
   const ViewBtn = ({ mode, label, shortcut }: { mode: ViewMode; label: string; shortcut: string }) => (
-    <button
-      onClick={() => setViewMode(mode)}
-      title={`${label} view (${shortcut})`}
-      style={{
-        padding: '5px 12px',
-        fontSize: 11,
-        background: viewMode === mode ? 'var(--accent-tint-strong)' : 'transparent',
-        color: viewMode === mode ? 'var(--accent-bright)' : 'var(--text-3)',
-        border: 'none',
-        borderRadius: 'var(--radius-sm)',
-        cursor: 'pointer',
-        fontWeight: viewMode === mode ? 600 : 500,
-        transition: 'background 0.15s, color 0.15s',
-      }}
-    >
-      {label}
-    </button>
+    <Tooltip content={`${label} view (${shortcut})`} placement="bottom">
+      <button
+        onClick={() => setViewMode(mode)}
+        style={{
+          padding: '5px 12px',
+          fontSize: 11,
+          background: viewMode === mode ? 'var(--accent-tint-strong)' : 'transparent',
+          color: viewMode === mode ? 'var(--accent-bright)' : 'var(--text-3)',
+          border: 'none',
+          borderRadius: 'var(--radius-sm)',
+          cursor: 'pointer',
+          fontWeight: viewMode === mode ? 600 : 500,
+          transition: 'background 0.15s, color 0.15s',
+        }}
+      >
+        {label}
+      </button>
+    </Tooltip>
   )
 
   // ── Render ──
@@ -1022,28 +1024,29 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
             />
           )}
           {memQuery && !searching && (
-            <button
-              onClick={() => { setMemQuery(''); runSearch('') }}
-              title="Clear search (Esc)"
-              aria-label="Clear search"
-              style={{
-                position: 'absolute',
-                right: 6,
-                width: 20,
-                height: 20,
-                padding: 0,
-                background: 'var(--surface-hover-strong)',
-                color: 'var(--text-3)',
-                border: 'none',
-                borderRadius: '50%',
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <X size={12} />
-            </button>
+            <Tooltip content="Clear search (Esc)" placement="bottom">
+              <button
+                onClick={() => { setMemQuery(''); runSearch('') }}
+                aria-label="Clear search"
+                style={{
+                  position: 'absolute',
+                  right: 6,
+                  width: 20,
+                  height: 20,
+                  padding: 0,
+                  background: 'var(--surface-hover-strong)',
+                  color: 'var(--text-3)',
+                  border: 'none',
+                  borderRadius: '50%',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <X size={12} />
+              </button>
+            </Tooltip>
           )}
           {memQuery && !searching && hasSearchResults && (
             <span style={{ position: 'absolute', right: 32, fontSize: 10, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>
@@ -1065,26 +1068,27 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
           <ViewBtn mode="list" label="List" shortcut="l" />
           <ViewBtn mode="grid" label="Grid" shortcut="r" />
         </div>
-        <button
-          onClick={() => setShowQuickAdd(true)}
-          title="Create new note"
-          style={{
-            padding: '7px 14px',
-            fontSize: 12,
-            background: 'var(--accent)',
-            color: '#fff',
-            border: '1px solid var(--accent)',
-            borderRadius: 'var(--radius)',
-            cursor: 'pointer',
-            fontWeight: 500,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 4,
-            lineHeight: 1,
-          }}
-        >
-          <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> New
-        </button>
+        <Tooltip content="Create new note" placement="bottom">
+          <button
+            onClick={() => setShowQuickAdd(true)}
+            style={{
+              padding: '7px 14px',
+              fontSize: 12,
+              background: 'var(--accent)',
+              color: '#fff',
+              border: '1px solid var(--accent)',
+              borderRadius: 'var(--radius)',
+              cursor: 'pointer',
+              fontWeight: 500,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              lineHeight: 1,
+            }}
+          >
+            <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> New
+          </button>
+        </Tooltip>
         <KebabMenu reindexing={reindexing} onReindex={reindex} onManageScopes={() => setScopesPanelOpen(true)} />
       </div>
       {memQuery && !searching && !hasSearchResults && (
@@ -1162,7 +1166,7 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
               {/* Graph stats + controls + reindex (left) */}
               <div style={{ position: 'absolute', bottom: 12, left: 12, display: 'flex', gap: 8, alignItems: 'center', zIndex: 10, background: 'rgba(15,16,17,0.78)', backdropFilter: 'blur(8px)', padding: '7px 12px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
                 <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{graphStats}</span>
-                <button onClick={loadGraph} disabled={loadingGraph} title="Refresh graph data" style={{ padding: '3px 10px', fontSize: 11, background: 'rgba(255,255,255,0.06)', color: 'var(--text-2)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }}>Reload</button>
+                <Tooltip content="Refresh graph data" placement="bottom"><button onClick={loadGraph} disabled={loadingGraph} style={{ padding: '3px 10px', fontSize: 11, background: 'rgba(255,255,255,0.06)', color: 'var(--text-2)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }}>Reload</button></Tooltip>
               </div>
               {/* Help / shortcuts toggle (bottom-right) */}
               <GraphHelpPanel />
@@ -1626,7 +1630,7 @@ function DoctorBanner({ doctor, open, setOpen, onDismiss, onFileClick }: {
         <button onClick={() => setOpen(!open)} style={{ marginLeft: 'auto', fontSize: 10, background: 'transparent', color: 'var(--text-3)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}>
           {open ? 'Hide' : 'Details'}
         </button>
-        <button onClick={onDismiss} title="Dismiss for this session" aria-label="Dismiss" style={{ background: 'transparent', color: 'var(--text-4)', border: 'none', cursor: 'pointer', padding: 4, display: 'inline-flex' }}><X size={12} /></button>
+        <Tooltip content="Dismiss for this session" placement="left"><button onClick={onDismiss} aria-label="Dismiss" style={{ background: 'transparent', color: 'var(--text-4)', border: 'none', cursor: 'pointer', padding: 4, display: 'inline-flex' }}><X size={12} /></button></Tooltip>
       </div>
       {open && (
         <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(234,179,8,0.2)', display: 'grid', gap: 10, maxHeight: 260, overflowY: 'auto' }}>
@@ -1675,9 +1679,8 @@ function KebabMenu({
   }, [open])
   return (
     <div ref={ref} style={{ position: 'relative' }}>
-      <button
+      <Tooltip content="More actions" placement="bottom"><button
         onClick={() => setOpen(o => !o)}
-        title="More actions"
         style={{
           width: 30,
           height: 30,
@@ -1692,7 +1695,7 @@ function KebabMenu({
           justifyContent: 'center',
           flexShrink: 0,
         }}
-      ><MoreHorizontal size={14} /></button>
+      ><MoreHorizontal size={14} /></button></Tooltip>
       {open && (
         <div
           style={{
@@ -1789,11 +1792,10 @@ function GraphHelpPanel() {
           <kbd style={kbdStyle}>esc</kbd><span>clear search</span>
         </div>
       )}
-      <button
+      <Tooltip content="Graph controls & shortcuts" placement="left"><button
         onClick={() => setOpen((o) => !o)}
-        title="Graph controls & shortcuts"
         style={{ width: 32, height: 32, borderRadius: '50%', background: open ? 'rgba(94,106,210,0.25)' : 'rgba(15,16,17,0.78)', backdropFilter: 'blur(8px)', border: '1px solid ' + (open ? 'rgba(94,106,210,0.5)' : 'rgba(255,255,255,0.10)'), color: 'var(--text-2)', cursor: 'pointer', fontSize: 14, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(0,0,0,0.35)' }}
-      >?</button>
+      >?</button></Tooltip>
     </div>
   )
 }

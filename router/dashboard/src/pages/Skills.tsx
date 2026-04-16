@@ -3,6 +3,7 @@ import { RefreshCw, Wrench, Paperclip, Clock } from 'lucide-react'
 import { Panel } from '../components/Panel'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
+import { Tooltip } from '../components/ui/Tooltip'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
@@ -237,14 +238,18 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 10, color: 'var(--text-4)' }}>
                     {toolCount > 0 && (
-                      <span title="allowed-tools directives" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                        <Wrench size={10} /> {toolCount}
-                      </span>
+                      <Tooltip content="allowed-tools directives" placement="top">
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                          <Wrench size={10} /> {toolCount}
+                        </span>
+                      </Tooltip>
                     )}
                     {resCount > 0 && (
-                      <span title="resources in skill directory" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                        <Paperclip size={10} /> {resCount}
-                      </span>
+                      <Tooltip content="resources in skill directory" placement="top">
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                          <Paperclip size={10} /> {resCount}
+                        </span>
+                      </Tooltip>
                     )}
                     {meta?.lastModified && (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -279,12 +284,11 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
                     <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: 'var(--text-1)', flex: 1 }}>
                       {p.name.split('@')[0]}
                     </span>
-                    <button
+                    <Tooltip content={on ? 'Disable plugin' : 'Enable plugin'} placement="top"><button
                       type="button"
                       onClick={(e) => togglePlugin(p.name, e)}
                       role="switch"
                       aria-checked={on}
-                      title={on ? 'Disable plugin' : 'Enable plugin'}
                       style={{
                         border: 'none', cursor: 'pointer', padding: 0,
                         width: 28, height: 16, borderRadius: 8,
@@ -297,7 +301,7 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
                         width: 12, height: 12, borderRadius: '50%',
                         background: 'var(--text-1)', transition: 'left 120ms ease',
                       }} />
-                    </button>
+                    </button></Tooltip>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-4)' }}>
                     {p.scope}

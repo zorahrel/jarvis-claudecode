@@ -13,6 +13,7 @@ import { InfoBox } from '../components/ui/InfoBox'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Input } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
+import { Tooltip } from '../components/ui/Tooltip'
 import { parseHashFocus } from '../lib/hashFilter'
 
 interface ChannelCostAgg {
@@ -228,17 +229,18 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                 <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-1)', textTransform: 'capitalize' }}>
                   {ch.name}
                 </span>
-                <span
-                  title={ch.status === 'ok' ? 'Connected' : ch.status || 'unknown'}
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: '50%',
-                    flexShrink: 0,
-                    background: statusDotColor,
-                    boxShadow: ch.status === 'ok' ? '0 0 6px rgba(39,166,68,0.4)' : undefined,
-                  }}
-                />
+                <Tooltip content={ch.status === 'ok' ? 'Connected' : ch.status || 'unknown'} placement="top">
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      flexShrink: 0,
+                      background: statusDotColor,
+                      boxShadow: ch.status === 'ok' ? '0 0 6px rgba(39,166,68,0.4)' : undefined,
+                    }}
+                  />
+                </Tooltip>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, alignItems: 'center' }}>
                   <BadgeLink
                     href={`#/routes?filter=channel:${encodeURIComponent(ch.name)}`}

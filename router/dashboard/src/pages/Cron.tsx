@@ -8,6 +8,7 @@ import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { Card } from '../components/ui/Card'
+import { Tooltip } from '../components/ui/Tooltip'
 import { EmptyState } from '../components/ui/EmptyState'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Field, Input, Select, Textarea } from '../components/ui/Field'
@@ -283,23 +284,24 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                     {cs.lastStatus || 'idle'}
                   </Badge>
                   {cs.delivery && (
-                    <a
-                      href={`#/channels?focus=${encodeURIComponent(cs.delivery.channel)}`}
-                      onClick={(e) => e.stopPropagation()}
-                      title={`Target: ${cs.delivery.channel} → ${cs.delivery.target}`}
-                      style={{
-                        fontSize: 10,
-                        padding: '1px 6px',
-                        borderRadius: 'var(--radius-xs)',
-                        background: 'var(--surface-subtle)',
-                        border: '1px solid var(--border)',
-                        color: 'var(--text-3)',
-                        textDecoration: 'none',
-                        fontFamily: 'var(--mono)',
-                      }}
-                    >
-                      → {cs.delivery.channel}
-                    </a>
+                    <Tooltip content={`Target: ${cs.delivery.channel} → ${cs.delivery.target}`} placement="top">
+                      <a
+                        href={`#/channels?focus=${encodeURIComponent(cs.delivery.channel)}`}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                          fontSize: 10,
+                          padding: '1px 6px',
+                          borderRadius: 'var(--radius-xs)',
+                          background: 'var(--surface-subtle)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text-3)',
+                          textDecoration: 'none',
+                          fontFamily: 'var(--mono)',
+                        }}
+                      >
+                        → {cs.delivery.channel}
+                      </a>
+                    </Tooltip>
                   )}
                   <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-4)', marginLeft: 'auto' }}>
                     {cs.schedule}

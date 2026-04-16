@@ -7,6 +7,7 @@ import { LiveIndicator } from '../components/LiveIndicator'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { IconButton } from '../components/ui/IconButton'
 import { Card } from '../components/ui/Card'
+import { Tooltip } from '../components/ui/Tooltip'
 import { EmptyState } from '../components/ui/EmptyState'
 import { SessionRow } from '../components/SessionRow'
 import {
@@ -169,16 +170,26 @@ export function Overview(_props: { onToast: (msg: string, type: 'success' | 'err
           title="Response Times"
           action={
             <span style={{ fontSize: 11, color: 'var(--text-4)', fontFamily: 'var(--mono)', display: 'inline-flex', gap: 10 }}>
-              <span title="Average wall-clock time over the last hour">
-                1h wall <b style={{ color: 'var(--text-2)' }}>{rt.avgWallMs}</b>ms
-              </span>
-              <span title="Average Claude API roundtrip over the last hour">
-                api <b style={{ color: 'var(--text-2)' }}>{rt.avgApiMs}</b>ms
-              </span>
-              <span title="Samples in the last hour">
-                <b style={{ color: 'var(--text-2)' }}>{rt.count1h}</b> samples
-              </span>
-              {rt.sparkline && <span title="Wall-ms trend of last 20 samples">{rt.sparkline}</span>}
+              <Tooltip content="Average wall-clock time over the last hour" placement="bottom">
+                <span>
+                  1h wall <b style={{ color: 'var(--text-2)' }}>{rt.avgWallMs}</b>ms
+                </span>
+              </Tooltip>
+              <Tooltip content="Average Claude API roundtrip over the last hour" placement="bottom">
+                <span>
+                  api <b style={{ color: 'var(--text-2)' }}>{rt.avgApiMs}</b>ms
+                </span>
+              </Tooltip>
+              <Tooltip content="Samples in the last hour" placement="bottom">
+                <span>
+                  <b style={{ color: 'var(--text-2)' }}>{rt.count1h}</b> samples
+                </span>
+              </Tooltip>
+              {rt.sparkline && (
+                <Tooltip content="Wall-ms trend of last 20 samples" placement="bottom">
+                  <span>{rt.sparkline}</span>
+                </Tooltip>
+              )}
             </span>
           }
         />

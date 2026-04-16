@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react'
+import { Tooltip } from './Tooltip'
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-ghost'
 type Size = 'xs' | 'sm' | 'md'
@@ -60,6 +61,7 @@ export function Button({
   loading,
   disabled,
   style,
+  title,
   ...rest
 }: ButtonProps) {
   const combined: CSSProperties = {
@@ -75,11 +77,13 @@ export function Button({
     ...variantStyle[variant],
     ...style,
   }
-  return (
+  const btn = (
     <button style={combined} disabled={disabled || loading} {...rest}>
       {leading && <span style={{ display: 'inline-flex' }}>{leading}</span>}
       <span>{loading ? 'Saving…' : children}</span>
       {trailing && <span style={{ display: 'inline-flex' }}>{trailing}</span>}
     </button>
   )
+  if (!title) return btn
+  return <Tooltip content={title} placement="top">{btn}</Tooltip>
 }

@@ -3,6 +3,7 @@ import { RefreshCw, ExternalLink } from 'lucide-react'
 import { api, type Exchange, type SessionThread } from '../api/client'
 import { Button } from './ui/Button'
 import { Badge } from './ui/Badge'
+import { Tooltip } from './ui/Tooltip'
 
 const DEFAULT_VISIBLE = 10
 const COLLAPSE_CHARS = 400
@@ -22,12 +23,11 @@ export function RelativeTime({ ts, full }: { ts: number; full?: boolean }) {
     return () => window.clearInterval(id)
   }, [])
   return (
-    <span
-      title={new Date(ts).toLocaleString('en-US')}
-      style={{ fontSize: 10, color: 'var(--text-4)', fontFamily: full ? 'var(--mono)' : undefined }}
-    >
-      {relativeTime(ts)}
-    </span>
+    <Tooltip content={new Date(ts).toLocaleString('en-US')} placement="top">
+      <span style={{ fontSize: 10, color: 'var(--text-4)', fontFamily: full ? 'var(--mono)' : undefined }}>
+        {relativeTime(ts)}
+      </span>
+    </Tooltip>
   )
 }
 

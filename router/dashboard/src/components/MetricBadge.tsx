@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import { Tooltip } from './ui/Tooltip'
 
 export type MetricTone = 'ok' | 'warn' | 'err' | 'muted'
 
@@ -103,9 +104,8 @@ export function MetricBadge({
       ? `${title} (${Math.round(value)} ms)`
       : title
 
-  return (
+  const span = (
     <span
-      title={resolvedTitle}
       style={{
         color: toneColor[resolvedTone],
         fontFamily: 'var(--mono)',
@@ -122,4 +122,6 @@ export function MetricBadge({
       )}
     </span>
   )
+  if (!resolvedTitle) return span
+  return <Tooltip content={resolvedTitle} placement="top">{span}</Tooltip>
 }

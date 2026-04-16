@@ -1,4 +1,5 @@
 import type { CSSProperties, MouseEvent, ReactNode } from 'react'
+import { Tooltip } from './ui/Tooltip'
 
 type Tone = 'neutral' | 'ok' | 'warn' | 'err' | 'accent' | 'jarvis' | 'muted'
 
@@ -44,10 +45,9 @@ export function BadgeLink({
   style,
   stopPropagation,
 }: BadgeLinkProps) {
-  return (
+  const anchor = (
     <a
       href={href}
-      title={title}
       onClick={(e) => {
         if (stopPropagation) e.stopPropagation()
         onClick?.(e)
@@ -72,4 +72,6 @@ export function BadgeLink({
       <span>{label}</span>
     </a>
   )
+  if (!title) return anchor
+  return <Tooltip content={title} placement="top">{anchor}</Tooltip>
 }
