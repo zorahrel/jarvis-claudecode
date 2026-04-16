@@ -80,17 +80,11 @@ const MESSAGE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min — generous, crash is hand
 // External/client agents (inheritUserScope=false) run with project,local only — no user scope leakage.
 // Any third layer would risk conflicting with agent-specific rules (e.g. language, scope).
 
-// --- Model mapping ---
-const MODEL_MAP: Record<string, string> = {
-  opus: "claude-opus-4-6",
-  sonnet: "claude-sonnet-4-6",
-  haiku: "claude-haiku-4-5",
-};
-
+// --- Model resolution ---
+// Claude Code CLI resolves aliases ("opus"/"sonnet"/"haiku") to the latest model
+// automatically. Pass alias through unchanged, or a pinned ID if agent.yaml sets one.
 function resolveModel(name: string | undefined): string {
-  if (!name) return MODEL_MAP.opus;
-  if (name.includes("claude-")) return name;
-  return MODEL_MAP[name] ?? MODEL_MAP.opus;
+  return name && name.trim() ? name : "opus";
 }
 
 // --- System prompt loading ---
@@ -169,6 +163,8 @@ interface PersistentProcess {
   proc: ChildProcess;
   readline: Interface;
   model: string;
+  /** Concrete model ID reported by the CLI stream (e.g. "claude-opus-4-7"). Set after first event. */
+  resolvedModel: string | null;
   workspace: string;
   createdAt: number;
   lastActivity: number;
@@ -282,6 +278,7 @@ function spawnPersistentProcess(
     proc,
     readline: rl,
     model,
+    resolvedModel: null,
     workspace,
     createdAt: Date.now(),
     lastActivity: Date.now(),
@@ -303,6 +300,13 @@ function spawnPersistentProcess(
       // Log system/result events for debugging
       if (event.type === "result") {
         log.info({ type: event.type, resultLen: (event.result ?? "").length, resultPreview: (event.result ?? "").slice(0, 80) }, "Claude event: result");
+      }
+
+      // Capture the concrete model ID the CLI chose for alias resolution
+      // (system.init emits it; assistant messages carry it on message.model too)
+      if (!pp.resolvedModel) {
+        const m = event.model ?? event.message?.model;
+        if (typeof m === "string" && m.startsWith("claude-")) pp.resolvedModel = m;
       }
 
       // Track files created/written by Claude (tool_use events)
@@ -671,7 +675,7 @@ async function doSendWithTimeout(
 
   return {
     text: result.text,
-    model: modelName,
+    model: pp.resolvedModel ?? modelName,
     durationMs: result.durationMs,
     apiDurationMs: result.apiDurationMs,
     createdFiles: result.createdFiles,
