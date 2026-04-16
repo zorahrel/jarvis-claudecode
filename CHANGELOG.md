@@ -3,7 +3,7 @@
 All notable changes to Jarvis. Versioning follows [SemVer](https://semver.org/).
 Dates are ISO (YYYY-MM-DD).
 
-## [Unreleased]
+## [1.1.0] — 2026-04-16
 
 ### Added
 - **Skills marketplace architecture.** Jarvis custom skills now live in
