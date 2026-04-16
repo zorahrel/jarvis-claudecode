@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { Plus, Sparkles, LayoutGrid, Table2 } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -11,8 +11,20 @@ import { Card } from '../components/ui/Card'
 import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Input, Select, Textarea } from '../components/ui/Field'
+import { BadgeLink } from '../components/BadgeLink'
+import { RelatedList } from '../components/RelatedList'
 import { ToolIcon } from '../icons'
 import type { FullAgent, ProcessSession, Tool } from '../api/client'
+import { parseHashFilter, parseHashFocus } from '../lib/hashFilter'
+
+interface AgentAggEntry {
+  key: string
+  count: number
+}
+
+interface AgentCostsResponse {
+  aggregated: AgentAggEntry[]
+}
 
 interface SharedFile {
   name: string
@@ -167,6 +179,12 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
   const [globalEditorMode, setGlobalEditorMode] = useState<'preview' | 'edit'>('preview')
   const [savingGlobal, setSavingGlobal] = useState(false)
 
+  const [turnsByAgent7d, setTurnsByAgent7d] = useState<Record<string, number>>({})
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
+  const [hashFocus, setHashFocus] = useState(() => parseHashFocus(window.location.hash))
+  const [detailAgent, setDetailAgent] = useState<string | null>(null)
+  const [allRoutes, setAllRoutes] = useState<Array<{ index: number; channel: string; workspace: string; from: string; group: string | null }>>([])
+
   const agents = data || []
   const jarvisAgent = agents.find(a => a.name === 'jarvis')
   const otherAgents = agents.filter(a => a.name !== 'jarvis')
@@ -181,6 +199,70 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
     }).catch(() => {})
     api.getSharedFiles().then(d => setSharedFiles(d.files || [])).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    api.routesFull().then(rs => {
+      setAllRoutes(rs.map((r, index) => ({
+        index,
+        channel: r.channel,
+        workspace: r.workspace,
+        from: r.from,
+        group: r.group || null,
+      })))
+    }).catch(() => {})
+    fetch('/api/costs?days=7&groupBy=route')
+      .then(r => r.json())
+      .then((r: AgentCostsResponse) => {
+        const map: Record<string, number> = {}
+        for (const a of r.aggregated || []) map[a.key] = a.count
+        setTurnsByAgent7d(map)
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const onHash = () => {
+      setHashFilter(parseHashFilter(window.location.hash))
+      setHashFocus(parseHashFocus(window.location.hash))
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  // Auto-open detail panel when ?focus=<name>
+  useEffect(() => {
+    if (hashFocus && agents.find(a => a.name === hashFocus)) setDetailAgent(hashFocus)
+  }, [hashFocus, agents])
+
+  // Map tool IDs to agent names for `?filter=tool:<toolId>`.
+  const agentsByTool = useMemo(() => {
+    const map: Record<string, Set<string>> = {}
+    for (const a of agents) {
+      for (const tid of a.tools || []) {
+        if (!map[tid]) map[tid] = new Set()
+        map[tid].add(a.name)
+      }
+    }
+    return map
+  }, [agents])
+
+  const matchesHashFilter = (a: FullAgent): boolean => {
+    if (!hashFilter) return true
+    if (hashFilter.type === 'tool') {
+      const set = agentsByTool[hashFilter.value]
+      return !!(set && set.has(a.name))
+    }
+    return true
+  }
+
+  const visibleOtherAgents = otherAgents.filter(matchesHashFilter)
+
+  const clearHashFilter = () => {
+    setHashFilter(null)
+    if (window.location.hash.includes('?')) {
+      window.history.replaceState(null, '', '#/agents')
+    }
+  }
 
   const openGlobalEdit = async () => {
     try {
@@ -557,6 +639,34 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
         </Card>
       )}
 
+      {hashFilter && (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            alignSelf: 'flex-start',
+            padding: '5px 10px',
+            fontSize: 11,
+            background: 'var(--accent-tint)',
+            border: '1px solid var(--accent-border)',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text-2)',
+          }}
+        >
+          <span>
+            Filtered by {hashFilter.type}: <strong style={{ color: 'var(--accent-bright)' }}>{hashFilter.value}</strong>
+          </span>
+          <button
+            onClick={clearHashFilter}
+            aria-label="Clear filter"
+            style={{ background: 'transparent', border: 'none', color: 'var(--text-3)', cursor: 'pointer', fontSize: 12, padding: '0 4px' }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Info bar */}
       <InfoBox title="Other agents">
         One folder per agent. <code style={codeInlineStyle}>SOUL.md</code> and <code style={codeInlineStyle}>AGENTS.md</code> are loaded automatically.{' '}
@@ -579,15 +689,16 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
               </tr>
             </thead>
             <tbody>
-              {otherAgents.map(a => {
+              {visibleOtherAgents.map(a => {
                 const sessions = agentActiveSessions(a.name)
                 const routeLabels = agentRouteLabels(a)
                 const hasFullAccess = a.routes.some(r => r.fullAccess)
+                const turns7d = turnsByAgent7d[a.name] || 0
                 return (
                   <tr key={a.name} style={{ borderBottom: '1px solid var(--border)' }}>
                     <td style={tableBodyCell}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <AgentName name={a.name} size="xs" onClick={() => openAgentFile(a.name, 'CLAUDE.md')} />
+                        <AgentName name={a.name} size="xs" onClick={() => setDetailAgent(a.name)} />
                         {hasFullAccess && <Badge tone="accent" size="xs" title="fullAccess: true">FULL</Badge>}
                         {a.scopes?.tools && (
                           <Badge tone="ok" size="xs" mono title="Imports _shared/TOOLS.md" onClick={(e) => { e.stopPropagation(); openSharedFile('TOOLS.md') }}>
@@ -595,7 +706,39 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                           </Badge>
                         )}
                         {routeLabels.length === 0 && <Badge tone="muted" size="xs">unused</Badge>}
-                        {sessions.length > 0 && <Badge tone="ok" size="xs">{sessions.length} active</Badge>}
+                        {a.routes.length > 0 && (
+                          <BadgeLink
+                            href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                            tone="neutral"
+                            size="xs"
+                            count={a.routes.length}
+                            label="routes"
+                            title="Filter Routes by this agent"
+                            stopPropagation
+                          />
+                        )}
+                        {sessions.length > 0 && (
+                          <BadgeLink
+                            href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                            tone="ok"
+                            size="xs"
+                            count={sessions.length}
+                            label="active"
+                            title="Open active sessions for this agent"
+                            stopPropagation
+                          />
+                        )}
+                        {turns7d > 0 && (
+                          <BadgeLink
+                            href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                            tone="muted"
+                            size="xs"
+                            count={turns7d}
+                            label="msgs 7d"
+                            title="Analytics breakdown for this agent over the last 7 days"
+                            stopPropagation
+                          />
+                        )}
                       </div>
                     </td>
                     <td style={tableBodyCell}>
@@ -613,9 +756,15 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                     <td style={tableBodyCell}>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         {routeLabels.length > 0 ? routeLabels.map((label, i) => (
-                          <Badge key={i} tone="accent" size="xs" onClick={() => { window.location.hash = 'routes' }}>
-                            {label}
-                          </Badge>
+                          <BadgeLink
+                            key={i}
+                            href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                            tone="accent"
+                            size="xs"
+                            label={label}
+                            title="Open Routes filtered by this agent"
+                            stopPropagation
+                          />
                         )) : <span style={{ fontSize: 10, color: 'var(--text-4)' }}>not routed</span>}
                       </div>
                     </td>
@@ -655,16 +804,46 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
       {/* CARDS VIEW */}
       {view === 'cards' && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
-          {otherAgents.map(a => {
+          {visibleOtherAgents.map(a => {
             const sessions = agentActiveSessions(a.name)
             const routeLabels = agentRouteLabels(a)
             const hasFullAccess = a.routes.some(r => r.fullAccess)
+            const turns7d = turnsByAgent7d[a.name] || 0
             return (
-              <Card key={a.name} padding="14px 16px">
+              <Card key={a.name} interactive padding="14px 16px" onClick={() => setDetailAgent(a.name)}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
                   <AgentName name={a.name} size="sm" />
                   {hasFullAccess && <Badge tone="accent" size="xs">FULL</Badge>}
-                  {sessions.length > 0 && <Badge tone="ok" size="xs">{sessions.length} active</Badge>}
+                  {a.routes.length > 0 && (
+                    <BadgeLink
+                      href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                      tone="neutral"
+                      size="xs"
+                      count={a.routes.length}
+                      label="routes"
+                      stopPropagation
+                    />
+                  )}
+                  {sessions.length > 0 && (
+                    <BadgeLink
+                      href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                      tone="ok"
+                      size="xs"
+                      count={sessions.length}
+                      label="active"
+                      stopPropagation
+                    />
+                  )}
+                  {turns7d > 0 && (
+                    <BadgeLink
+                      href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                      tone="muted"
+                      size="xs"
+                      count={turns7d}
+                      label="msgs 7d"
+                      stopPropagation
+                    />
+                  )}
                 </div>
                 {a.scopes && <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>{scopeBadges(a.scopes)}</div>}
                 <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
@@ -863,6 +1042,110 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
             </>
           )}
         </div>
+      </Panel>
+
+      {/* AGENT DETAIL PANEL (Related routes / sessions / memory) */}
+      <Panel
+        open={detailAgent !== null}
+        title={detailAgent ? `${detailAgent} — Related` : ''}
+        onClose={() => setDetailAgent(null)}
+      >
+        {detailAgent && (() => {
+          const a = agents.find(x => x.name === detailAgent)
+          if (!a) return null
+          const sessions = agentActiveSessions(a.name)
+          const routesForAgent = allRoutes.filter(r => r.workspace === a.name)
+          const turns7d = turnsByAgent7d[a.name] || 0
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <Button size="sm" onClick={() => { setDetailAgent(null); openAgentFile(a.name, 'CLAUDE.md') }}>
+                  Edit CLAUDE.md →
+                </Button>
+                <Button size="sm" onClick={() => { setDetailAgent(null); openToolsPicker(a.name, a.tools || []) }}>
+                  Edit tools →
+                </Button>
+                <Button size="sm" onClick={() => { window.location.hash = `#/memory?agent=${encodeURIComponent(a.name)}` }}>
+                  View memory →
+                </Button>
+              </div>
+
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <BadgeLink
+                  href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                  tone="accent"
+                  size="sm"
+                  count={routesForAgent.length}
+                  label="routes"
+                />
+                <BadgeLink
+                  href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                  tone={sessions.length > 0 ? 'ok' : 'muted'}
+                  size="sm"
+                  count={sessions.length}
+                  label="sessions"
+                />
+                <BadgeLink
+                  href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                  tone="muted"
+                  size="sm"
+                  count={turns7d}
+                  label="msgs 7d"
+                />
+              </div>
+
+              <div>
+                <SectionHeader title="Routes" count={routesForAgent.length} />
+                <RelatedList
+                  empty="No route uses this agent"
+                  items={routesForAgent.map(r => ({
+                    key: `r-${r.index}`,
+                    href: `#/routes?filter=agent:${encodeURIComponent(a.name)}`,
+                    primary: (
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                        {r.channel} · {r.group || (r.from !== '*' ? r.from : 'any')}
+                      </span>
+                    ),
+                    secondary: `#${r.index}`,
+                  }))}
+                />
+              </div>
+
+              <div>
+                <SectionHeader title="Active sessions" count={sessions.length} />
+                <RelatedList
+                  empty="No active sessions"
+                  items={sessions.map(sp => ({
+                    key: sp.key,
+                    href: `#/sessions?filter=key:${encodeURIComponent(sp.key)}`,
+                    primary: <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{sp.key.length > 32 ? sp.key.slice(0, 32) + '…' : sp.key}</span>,
+                    secondary: `${sp.channel || '?'} · ${sp.messageCount} turns · ~${(sp.estimatedTokens / 1000).toFixed(0)}k tok`,
+                    trailing: (
+                      <span
+                        style={{
+                          width: 8, height: 8, borderRadius: '50%',
+                          background: sp.alive ? 'var(--ok)' : 'var(--err)',
+                        }}
+                      />
+                    ),
+                  }))}
+                />
+              </div>
+
+              <div>
+                <SectionHeader title="Memory" />
+                <RelatedList
+                  items={[{
+                    key: 'mem',
+                    href: `#/memory?agent=${encodeURIComponent(a.name)}`,
+                    primary: 'Open memory filtered by agent',
+                    secondary: `~/.claude/jarvis/agents/${a.name}/`,
+                  }]}
+                />
+              </div>
+            </div>
+          )
+        })()}
       </Panel>
 
       {/* TOOLS PICKER PANEL */}

@@ -8,7 +8,10 @@ import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { EmptyState } from '../components/ui/EmptyState'
 import { IconButton } from '../components/ui/IconButton'
-import { Info, RefreshCw } from 'lucide-react'
+import { Info, RefreshCw, Download } from 'lucide-react'
+import { api } from '../api/client'
+import type { FullRoute } from '../api/client'
+import { parseHashFilter, parseHashParam } from '../lib/hashFilter'
 
 interface AggResult {
   key: string
@@ -73,9 +76,41 @@ function ago(ts: number): string {
   return `${Math.floor(s / 3600)}h ago`
 }
 
+// Parse initial state from hash so links like `#/analytics?groupBy=route&period=7d&filter=agent:foo` hydrate.
+function parseInitialAnalyticsHash(): { days: number; groupBy: GroupBy } {
+  const hash = window.location.hash
+  const period = parseHashParam(hash, 'period')
+  const group = parseHashParam(hash, 'groupBy') as GroupBy
+  const dayMap: Record<string, number> = { '7d': 7, '14d': 14, '30d': 30, '90d': 90 }
+  return {
+    days: dayMap[period] || 30,
+    groupBy: group === 'route' || group === 'channel' || group === 'model' ? group : 'route',
+  }
+}
+
 export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type: 'success' | 'error' | 'info') => void }) {
-  const [days, setDays] = useState(30)
-  const [groupBy, setGroupBy] = useState<GroupBy>('route')
+  const initial = parseInitialAnalyticsHash()
+  const [days, setDays] = useState(initial.days)
+  const [groupBy, setGroupBy] = useState<GroupBy>(initial.groupBy)
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
+  const [routes, setRoutes] = useState<FullRoute[]>([])
+
+  useEffect(() => {
+    api.routesFull().then(setRoutes).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const onHash = () => setHashFilter(parseHashFilter(window.location.hash))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  const clearHashFilter = () => {
+    setHashFilter(null)
+    if (window.location.hash.includes('filter=')) {
+      window.history.replaceState(null, '', `#/analytics?groupBy=${groupBy}&period=${days}d`)
+    }
+  }
 
   const fetcher = useCallback(async (): Promise<CostsResponse> => {
     const res = await fetch(`/api/costs?days=${days}&groupBy=${groupBy}`)
@@ -92,17 +127,75 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
 
   const { data: heatmapData } = usePolling<CostsResponse>(heatmapFetcher, 60000)
 
+  // Resolve hashFilter into concrete matchers. A `route:<idx>` becomes an
+  // agent-name matcher because the costs API groups by route=agent.
+  const resolvedFilter = useMemo(() => {
+    if (!hashFilter) return null
+    const { type, value } = hashFilter
+    if (type === 'route') {
+      const idx = parseInt(value, 10)
+      if (Number.isNaN(idx)) return null
+      const r = routes[idx]
+      if (!r) return null
+      return { field: 'route' as const, value: r.workspace, label: `route #${idx} (${r.workspace})` }
+    }
+    if (type === 'agent') return { field: 'route' as const, value, label: `agent: ${value}` }
+    if (type === 'channel') return { field: 'channel' as const, value, label: `channel: ${value}` }
+    if (type === 'model') return { field: 'model' as const, value, label: `model: ${value}` }
+    return null
+  }, [hashFilter, routes])
+
+  const filteredAggregated = useMemo(() => {
+    if (!data) return [] as AggResult[]
+    if (!resolvedFilter) return data.aggregated
+    // When group axis matches filter field we can keep only the matching row.
+    const fieldAlignsWithGroup =
+      (resolvedFilter.field === 'route' && groupBy === 'route') ||
+      (resolvedFilter.field === 'channel' && groupBy === 'channel') ||
+      (resolvedFilter.field === 'model' && groupBy === 'model')
+    if (fieldAlignsWithGroup) return data.aggregated.filter(a => a.key === resolvedFilter.value)
+    // Otherwise aggregate the recent entries on-the-fly (no server call).
+    const matching = data.recent.filter(e => {
+      if (resolvedFilter.field === 'route') return e.route === resolvedFilter.value
+      if (resolvedFilter.field === 'channel') return e.channel === resolvedFilter.value
+      if (resolvedFilter.field === 'model') return e.model === resolvedFilter.value
+      return true
+    })
+    const map = new Map<string, AggResult>()
+    for (const e of matching) {
+      const key = groupBy === 'route' ? e.route : groupBy === 'channel' ? e.channel : e.model
+      const row = map.get(key) || { key, totalCost: 0, totalInputTokens: 0, totalOutputTokens: 0, count: 0 }
+      row.totalCost += e.costUsd
+      row.totalInputTokens += e.inputTokens
+      row.totalOutputTokens += e.outputTokens
+      row.count += 1
+      map.set(key, row)
+    }
+    return Array.from(map.values()).sort((a, b) => b.totalCost - a.totalCost)
+  }, [data, resolvedFilter, groupBy])
+
+  const filteredRecent = useMemo(() => {
+    if (!data) return [] as RawEntry[]
+    if (!resolvedFilter) return data.recent
+    return data.recent.filter(e => {
+      if (resolvedFilter.field === 'route') return e.route === resolvedFilter.value
+      if (resolvedFilter.field === 'channel') return e.channel === resolvedFilter.value
+      if (resolvedFilter.field === 'model') return e.model === resolvedFilter.value
+      return true
+    })
+  }, [data, resolvedFilter])
+
   const summary = useMemo(() => {
     if (!data) return null
-    const agg = data.aggregated
+    const agg = filteredAggregated
     const totalCost = agg.reduce((s, a) => s + a.totalCost, 0)
     const totalInput = agg.reduce((s, a) => s + a.totalInputTokens, 0)
     const totalOutput = agg.reduce((s, a) => s + a.totalOutputTokens, 0)
     const totalTurns = agg.reduce((s, a) => s + a.count, 0)
     const totalTokens = totalInput + totalOutput
 
-    const cacheRead = data.recent.reduce((s, e) => s + e.cacheRead, 0)
-    const recentInput = data.recent.reduce((s, e) => s + e.inputTokens, 0)
+    const cacheRead = filteredRecent.reduce((s, e) => s + e.cacheRead, 0)
+    const recentInput = filteredRecent.reduce((s, e) => s + e.inputTokens, 0)
     const cacheHitPct = recentInput > 0 ? (cacheRead / recentInput) * 100 : 0
 
     return {
@@ -114,7 +207,31 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
       avgCostPerTurn: totalTurns > 0 ? totalCost / totalTurns : 0,
       cacheHitPct,
     }
-  }, [data])
+  }, [data, filteredAggregated, filteredRecent])
+
+  const exportCsv = useCallback(() => {
+    if (!data) return
+    const rows = filteredRecent.length ? filteredRecent : data.recent
+    const headers = ['ts', 'iso', 'route', 'channel', 'from', 'model', 'inputTokens', 'outputTokens', 'cacheCreation', 'cacheRead', 'costUsd', 'durationMs', 'apiDurationMs']
+    const lines = [headers.join(',')]
+    for (const r of rows) {
+      const iso = new Date(r.ts).toISOString()
+      const vals = [r.ts, iso, r.route, r.channel, r.from, r.model, r.inputTokens, r.outputTokens, r.cacheCreation, r.cacheRead, r.costUsd.toFixed(6), r.durationMs, r.apiDurationMs]
+      lines.push(vals.map(v => {
+        const s = String(v)
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+      }).join(','))
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `analytics-${days}d-${groupBy}${resolvedFilter ? '-' + resolvedFilter.field + '_' + resolvedFilter.value : ''}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, [data, filteredRecent, days, groupBy, resolvedFilter])
 
   const maxBarCost = useMemo(() => {
     if (!data?.byDay.length) return 1
@@ -158,6 +275,12 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
               })}
             </div>
             <IconButton
+              icon={<Download size={13} />}
+              label="Export CSV"
+              onClick={exportCsv}
+              disabled={loading || !data}
+            />
+            <IconButton
               icon={<RefreshCw size={13} />}
               label="Refresh"
               onClick={refresh}
@@ -166,6 +289,34 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
           </>
         }
       />
+
+      {resolvedFilter && (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            alignSelf: 'flex-start',
+            padding: '5px 10px',
+            fontSize: 11,
+            background: 'var(--accent-tint)',
+            border: '1px solid var(--accent-border)',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text-2)',
+          }}
+        >
+          <span>
+            Filtered by <strong style={{ color: 'var(--accent-bright)' }}>{resolvedFilter.label}</strong>
+          </span>
+          <button
+            onClick={clearHashFilter}
+            aria-label="Clear filter"
+            style={{ background: 'transparent', border: 'none', color: 'var(--text-3)', cursor: 'pointer', fontSize: 12, padding: '0 4px' }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Summary Cards */}
       {summary && (
@@ -259,7 +410,7 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
           </div>
         </div>
 
-        {data && data.aggregated.length > 0 ? (
+        {data && filteredAggregated.length > 0 ? (
           <div style={{ borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', overflow: 'hidden' }}>
             <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
               <thead>
@@ -274,15 +425,28 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
                 </tr>
               </thead>
               <tbody>
-                {data.aggregated.map(a => {
+                {filteredAggregated.map(a => {
                   const pctOfTotal = summary ? (a.totalCost / Math.max(summary.totalCost, 0.001)) * 100 : 0
                   const isJarvis = groupBy === 'route' && a.key === 'jarvis'
+                  const drillHref = groupBy === 'route'
+                    ? `#/sessions?filter=agent:${encodeURIComponent(a.key)}`
+                    : groupBy === 'channel'
+                      ? `#/sessions?filter=channel:${encodeURIComponent(a.key)}`
+                      : null
+                  const onRowClick = () => {
+                    if (drillHref) {
+                      window.location.hash = drillHref
+                    }
+                  }
                   return (
                     <tr
                       key={a.key}
+                      onClick={onRowClick}
+                      title={drillHref ? `Open sessions for ${a.key}` : `Click a row to filter this model`}
                       style={{
                         borderTop: '1px solid var(--border)',
                         background: isJarvis ? 'linear-gradient(90deg, var(--jarvis-tint) 0%, transparent 40%)' : 'transparent',
+                        cursor: drillHref ? 'pointer' : 'default',
                       }}
                     >
                       <td style={td}>
@@ -318,14 +482,19 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
             </table>
           </div>
         ) : (
-          <EmptyState title="No cost data for this period" hint={`Try a wider range — there may be no recorded turns in the last ${days} days.`} />
+          <EmptyState
+            title={resolvedFilter ? `No cost data for ${resolvedFilter.label}` : 'No cost data for this period'}
+            hint={resolvedFilter
+              ? 'Clear the filter or widen the period.'
+              : `Try a wider range — there may be no recorded turns in the last ${days} days.`}
+          />
         )}
       </div>
 
       {/* Recent Activity */}
-      {data && data.recent.length > 0 && (
+      {data && filteredRecent.length > 0 && (
         <div>
-          <SectionHeader title="Recent activity" count={`last ${data.recent.length}`} />
+          <SectionHeader title="Recent activity" count={`last ${filteredRecent.length}`} />
           <div style={{ borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', overflow: 'auto', maxHeight: 400 }}>
             <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
               <thead>
@@ -342,14 +511,18 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
                 </tr>
               </thead>
               <tbody>
-                {data.recent.slice().reverse().slice(0, 50).map((e, i) => {
+                {filteredRecent.slice().reverse().slice(0, 50).map((e, i) => {
                   const isJarvis = e.route === 'jarvis'
+                  const rowHref = `#/sessions?filter=agent:${encodeURIComponent(e.route)}`
                   return (
                     <tr
                       key={`${e.ts}-${i}`}
+                      onClick={() => { window.location.hash = rowHref }}
+                      title={`Open sessions for ${e.route}`}
                       style={{
                         borderTop: '1px solid var(--border)',
                         background: isJarvis ? 'linear-gradient(90deg, var(--jarvis-tint) 0%, transparent 30%)' : 'transparent',
+                        cursor: 'pointer',
                       }}
                     >
                       <td style={tdSmall}><span style={{ color: 'var(--text-4)' }}>{ago(e.ts)}</span></td>

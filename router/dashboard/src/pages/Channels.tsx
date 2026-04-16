@@ -8,11 +8,17 @@ import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
-import { Badge } from '../components/ui/Badge'
 import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Input } from '../components/ui/Field'
+import { BadgeLink } from '../components/BadgeLink'
+import { parseHashFocus } from '../lib/hashFilter'
+
+interface ChannelCostAgg {
+  key: string
+  totalCost: number
+}
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -39,9 +45,30 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
     refreshRoutes()
   }, [refreshChannels, refreshState, refreshRoutes])
 
-  const [expandedChannel, setExpandedChannel] = useState<string | null>(null)
+  const [expandedChannel, setExpandedChannel] = useState<string | null>(() => parseHashFocus(window.location.hash) || null)
   const [toggling, setToggling] = useState<Record<string, boolean>>({})
   const [revealedTokens, setRevealedTokens] = useState<Record<string, boolean>>({})
+  const [costByChannel30d, setCostByChannel30d] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    fetch('/api/costs?days=30&groupBy=channel')
+      .then(r => r.json())
+      .then((r: { aggregated: ChannelCostAgg[] }) => {
+        const map: Record<string, number> = {}
+        for (const a of r.aggregated || []) map[a.key] = a.totalCost
+        setCostByChannel30d(map)
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const onHash = () => {
+      const focus = parseHashFocus(window.location.hash)
+      if (focus) setExpandedChannel(focus)
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   // WhatsApp-specific config (allowed callers + always-reply groups)
   const [callers, setCallers] = useState<string[]>([])
@@ -212,21 +239,38 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                     boxShadow: ch.status === 'ok' ? '0 0 6px rgba(39,166,68,0.4)' : undefined,
                   }}
                 />
-                {sessions.length > 0 ? (
-                  <Badge tone="ok" size="xs" style={{ marginLeft: 'auto' }}>
-                    {sessions.length} session{sessions.length > 1 ? 's' : ''}
-                  </Badge>
-                ) : (
-                  <span
-                    style={{
-                      marginLeft: 'auto',
-                      fontSize: 11,
-                      color: 'var(--text-4)',
-                    }}
-                  >
-                    {chRoutes.length} {chRoutes.length === 1 ? 'route' : 'routes'}
-                  </span>
-                )}
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <BadgeLink
+                    href={`#/routes?filter=channel:${encodeURIComponent(ch.name)}`}
+                    tone="neutral"
+                    size="xs"
+                    count={chRoutes.length}
+                    label="routes"
+                    title="Filter Routes by this channel"
+                    stopPropagation
+                  />
+                  {sessions.length > 0 && (
+                    <BadgeLink
+                      href={`#/sessions?filter=channel:${encodeURIComponent(ch.name)}`}
+                      tone="ok"
+                      size="xs"
+                      count={sessions.length}
+                      label="sessions"
+                      title="Open active sessions for this channel"
+                      stopPropagation
+                    />
+                  )}
+                  {(costByChannel30d[ch.name] || 0) > 0 && (
+                    <BadgeLink
+                      href={`#/analytics?groupBy=channel&period=30d&filter=channel:${encodeURIComponent(ch.name)}`}
+                      tone="muted"
+                      size="xs"
+                      label={`$${costByChannel30d[ch.name].toFixed(2)} · 30d`}
+                      title="Analytics for this channel over the last 30 days"
+                      stopPropagation
+                    />
+                  )}
+                </div>
                 <span
                   aria-hidden
                   style={{ display: 'inline-flex', color: 'var(--text-4)', marginLeft: sessions.length > 0 ? 6 : 0 }}
@@ -288,7 +332,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                           size="xs"
                           onClick={(e) => {
                             e.stopPropagation()
-                            window.location.hash = 'agents'
+                            window.location.hash = `#/agents?focus=${encodeURIComponent(agentName)}`
                           }}
                         />
                       </div>

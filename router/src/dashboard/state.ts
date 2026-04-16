@@ -143,18 +143,53 @@ export function getMessagesByChannel(): Record<string, number> {
   return messagesByChannel;
 }
 
+export type ResponseStatus = "ok" | "error" | "timeout";
+
 export interface ResponseTime {
   ts: number;
   key: string;
+  /** Channel segment of the session key. Derived from `key.split(":")[0]`. */
+  channel?: string;
+  /** Agent name at the time the exchange was recorded. */
+  agent?: string;
+  /** Index into `config.routes` at record time. Stable until the user reorders routes. */
+  routeIndex?: number;
   wallMs: number;
   apiMs: number;
   model: string;
+  status?: ResponseStatus;
 }
+
+export interface ResponseTimeRecordOpts {
+  channel?: string;
+  agent?: string;
+  routeIndex?: number;
+  status?: ResponseStatus;
+}
+
 const responseTimes: ResponseTime[] = [];
 const MAX_RESPONSE_TIMES = 100;
 
-export function trackResponseTime(key: string, wallMs: number, apiMs: number, model: string): void {
-  responseTimes.push({ ts: Date.now(), key, wallMs, apiMs, model });
+export function trackResponseTime(
+  key: string,
+  wallMs: number,
+  apiMs: number,
+  model: string,
+  opts: ResponseTimeRecordOpts = {},
+): void {
+  const channel = opts.channel ?? (key.includes(":") ? key.slice(0, key.indexOf(":")) : undefined);
+  const entry: ResponseTime = {
+    ts: Date.now(),
+    key,
+    wallMs,
+    apiMs,
+    model,
+    status: opts.status ?? "ok",
+  };
+  if (channel) entry.channel = channel;
+  if (opts.agent) entry.agent = opts.agent;
+  if (opts.routeIndex !== undefined && opts.routeIndex >= 0) entry.routeIndex = opts.routeIndex;
+  responseTimes.push(entry);
   if (responseTimes.length > MAX_RESPONSE_TIMES) responseTimes.splice(0, responseTimes.length - MAX_RESPONSE_TIMES);
 }
 

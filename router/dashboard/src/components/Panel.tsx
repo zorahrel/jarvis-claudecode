@@ -21,13 +21,8 @@ export function Panel({ open, title, children, onClose, width = 480 }: PanelProp
 
   return (
     <>
-      <div
-        className="panel-overlay fixed inset-0 z-40"
-        style={{ background: 'rgba(0,0,0,0.5)' }}
-        onClick={onClose}
-      />
       <aside
-        className="panel-slide fixed top-0 right-0 h-full z-50 overflow-y-auto"
+        className="panel-slide fixed top-0 right-0 h-full z-40 overflow-y-auto"
         style={{
           width,
           background: 'var(--bg-2)',

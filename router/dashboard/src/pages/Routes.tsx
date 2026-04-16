@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { Plus } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -11,8 +11,20 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { AgentName } from '../components/ui/AgentName'
 import { Field, Input, Select } from '../components/ui/Field'
+import { BadgeLink } from '../components/BadgeLink'
 import type { FullRoute, ProcessSession } from '../api/client'
 import { ChannelIcon } from '../icons'
+import { parseHashFilter } from '../lib/hashFilter'
+
+interface AggEntry {
+  key: string
+  totalCost: number
+  count: number
+}
+
+interface CostsResponse {
+  aggregated: AggEntry[]
+}
 
 interface RouteFormState {
   channel: string
@@ -69,8 +81,45 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
   const [detailClaudeMd, setDetailClaudeMd] = useState<string | null>(null)
   const [processes, setProcesses] = useState<ProcessSession[]>([])
   const [saving, setSaving] = useState(false)
+  const [turnsByAgent7d, setTurnsByAgent7d] = useState<Record<string, number>>({})
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
 
   const routes = data || []
+
+  useEffect(() => {
+    const onHash = () => setHashFilter(parseHashFilter(window.location.hash))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/costs?days=7&groupBy=route')
+      .then(r => r.json())
+      .then((r: CostsResponse) => {
+        const map: Record<string, number> = {}
+        for (const a of r.aggregated || []) map[a.key] = a.count
+        setTurnsByAgent7d(map)
+      })
+      .catch(() => {})
+  }, [])
+
+  const filteredRoutes = useMemo(() => {
+    if (!hashFilter) return routes.map((r, index) => ({ r, index }))
+    return routes
+      .map((r, index) => ({ r, index }))
+      .filter(({ r }) => {
+        if (hashFilter.type === 'agent') return r.workspace === hashFilter.value
+        if (hashFilter.type === 'channel') return r.channel === hashFilter.value
+        return true
+      })
+  }, [routes, hashFilter])
+
+  const clearHashFilter = () => {
+    setHashFilter(null)
+    if (window.location.hash.includes('?')) {
+      window.history.replaceState(null, '', '#/routes')
+    }
+  }
 
   useEffect(() => {
     api.agents().then(agents => {
@@ -185,8 +234,12 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
     }
   }
 
-  const goToAgent = (_name: string) => {
-    window.location.hash = 'agents'
+  const goToAgent = (name: string) => {
+    window.location.hash = `#/agents?focus=${encodeURIComponent(name)}`
+  }
+
+  const goToChannel = (name: string) => {
+    window.location.hash = `#/channels?focus=${encodeURIComponent(name)}`
   }
 
   const placeholderFrom = form.channel === 'whatsapp' ? '+1234567890'
@@ -209,6 +262,34 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
         }
       />
 
+      {hashFilter && (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            alignSelf: 'flex-start',
+            padding: '5px 10px',
+            fontSize: 11,
+            background: 'var(--accent-tint)',
+            border: '1px solid var(--accent-border)',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text-2)',
+          }}
+        >
+          <span>
+            Filtered by {hashFilter.type}: <strong style={{ color: 'var(--accent-bright)' }}>{hashFilter.value}</strong>
+          </span>
+          <button
+            onClick={clearHashFilter}
+            aria-label="Clear filter"
+            style={{ background: 'transparent', border: 'none', color: 'var(--text-3)', cursor: 'pointer', fontSize: 12, padding: '0 4px' }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <InfoBox
         title="How routes work"
         tone="neutral"
@@ -225,10 +306,11 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
           overflow: 'hidden',
         }}
       >
-        {routes.map((r, idx) => {
+        {filteredRoutes.map(({ r, index: idx }, listIdx) => {
           const sessions = routeActiveSessions(r)
           const sub = routeSubLabel(r)
           const isJarvis = r.workspace === 'jarvis'
+          const turns7d = turnsByAgent7d[r.workspace] || 0
           return (
             <div
               key={idx}
@@ -239,7 +321,7 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
                 gap: 12,
                 cursor: 'pointer',
                 padding: '10px 14px',
-                borderBottom: idx === routes.length - 1 ? 'none' : '1px solid var(--border)',
+                borderBottom: listIdx === filteredRoutes.length - 1 ? 'none' : '1px solid var(--border)',
                 background: isJarvis ? 'linear-gradient(90deg, var(--jarvis-tint) 0%, transparent 35%)' : 'transparent',
                 transition: 'background 0.15s',
               }}
@@ -292,15 +374,37 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
               </div>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 {sessions.length > 0 && (
-                  <Badge tone="ok" size="xs">{sessions.length} active</Badge>
+                  <BadgeLink
+                    href={`#/sessions?filter=route:${idx}`}
+                    tone="ok"
+                    size="xs"
+                    count={sessions.length}
+                    label="active"
+                    title={`${sessions.length} active session${sessions.length === 1 ? '' : 's'} on this route`}
+                    stopPropagation
+                  />
+                )}
+                {turns7d > 0 && (
+                  <BadgeLink
+                    href={`#/analytics?groupBy=route&period=7d&filter=route:${idx}`}
+                    tone="muted"
+                    size="xs"
+                    count={turns7d}
+                    label="msgs 7d"
+                    title={`${turns7d} messages handled by ${r.workspace} in the last 7 days`}
+                    stopPropagation
+                  />
                 )}
               </div>
             </div>
           )
         })}
-        {routes.length === 0 && (
+        {filteredRoutes.length === 0 && (
           <div style={{ padding: 40 }}>
-            <EmptyState title="No routes configured" hint="Add your first route to start mapping messages to agents." />
+            <EmptyState
+              title={hashFilter ? `No routes match ${hashFilter.type}=${hashFilter.value}` : 'No routes configured'}
+              hint={hashFilter ? 'Clear the filter or adjust the selection.' : 'Add your first route to start mapping messages to agents.'}
+            />
           </div>
         )}
       </div>
@@ -315,9 +419,29 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               <Button size="sm" onClick={() => { setDetailIndex(null); openEdit(detailIndex!) }}>Edit Match</Button>
-              <Button size="sm" onClick={() => { goToAgent(detailRoute.workspace); setDetailIndex(null) }}>Edit Agent →</Button>
+              <Button size="sm" onClick={() => { goToAgent(detailRoute.workspace); setDetailIndex(null) }}>Open Agent →</Button>
+              <Button size="sm" onClick={() => { goToChannel(detailRoute.channel); setDetailIndex(null) }}>Open Channel →</Button>
               <Button size="sm" onClick={() => duplicate(detailIndex!)}>Duplicate</Button>
               <Button size="sm" variant="danger-ghost" onClick={() => { setDeleteIndex(detailIndex!); setDetailIndex(null) }}>Delete</Button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <BadgeLink
+                href={`#/sessions?filter=route:${detailIndex}`}
+                tone="accent"
+                size="sm"
+                count={routeActiveSessions(detailRoute).length}
+                label="sessions"
+                title="Open this route in the Sessions page"
+              />
+              <BadgeLink
+                href={`#/analytics?groupBy=route&period=7d&filter=route:${detailIndex}`}
+                tone="muted"
+                size="sm"
+                count={turnsByAgent7d[detailRoute.workspace] || 0}
+                label="msgs 7d"
+                title="Analytics breakdown for this route over the last 7 days"
+              />
             </div>
 
             <div>

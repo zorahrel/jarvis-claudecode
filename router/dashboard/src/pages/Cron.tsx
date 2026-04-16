@@ -33,6 +33,55 @@ function ago(ts: number | string) {
   return Math.floor(diff / 86400000) + 'd ago'
 }
 
+function fmtInterval(ms: number): string {
+  if (ms < 0) return 'now'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  if (h < 24) return `${h}h ${mm}m`
+  const d = Math.floor(h / 24)
+  return `${d}d ${h % 24}h`
+}
+
+/**
+ * Compute the next fire time of a cron expression after `after`. Returns null
+ * when the expression is too complex (step values, ranges, @-aliases) and the
+ * caller should fall back to "?". Supports the common `m h dom mon dow` grammar
+ * with exact numbers, commas, and wildcards — enough for daily/hourly crons.
+ */
+function nextCronRun(expr: string, after: Date = new Date()): Date | null {
+  if (!expr) return null
+  const parts = expr.trim().split(/\s+/)
+  if (parts.length < 5) return null
+  const [minF, hourF, domF, monF, dowF] = parts
+  const simple = (f: string) => /^(\*|\d+(,\d+)*)$/.test(f)
+  if (![minF, hourF, domF, monF, dowF].every(simple)) return null
+  const match = (f: string, v: number, min: number, max: number): boolean => {
+    if (f === '*') return true
+    const allowed = f.split(',').map(n => parseInt(n, 10)).filter(n => n >= min && n <= max)
+    return allowed.includes(v)
+  }
+  const cur = new Date(after.getTime() + 60_000 - (after.getTime() % 60_000))
+  for (let i = 0; i < 366 * 24 * 60; i++) {
+    const m = cur.getMinutes()
+    const h = cur.getHours()
+    const dom = cur.getDate()
+    const mon = cur.getMonth() + 1
+    const dow = cur.getDay() // 0=Sun..6=Sat
+    if (match(minF, m, 0, 59) && match(hourF, h, 0, 23) && match(monF, mon, 1, 12)) {
+      const domOk = domF === '*' ? true : match(domF, dom, 1, 31)
+      const dowOk = dowF === '*' ? true : match(dowF, dow, 0, 6)
+      // cron semantics: when both dom and dow restrict, either may match.
+      if ((domF === '*' && dowF === '*') || domOk || dowOk) return new Date(cur)
+    }
+    cur.setMinutes(cur.getMinutes() + 1)
+  }
+  return null
+}
+
 interface CronState {
   name: string
   schedule: string
@@ -57,6 +106,7 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
   const [editingCron, setEditingCron] = useState(false)
   const [cronEditForm, setCronEditForm] = useState<Record<string, string>>({})
   const [savingCron, setSavingCron] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({})
   const [newCronForm, setNewCronForm] = useState({
     name: '',
     schedule: '',
@@ -216,14 +266,15 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {(cronJobs || []).map((cj) => {
             const cs = cj as unknown as CronState
+            const nextRun = nextCronRun(cs.schedule || '')
+            const nextLabel = nextRun ? `in ${fmtInterval(nextRun.getTime() - Date.now())}` : '?'
+            const isHistoryOpen = !!historyOpen[cs.name]
             return (
-              <Card
-                key={cs.name}
-                interactive
-                padding="12px 16px"
-                onClick={() => openCronDetail(cs)}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Card key={cs.name} padding="12px 16px">
+                <div
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
+                  onClick={() => openCronDetail(cs)}
+                >
                   <span style={{ display: 'flex', alignItems: 'center' }}>
                     <CronStatusIcon status={cs.lastStatus} />
                   </span>
@@ -231,15 +282,94 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                   <Badge tone={statusTone(cs.lastStatus)} size="xs">
                     {cs.lastStatus || 'idle'}
                   </Badge>
+                  {cs.delivery && (
+                    <a
+                      href={`#/channels?focus=${encodeURIComponent(cs.delivery.channel)}`}
+                      onClick={(e) => e.stopPropagation()}
+                      title={`Target: ${cs.delivery.channel} → ${cs.delivery.target}`}
+                      style={{
+                        fontSize: 10,
+                        padding: '1px 6px',
+                        borderRadius: 'var(--radius-xs)',
+                        background: 'var(--surface-subtle)',
+                        border: '1px solid var(--border)',
+                        color: 'var(--text-3)',
+                        textDecoration: 'none',
+                        fontFamily: 'var(--mono)',
+                      }}
+                    >
+                      → {cs.delivery.channel}
+                    </a>
+                  )}
                   <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-4)', marginLeft: 'auto' }}>
                     {cs.schedule}
                   </span>
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--text-4)', marginTop: 6 }}>
-                  {cs.lastStatus === 'never' || !cs.runCount
-                    ? 'Never run'
-                    : 'Last: ' + ago(cs.lastRun || 0) + ' · ' + (cs.runCount || 0) + ' runs'}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11, color: 'var(--text-4)', marginTop: 6 }}>
+                  <span>
+                    {cs.lastStatus === 'never' || !cs.runCount
+                      ? 'Never run'
+                      : 'Last: ' + ago(cs.lastRun || 0) + ' · ' + (cs.runCount || 0) + ' runs'}
+                  </span>
+                  <span>Next run: <span style={{ color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{nextLabel}</span></span>
+                  {(cs.runCount || 0) > 0 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setHistoryOpen(prev => ({ ...prev, [cs.name]: !isHistoryOpen }))
+                      }}
+                      style={{
+                        marginLeft: 'auto',
+                        fontSize: 10,
+                        padding: '2px 8px',
+                        background: 'transparent',
+                        color: 'var(--accent-bright)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-xs)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {isHistoryOpen ? 'Hide history' : 'View run history'}
+                    </button>
+                  )}
                 </div>
+                {isHistoryOpen && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      marginTop: 8,
+                      padding: 10,
+                      borderRadius: 'var(--radius)',
+                      background: 'var(--bg-0)',
+                      border: '1px solid var(--border)',
+                      display: 'grid',
+                      gridTemplateColumns: '100px 1fr',
+                      gap: '4px 12px',
+                      fontSize: 11,
+                      fontFamily: 'var(--mono)',
+                      color: 'var(--text-3)',
+                    }}
+                  >
+                    <span style={{ color: 'var(--text-4)' }}>runs</span>
+                    <span>{cs.runCount || 0}</span>
+                    <span style={{ color: 'var(--text-4)' }}>last status</span>
+                    <span>{cs.lastStatus || 'never'}</span>
+                    <span style={{ color: 'var(--text-4)' }}>last run</span>
+                    <span>{cs.lastRun ? ago(cs.lastRun) : 'never'}</span>
+                    {cs.lastDurationMs != null && (
+                      <>
+                        <span style={{ color: 'var(--text-4)' }}>last duration</span>
+                        <span>{((cs.lastDurationMs || 0) / 1000).toFixed(1)}s</span>
+                      </>
+                    )}
+                    {cs.lastError && (
+                      <>
+                        <span style={{ color: 'var(--text-4)' }}>last error</span>
+                        <span style={{ color: 'var(--err)', whiteSpace: 'pre-wrap' }}>{cs.lastError}</span>
+                      </>
+                    )}
+                  </div>
+                )}
               </Card>
             )
           })}
@@ -297,6 +427,31 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                         <dt style={dt}>Last run</dt>
                         <dd style={dd}>
                           {ago(cronPanelData.lastRun || 0)} ({((cronPanelData.lastDurationMs || 0) / 1000).toFixed(1)}s)
+                        </dd>
+                      </>
+                    )}
+                    {(() => {
+                      const nr = nextCronRun(cronPanelData.schedule || '')
+                      return (
+                        <>
+                          <dt style={dt}>Next run</dt>
+                          <dd style={dd}>{nr ? `in ${fmtInterval(nr.getTime() - Date.now())} (${nr.toLocaleString()})` : '?'}</dd>
+                        </>
+                      )
+                    })()}
+                    {cronPanelData.delivery && (
+                      <>
+                        <dt style={dt}>Target</dt>
+                        <dd style={dd}>
+                          <a
+                            href={`#/channels?focus=${encodeURIComponent(cronPanelData.delivery.channel)}`}
+                            style={{ color: 'var(--accent-bright)', textDecoration: 'none' }}
+                          >
+                            {cronPanelData.delivery.channel}
+                          </a>
+                          <span style={{ color: 'var(--text-4)', marginLeft: 6, fontFamily: 'var(--mono)', fontSize: 11 }}>
+                            → {cronPanelData.delivery.target}
+                          </span>
                         </dd>
                       </>
                     )}

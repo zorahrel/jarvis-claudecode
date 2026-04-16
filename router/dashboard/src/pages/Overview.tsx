@@ -1,25 +1,21 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useMemo } from 'react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
-import { StatCard } from '../components/StatCard'
+import { DrillDownCard } from '../components/DrillDownCard'
 import { StatusDot } from '../components/StatusDot'
+import { LiveIndicator } from '../components/LiveIndicator'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
-import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
-import { Badge } from '../components/ui/Badge'
 import { Card } from '../components/ui/Card'
-import { AgentName } from '../components/ui/AgentName'
 import { EmptyState } from '../components/ui/EmptyState'
+import { SessionRow } from '../components/SessionRow'
+import {
+  ResponseTimeRow,
+  ResponseTimeHeader,
+  RESPONSE_TIME_GRID,
+} from '../components/ResponseTimeRow'
 import { ArrowUpRight, RefreshCw } from 'lucide-react'
 import type { DashboardState, ServiceStatus, ProcessSession } from '../api/client'
-
-function fmtDuration(ms: number): string {
-  if (ms == null || ms < 0) ms = 0
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
-}
 
 function ago(ts: number | string | undefined): string {
   if (!ts) return 'n/a'
@@ -34,33 +30,35 @@ function short(s: string, maxLen = 20): string {
   return s.length > maxLen ? s.slice(0, maxLen) + '…' : s
 }
 
-function fmt(ts: number): string {
-  return new Date(ts).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+const CHANNEL_META: Record<string, { label: string; href: string }> = {
+  telegram: { label: 'Telegram', href: 'channels' },
+  whatsapp: { label: 'WhatsApp', href: 'channels' },
+  discord: { label: 'Discord', href: 'channels' },
 }
 
-function ctxBarPct(tokens: number): number {
-  return Math.min(100, (tokens / 200_000) * 100)
-}
-
-function ctxBarColor(tokens: number): string {
-  if (tokens > 100_000) return 'var(--err)'
-  if (tokens > 50_000) return 'var(--warn)'
-  return 'var(--ok)'
-}
-
-export function Overview({ onToast }: { onToast: (msg: string, type: 'success' | 'error' | 'info') => void }) {
+export function Overview(_props: { onToast: (msg: string, type: 'success' | 'error' | 'info') => void }) {
   const fetchState = useCallback(() => api.dashboardState(), [])
   const { data, loading, refresh, lastFetch } = usePolling<DashboardState>(fetchState, 5000)
 
   const fetchServices = useCallback(() => api.services(), [])
   const { data: services, refresh: refreshServices } = usePolling<ServiceStatus[]>(fetchServices, 30000)
 
-  // Re-render "Xs ago" label every second
-  const [, tick] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => tick(t => t + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
+  const recentRows = useMemo(() => {
+    const recent = data?.responseTimes?.recent ?? []
+    const processList = data?.processes ?? []
+    const processByKey = new Map(processList.map((p) => [p.key, p]))
+    return [...recent].reverse().slice(0, 15).map((entry) => {
+      if (entry.agent && entry.channel) return entry
+      const proc = processByKey.get(entry.key)
+      const colonIdx = entry.key.indexOf(':')
+      const channelFromKey = colonIdx > 0 ? entry.key.slice(0, colonIdx) : undefined
+      return {
+        ...entry,
+        agent: entry.agent ?? proc?.agentName ?? undefined,
+        channel: entry.channel ?? proc?.channel ?? channelFromKey,
+      }
+    })
+  }, [data?.responseTimes?.recent, data?.processes])
 
   if (loading || !data) {
     return <div style={{ color: 'var(--text-4)' }}>Loading…</div>
@@ -69,13 +67,8 @@ export function Overview({ onToast }: { onToast: (msg: string, type: 'success' |
   const { stats, responseTimes, processes = [] } = data
   const rt = responseTimes || { recent: [], avgWallMs: 0, avgApiMs: 0, count1h: 0, sparkline: '' }
 
-  const handleKill = async (key: string) => {
-    try {
-      await api.killSession(key)
-      onToast('Session killed', 'success')
-    } catch {
-      onToast('Failed to kill session', 'error')
-    }
+  const openSession = (key: string) => {
+    window.location.hash = `#/sessions?filter=key:${encodeURIComponent(key)}`
   }
 
   return (
@@ -85,10 +78,7 @@ export function Overview({ onToast }: { onToast: (msg: string, type: 'success' |
         description="Real-time status of channels, sessions, and performance."
         actions={
           <>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text-4)', padding: '0 6px' }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ok)', boxShadow: '0 0 6px var(--ok)' }} />
-              Live · {lastFetch ? ago(lastFetch) : '…'}
-            </span>
+            <LiveIndicator lastFetch={lastFetch} />
             <IconButton
               icon={<RefreshCw size={13} />}
               label="Refresh now"
@@ -146,16 +136,30 @@ export function Overview({ onToast }: { onToast: (msg: string, type: 'success' |
         )}
       </div>
 
-      {/* Stat Cards */}
+      {/* Stat Cards — each drills into the page with more detail. */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
-        <StatCard label="Messages Routed" value={stats.totalMessages} />
-        <StatCard label="Telegram" value={stats.messagesByChannel?.telegram || 0} sub="messages" />
-        <StatCard label="WhatsApp" value={stats.messagesByChannel?.whatsapp || 0} sub="messages" />
-        <StatCard label="Discord" value={stats.messagesByChannel?.discord || 0} sub="messages" />
-        <StatCard
+        <DrillDownCard
+          label="Messages Routed"
+          value={stats.totalMessages}
+          href="analytics"
+          title="Open Analytics"
+        />
+        {Object.entries(CHANNEL_META).map(([key, meta]) => (
+          <DrillDownCard
+            key={key}
+            label={meta.label}
+            value={stats.messagesByChannel?.[key] || 0}
+            sub="messages"
+            href={meta.href}
+            title={`Open ${meta.label} channel config`}
+          />
+        ))}
+        <DrillDownCard
           label="Live Sessions"
           value={stats.activeProcesses}
           sub={`${processes.length} process${processes.length !== 1 ? 'es' : ''}`}
+          href="sessions"
+          title="Open Sessions — see active processes"
         />
       </div>
 
@@ -164,67 +168,39 @@ export function Overview({ onToast }: { onToast: (msg: string, type: 'success' |
         <SectionHeader
           title="Response Times"
           action={
-            <span style={{ fontSize: 11, color: 'var(--text-4)', fontFamily: 'var(--mono)', display: 'inline-flex', gap: 8 }}>
-              <span>1h avg</span>
-              <span>wall <b style={{ color: 'var(--text-2)' }}>{rt.avgWallMs}</b>ms</span>
-              <span>api <b style={{ color: 'var(--text-2)' }}>{rt.avgApiMs}</b>ms</span>
-              <span><b style={{ color: 'var(--text-2)' }}>{rt.count1h}</b> samples</span>
-              {rt.sparkline && <span>{rt.sparkline}</span>}
+            <span style={{ fontSize: 11, color: 'var(--text-4)', fontFamily: 'var(--mono)', display: 'inline-flex', gap: 10 }}>
+              <span title="Average wall-clock time over the last hour">
+                1h wall <b style={{ color: 'var(--text-2)' }}>{rt.avgWallMs}</b>ms
+              </span>
+              <span title="Average Claude API roundtrip over the last hour">
+                api <b style={{ color: 'var(--text-2)' }}>{rt.avgApiMs}</b>ms
+              </span>
+              <span title="Samples in the last hour">
+                <b style={{ color: 'var(--text-2)' }}>{rt.count1h}</b> samples
+              </span>
+              {rt.sparkline && <span title="Wall-ms trend of last 20 samples">{rt.sparkline}</span>}
             </span>
           }
         />
-        <div style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '70px 1fr 50px 50px 50px 60px',
-              gap: '2px 8px',
-              padding: '6px 0',
-              color: 'var(--text-4)',
-              fontSize: 10,
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: 0.5,
-              borderBottom: '1px solid var(--border)',
-            }}
-          >
-            <span>time</span>
-            <span>session</span>
-            <span style={{ textAlign: 'right' }}>wall</span>
-            <span style={{ textAlign: 'right' }}>api</span>
-            <span style={{ textAlign: 'right' }}>oh</span>
-            <span>model</span>
-          </div>
-          {rt.recent.length === 0 && (
-            <div style={{ color: 'var(--text-4)', textAlign: 'center', padding: '16px 0', fontSize: 12 }}>
-              No data yet
-            </div>
-          )}
-          {rt.recent
-            .slice(-10)
-            .reverse()
-            .map((r, i) => (
-              <div
-                key={`${r.ts}-${r.key}-${i}`}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '70px 1fr 50px 50px 50px 60px',
-                  gap: '2px 8px',
-                  padding: '4px 0',
-                  borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-2)',
-                }}
-              >
-                <span style={{ color: 'var(--text-4)' }}>{fmt(r.ts)}</span>
-                <span>{short(r.key, 20)}</span>
-                <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{Math.round(r.wallMs)}</span>
-                <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{Math.round(r.apiMs)}</span>
-                <span style={{ textAlign: 'right', color: 'var(--text-4)', fontVariantNumeric: 'tabular-nums' }}>
-                  {Math.round(r.wallMs - r.apiMs)}
-                </span>
-                <span style={{ color: 'var(--text-4)' }}>{short(r.model || '', 12)}</span>
+        <div style={{ overflowX: 'auto' }}>
+          <div style={{ minWidth: 780 }}>
+            <ResponseTimeHeader gridTemplate={RESPONSE_TIME_GRID} />
+            {recentRows.length === 0 && (
+              <div style={{ color: 'var(--text-4)', textAlign: 'center', padding: '16px 0', fontSize: 12 }}>
+                No data yet
               </div>
+            )}
+            {recentRows.map((r, i) => (
+              <ResponseTimeRow
+                key={`${r.ts}-${r.key}-${i}`}
+                entry={r}
+                gridTemplate={RESPONSE_TIME_GRID}
+              />
             ))}
+          </div>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-4)' }}>
+          Click a route to open the session in the Sessions view.
         </div>
       </Card>
 
@@ -242,77 +218,30 @@ export function Overview({ onToast }: { onToast: (msg: string, type: 'success' |
         {processes.length === 0 ? (
           <EmptyState title="No active sessions" hint="Sessions spin up when a message arrives on a routed channel." />
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {[...(processes as ProcessSession[])]
+          <SessionList
+            sessions={[...(processes as ProcessSession[])]
               .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
-              .slice(0, 4)
-              .map((p) => {
-                const tokens = p.estimatedTokens || 0
-                const isJarvis = p.agentName === 'jarvis'
-                return (
-                  <Card
-                    key={p.key}
-                    padding="12px 16px"
-                    tone={isJarvis ? 'jarvis' : 'default'}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
-                      <StatusDot ok={p.alive !== false} size={10} />
-                      <AgentName name={p.agentName || undefined} />
-                      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)' }}>
-                        {p.channel ? `${p.channel} · ${short(p.targetLabel || p.target || p.key, 24)}` : short(p.key, 30)}
-                      </span>
-                      <span style={{ fontSize: 11, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>{p.model}</span>
-                      {p.pending && <Badge tone="ok" size="xs">processing</Badge>}
-                      {p.alive !== false && (
-                        <Button
-                          variant="danger-ghost"
-                          size="xs"
-                          onClick={() => handleKill(p.key)}
-                          style={{ marginLeft: 'auto' }}
-                        >
-                          KILL
-                        </Button>
-                      )}
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'var(--text-4)', marginBottom: 6, flexWrap: 'wrap' }}>
-                      <span>up {fmtDuration(p.uptime ?? (Date.now() - (p.createdAt || Date.now())))}</span>
-                      <span>idle {fmtDuration(p.idleTime ?? (Date.now() - (p.lastMessageAt || Date.now())))}</span>
-                      <span>{p.messageCount || 0} turns</span>
-                      <span>~{(tokens / 1000).toFixed(1)}k tok</span>
-                      {!!p.costUsd && <span>${p.costUsd.toFixed(3)}</span>}
-                    </div>
-
-                    <div style={{ height: 3, background: 'var(--bg-0)', borderRadius: 2, overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          width: `${ctxBarPct(tokens)}%`,
-                          height: '100%',
-                          background: ctxBarColor(tokens),
-                          borderRadius: 2,
-                          transition: 'width 0.3s',
-                        }}
-                      />
-                    </div>
-                  </Card>
-                )
-              })}
-            {processes.length > 4 && (
-              <a
-                href="#sessions"
-                style={{
-                  display: 'block',
-                  padding: 8,
-                  textAlign: 'center',
-                  fontSize: 11,
-                  color: 'var(--text-4)',
-                  textDecoration: 'none',
-                }}
-              >
-                +{processes.length - 4} more — view all in Sessions →
-              </a>
-            )}
-          </div>
+              .slice(0, 5)}
+            onOpen={openSession}
+            footer={
+              processes.length > 5 ? (
+                <a
+                  href="#sessions"
+                  style={{
+                    display: 'block',
+                    padding: '8px 14px',
+                    textAlign: 'center',
+                    fontSize: 11,
+                    color: 'var(--text-4)',
+                    textDecoration: 'none',
+                    borderTop: '1px solid var(--border)',
+                  }}
+                >
+                  +{processes.length - 5} more → view all in Sessions
+                </a>
+              ) : null
+            }
+          />
         )}
       </div>
 
@@ -328,21 +257,64 @@ export function Overview({ onToast }: { onToast: (msg: string, type: 'success' |
               </a>
             }
           />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {data.cliSessions.slice(0, 3).map((s) => (
-              <Card key={s.id} padding="10px 14px">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <StatusDot ok={s.alive} />
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', flex: 1 }}>
-                    {short(s.workspace, 50)}
-                  </span>
-                  <span style={{ fontSize: 10, color: 'var(--text-4)' }}>seen {ago(s.lastSeen)}</span>
-                </div>
-              </Card>
+          <div
+            style={{
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}
+          >
+            {data.cliSessions.slice(0, 3).map((s, i, arr) => (
+              <div
+                key={s.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: '10px 14px',
+                  borderBottom: i === arr.length - 1 ? 'none' : '1px solid var(--border)',
+                }}
+              >
+                <StatusDot ok={s.alive} />
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-2)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {short(s.workspace, 60)}
+                </span>
+                <span style={{ fontSize: 10, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>seen {ago(s.lastSeen)}</span>
+              </div>
             ))}
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function SessionList({
+  sessions,
+  onOpen,
+  footer,
+}: {
+  sessions: ProcessSession[]
+  onOpen: (key: string) => void
+  footer?: React.ReactNode
+}) {
+  return (
+    <div
+      style={{
+        borderRadius: 'var(--radius-md)',
+        border: '1px solid var(--border)',
+        overflow: 'hidden',
+      }}
+    >
+      {sessions.map((p, i) => (
+        <SessionRow
+          key={p.key}
+          session={p}
+          isLast={!footer && i === sessions.length - 1}
+          onClick={() => onOpen(p.key)}
+        />
+      ))}
+      {footer}
     </div>
   )
 }
