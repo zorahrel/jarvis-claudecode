@@ -6,13 +6,36 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
-- _(nothing yet)_
+- **Dashboard real-time activity stream.** New WebSocket endpoint at `/ws`
+  broadcasts session lifecycle, exchanges, response timings, and log events.
+  The UI switches to push updates when connected and falls back to polling
+  when it's not. Up to 32 clients, 20 s keep-alive, backpressure-aware.
+- **Dashboard drill-downs.** Sessions, Agents, Routes, Channels, Analytics,
+  Cron, Memory, and Tools pages redesigned around live metrics, drill-down
+  cards, and cross-links between entities. New building blocks include
+  `ActivityStream`, `ConversationThread`, `DrillDownCard`, `LiveIndicator`,
+  `MetricBadge`, `RelatedList`, `RouteBadge`, `SessionRow`, and a URL-hash
+  filter helper in `lib/hashFilter.ts`.
+- **Session thread endpoint.** `GET /api/sessions/:key/thread?limit=N`
+  returns a bounded conversation history for the drill-down view, with
+  path-traversal protection (`isValidKey`).
+- **Richer response-time tracking.** `ResponseTime` entries now carry
+  `channel`, `agent`, `routeIndex`, and `status` (`ok` / `error` /
+  `timeout`), so the dashboard can attribute latency to the right route.
 
 ### Changed
-- _(nothing yet)_
+- **Model resolution now delegated to Claude Code CLI.** Removed the hardcoded
+  alias→ID map in `router/src/services/claude.ts`. Aliases (`opus`, `sonnet`,
+  `haiku`) in `agent.yaml` pass through unchanged, letting the CLI resolve them
+  to the latest available model (e.g. Opus 4.7 as soon as it's released). Pin a
+  specific ID (e.g. `claude-opus-4-6`) in `agent.yaml` if you need version-lock.
 
 ### Fixed
-- _(nothing yet)_
+- **Retry-path model attribution.** The fallback loop in
+  `askClaudeInternal` was passing `models[i]` (first fallback) to
+  `doSendWithTimeout` instead of the current retry model, so logs and
+  response metadata attributed attempts to the wrong model. Now passes
+  the active `model` variable.
 
 ### Removed
 - _(nothing yet)_
