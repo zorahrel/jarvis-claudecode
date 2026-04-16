@@ -267,7 +267,7 @@ function formatHelp(catalog: SlashCommand[]): string {
   group("router", "Router");
   group("user", "Utente");
   group("plugin", "Plugin");
-  if (overflow > 0) lines.push(`_… e altri ${overflow} comandi. Scrivi /\\<nome\\> direttamente._`);
+  if (overflow > 0) lines.push(`_… e altri ${overflow} comandi. Scrivi /nome direttamente._`);
   return lines.join("\n").trim();
 }
 
