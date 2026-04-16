@@ -46,6 +46,18 @@ Dates are ISO (YYYY-MM-DD).
   `doSendWithTimeout` instead of the current retry model, so logs and
   response metadata attributed attempts to the wrong model. Now passes
   the active `model` variable.
+- **Dashboard tooltips made consistent.** The proper portaled `Tooltip`
+  component (120 ms delay, themed bubble, multi-line aware) was previously
+  only used in the sidebar nav. Everywhere else relied on the native
+  `title=` attribute (slow ~1.5 s, basic styling). Refactored shared
+  primitives — `Badge`, `MetricBadge`, `BadgeLink`, `RouteBadge`,
+  `Button`, `DrillDownCard`, `AgentName`, plus the `Th` helper in
+  `Sessions.tsx` — to wrap with `Tooltip` when a `title` is supplied,
+  and converted remaining ad-hoc `title=` callsites in Sessions, Channels,
+  Memory, Skills, Cron, Agents, Overview, ConversationThread, LiveIndicator,
+  and the sidebar's WS status pill. `Tooltip` now also strips the cloned
+  child's native `title` (preventing double-tooltips) and renders strings
+  containing `\n` as multi-line content.
 
 ### Removed
 - _(nothing yet)_

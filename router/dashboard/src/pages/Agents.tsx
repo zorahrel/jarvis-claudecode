@@ -8,6 +8,7 @@ import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { Card } from '../components/ui/Card'
+import { Tooltip } from '../components/ui/Tooltip'
 import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Input, Select, Textarea } from '../components/ui/Field'
@@ -459,27 +460,28 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
   }
 
   const FileBadge = ({ file, onClick }: { file: { name: string; size: number }; onClick: () => void }) => (
-    <span
-      onClick={(e) => { e.stopPropagation(); onClick() }}
-      title={`${(file.size / 1024).toFixed(1)}KB — click to edit`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 6,
-        padding: '2px 8px',
-        fontSize: 10,
-        fontFamily: 'var(--mono)',
-        border: '1px solid var(--border)',
-        background: 'var(--surface-subtle)',
-        color: 'var(--text-3)',
-        borderRadius: 'var(--radius-sm)',
-        cursor: 'pointer',
-      }}
-    >
-      <span>{file.name}</span>
-      <span style={{ color: 'var(--text-4)', fontSize: 9 }}>{(file.size / 1024).toFixed(1)}KB</span>
-    </span>
+    <Tooltip content={`${(file.size / 1024).toFixed(1)}KB — click to edit`} placement="top">
+      <span
+        onClick={(e) => { e.stopPropagation(); onClick() }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 6,
+          padding: '2px 8px',
+          fontSize: 10,
+          fontFamily: 'var(--mono)',
+          border: '1px solid var(--border)',
+          background: 'var(--surface-subtle)',
+          color: 'var(--text-3)',
+          borderRadius: 'var(--radius-sm)',
+          cursor: 'pointer',
+        }}
+      >
+        <span>{file.name}</span>
+        <span style={{ color: 'var(--text-4)', fontSize: 9 }}>{(file.size / 1024).toFixed(1)}KB</span>
+      </span>
+    </Tooltip>
   )
 
   return (
@@ -491,9 +493,8 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
         actions={
           <>
             <div style={{ display: 'flex', gap: 2, background: 'var(--bg-0)', borderRadius: 'var(--radius)', padding: 2, border: '1px solid var(--border)' }}>
-              <button
+              <Tooltip content="Table view" placement="bottom"><button
                 onClick={() => setView('table')}
-                title="Table view"
                 style={{
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   width: 30, height: 26, padding: 0,
@@ -504,10 +505,9 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 }}
               >
                 <Table2 size={14} />
-              </button>
-              <button
+              </button></Tooltip>
+              <Tooltip content="Cards view" placement="bottom"><button
                 onClick={() => setView('cards')}
-                title="Cards view"
                 style={{
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   width: 30, height: 26, padding: 0,
@@ -518,7 +518,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 }}
               >
                 <LayoutGrid size={14} />
-              </button>
+              </button></Tooltip>
             </div>
             <Input
               type="text"

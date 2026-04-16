@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Tooltip } from './ui/Tooltip'
 
 function formatAgo(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '…'
@@ -27,35 +28,36 @@ export function LiveIndicator({ lastFetch, staleAfterMs = 30_000 }: LiveIndicato
   const color = stale ? 'var(--warn)' : 'var(--ok)'
 
   return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        fontSize: 11,
-        fontFamily: 'var(--mono)',
-        color: 'var(--text-4)',
-        padding: '0 6px',
-      }}
-      title={stale ? 'Polling seems stale' : 'Live polling'}
-    >
+    <Tooltip content={stale ? 'Polling seems stale' : 'Live polling'} placement="bottom">
       <span
         style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: color,
-          boxShadow: `0 0 6px ${color}`,
-          animation: stale ? 'none' : 'jarvisPulse 1.6s ease-in-out infinite',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 11,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-4)',
+          padding: '0 6px',
         }}
-      />
-      {stale ? 'Stale' : 'Live'} · updated {formatAgo(age)}
-      <style>{`
-        @keyframes jarvisPulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50%      { opacity: 0.45; transform: scale(1.3); }
-        }
-      `}</style>
-    </span>
+      >
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            background: color,
+            boxShadow: `0 0 6px ${color}`,
+            animation: stale ? 'none' : 'jarvisPulse 1.6s ease-in-out infinite',
+          }}
+        />
+        {stale ? 'Stale' : 'Live'} · updated {formatAgo(age)}
+        <style>{`
+          @keyframes jarvisPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%      { opacity: 0.45; transform: scale(1.3); }
+          }
+        `}</style>
+      </span>
+    </Tooltip>
   )
 }

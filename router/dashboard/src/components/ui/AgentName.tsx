@@ -1,5 +1,6 @@
 import type { CSSProperties, MouseEvent, ReactNode } from 'react'
 import { Sparkles } from 'lucide-react'
+import { Tooltip } from './Tooltip'
 
 interface AgentNameProps {
   name: string | undefined | null
@@ -42,17 +43,19 @@ export function AgentName({
 
   if (isJarvis) {
     return (
-      <span onClick={onClick} style={base} title="jarvis — orchestrator">
-        {showIcon && (
-          <Sparkles
-            size={dims.icon}
-            strokeWidth={2.2}
-            style={{ color: 'var(--accent-bright)', filter: 'drop-shadow(0 0 4px rgba(113,112,255,0.6))' }}
-          />
-        )}
-        <span className="jarvis-text">{display}</span>
-        {suffix}
-      </span>
+      <Tooltip content="jarvis — orchestrator" placement="top">
+        <span onClick={onClick} style={base}>
+          {showIcon && (
+            <Sparkles
+              size={dims.icon}
+              strokeWidth={2.2}
+              style={{ color: 'var(--accent-bright)', filter: 'drop-shadow(0 0 4px rgba(113,112,255,0.6))' }}
+            />
+          )}
+          <span className="jarvis-text">{display}</span>
+          {suffix}
+        </span>
+      </Tooltip>
     )
   }
 

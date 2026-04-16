@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, cloneElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactElement, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -12,6 +12,22 @@ interface TooltipProps {
   /** Fallback when `content` is empty — render the child without wrapping. */
   disabled?: boolean
   children: ReactElement
+}
+
+function renderContent(content: ReactNode): { node: ReactNode; multiline: boolean } {
+  if (typeof content === 'string' && content.includes('\n')) {
+    const lines = content.split('\n')
+    return {
+      multiline: true,
+      node: lines.map((line, i) => (
+        <Fragment key={i}>
+          {line}
+          {i < lines.length - 1 && <br />}
+        </Fragment>
+      )),
+    }
+  }
+  return { node: content, multiline: false }
 }
 
 interface PopoverState {
@@ -116,7 +132,15 @@ export function Tooltip({ content, placement = 'right', delay = 120, disabled, c
     },
   }
 
-  const clone = cloneElement(children, triggerHandlers as Record<string, unknown>)
+  // Strip native title to avoid double-tooltip flicker (browser native + custom).
+  const stripNativeTitle = childProps.title !== undefined ? { title: undefined } : null
+
+  const clone = cloneElement(
+    children,
+    { ...stripNativeTitle, ...triggerHandlers } as Record<string, unknown>,
+  )
+
+  const { node: contentNode, multiline } = renderContent(content)
 
   const bubbleStyle: CSSProperties | null = state
     ? {
@@ -135,7 +159,7 @@ export function Tooltip({ content, placement = 'right', delay = 120, disabled, c
         fontSize: 11,
         fontFamily: 'var(--sans)',
         lineHeight: 1.3,
-        whiteSpace: 'nowrap',
+        whiteSpace: multiline ? 'normal' : 'nowrap',
         maxWidth: 260,
         opacity: 1,
         animation: 'jarvisTooltipIn 80ms ease-out',
@@ -149,7 +173,7 @@ export function Tooltip({ content, placement = 'right', delay = 120, disabled, c
         createPortal(
           <>
             <style>{`@keyframes jarvisTooltipIn { from { opacity: 0; transform-origin: left; } to { opacity: 1; } }`}</style>
-            <div style={bubbleStyle}>{content}</div>
+            <div style={bubbleStyle}>{contentNode}</div>
           </>,
           document.body,
         )}

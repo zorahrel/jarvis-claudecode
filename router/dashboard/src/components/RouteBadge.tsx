@@ -1,6 +1,7 @@
 import type { CSSProperties, MouseEvent } from 'react'
 import { ChannelIcon } from '../icons'
 import { AgentName } from './ui/AgentName'
+import { Tooltip } from './ui/Tooltip'
 
 interface RouteBadgeProps {
   channel?: string
@@ -51,7 +52,6 @@ export function RouteBadge({
         overflow: 'hidden',
         ...style,
       }}
-      title={title}
     >
       {channel && (
         <span style={{ display: 'inline-flex', color: 'var(--text-3)', flexShrink: 0 }}>
@@ -62,17 +62,16 @@ export function RouteBadge({
     </span>
   )
 
-  if (href) {
-    return (
-      <a
-        href={href}
-        onClick={onClick}
-        title={title}
-        style={{ textDecoration: 'none', display: 'inline-flex', minWidth: 0, maxWidth: '100%' }}
-      >
-        {content}
-      </a>
-    )
-  }
-  return content
+  const node = href ? (
+    <a
+      href={href}
+      onClick={onClick}
+      style={{ textDecoration: 'none', display: 'inline-flex', minWidth: 0, maxWidth: '100%' }}
+    >
+      {content}
+    </a>
+  ) : content
+
+  if (!title) return node
+  return <Tooltip content={title} placement="top">{node}</Tooltip>
 }

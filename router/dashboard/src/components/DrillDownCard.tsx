@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { ArrowUpRight } from 'lucide-react'
+import { Tooltip } from './ui/Tooltip'
 
 interface DrillDownCardProps {
   label: string
@@ -81,19 +82,19 @@ export function DrillDownCard({ label, value, sub, href, title, tone = 'default'
     transform: hover && clickable ? 'translateY(-1px)' : 'none',
   }
 
-  if (!clickable) {
-    return <div style={baseStyle} title={title}>{body}</div>
-  }
-
-  return (
+  const node = clickable ? (
     <a
       href={`#${href}`}
-      title={title}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{ ...baseStyle, cursor: 'pointer', textDecoration: 'none', color: 'inherit' }}
     >
       {body}
     </a>
+  ) : (
+    <div style={baseStyle}>{body}</div>
   )
+
+  if (!title) return node
+  return <Tooltip content={title} placement="top">{node}</Tooltip>
 }

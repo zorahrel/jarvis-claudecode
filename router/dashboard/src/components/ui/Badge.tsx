@@ -1,4 +1,5 @@
 import type { CSSProperties, ReactNode, MouseEvent } from 'react'
+import { Tooltip } from './Tooltip'
 
 type Tone = 'neutral' | 'ok' | 'warn' | 'err' | 'accent' | 'jarvis' | 'muted'
 type Size = 'xs' | 'sm'
@@ -39,9 +40,8 @@ export function Badge({
   onClick,
   style,
 }: BadgeProps) {
-  return (
+  const span = (
     <span
-      title={title}
       onClick={onClick}
       style={{
         display: 'inline-flex',
@@ -60,4 +60,6 @@ export function Badge({
       {children}
     </span>
   )
+  if (!title) return span
+  return <Tooltip content={title} placement="top">{span}</Tooltip>
 }

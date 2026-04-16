@@ -3,6 +3,7 @@ import { RefreshCw, X } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
 import { Panel } from '../components/Panel'
+import { Tooltip } from '../components/ui/Tooltip'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
@@ -346,12 +347,11 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
                   onClick={() => setSelected(p)}
                 >
                   <Td>
-                    <span
-                      style={{ color: p.alive ? 'var(--ok)' : 'var(--err)', fontSize: 14 }}
-                      title={p.pending ? 'Processing' : p.alive ? 'Idle' : 'Dead'}
-                    >
-                      ●
-                    </span>
+                    <Tooltip content={p.pending ? 'Processing' : p.alive ? 'Idle' : 'Dead'} placement="right">
+                      <span style={{ color: p.alive ? 'var(--ok)' : 'var(--err)', fontSize: 14 }}>
+                        ●
+                      </span>
+                    </Tooltip>
                   </Td>
                   <Td>
                     <div className="flex gap-1.5 items-center flex-wrap">
@@ -387,18 +387,22 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
                     <div className="font-mono" style={{ fontSize: 10, color: 'var(--text-4)' }}>idle {fmtDuration(p.idleTime)}</div>
                   </Td>
                   <Td>
-                    <span
-                      className="font-mono text-xs"
-                      style={{
-                        color:
-                          Math.min(p.timeToInactivityTimeout, p.timeToLifetimeTimeout) < 5 * 60 * 1000
-                            ? 'var(--warn, #e69e28)'
-                            : 'var(--text-3)',
-                      }}
-                      title={`Inactivity: ${fmtDuration(p.timeToInactivityTimeout)} | Lifetime: ${fmtDuration(p.timeToLifetimeTimeout)}`}
+                    <Tooltip
+                      content={`Inactivity: ${fmtDuration(p.timeToInactivityTimeout)}\nLifetime: ${fmtDuration(p.timeToLifetimeTimeout)}`}
+                      placement="top"
                     >
-                      {fmtDuration(Math.min(p.timeToInactivityTimeout, p.timeToLifetimeTimeout))}
-                    </span>
+                      <span
+                        className="font-mono text-xs"
+                        style={{
+                          color:
+                            Math.min(p.timeToInactivityTimeout, p.timeToLifetimeTimeout) < 5 * 60 * 1000
+                              ? 'var(--warn, #e69e28)'
+                              : 'var(--text-3)',
+                        }}
+                      >
+                        {fmtDuration(Math.min(p.timeToInactivityTimeout, p.timeToLifetimeTimeout))}
+                      </span>
+                    </Tooltip>
                   </Td>
                   <Td right mono color="var(--text-4)">{p.pid ?? '—'}</Td>
                   <Td right>
@@ -465,12 +469,14 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
                 {cliSessions.map(s => (
                   <tr key={s.id} style={{ borderTop: '1px solid var(--border)' }}>
                     <Td>
-                      <span
-                        style={{ color: s.alive ? 'var(--ok)' : 'var(--text-4)' }}
-                        title={s.alive ? 'Heartbeat fresh' : 'No heartbeat for >30min — likely closed'}
+                      <Tooltip
+                        content={s.alive ? 'Heartbeat fresh' : 'No heartbeat for >30min — likely closed'}
+                        placement="right"
                       >
-                        {s.alive ? '●' : '○'}
-                      </span>
+                        <span style={{ color: s.alive ? 'var(--ok)' : 'var(--text-4)' }}>
+                          {s.alive ? '●' : '○'}
+                        </span>
+                      </Tooltip>
                     </Td>
                     <Td mono>{s.workspace || '—'}</Td>
                     <Td>{fmtAgo(s.startedAt)}</Td>
@@ -571,15 +577,16 @@ function SummaryCard({ label, value, color }: { label: string; value: string; co
 
 
 function Th({ children, right, title }: { children: React.ReactNode; right?: boolean; title?: string }) {
-  return (
+  const cell = (
     <th
       className={`px-3 py-2 font-medium text-[10px] uppercase tracking-wide ${right ? 'text-right' : 'text-left'}`}
-      style={{ borderBottom: '1px solid var(--border)' }}
-      title={title}
+      style={{ borderBottom: '1px solid var(--border)', cursor: title ? 'help' : 'default' }}
     >
       {children}
     </th>
   )
+  if (!title) return cell
+  return <Tooltip content={title} placement="bottom">{cell}</Tooltip>
 }
 
 function Td({

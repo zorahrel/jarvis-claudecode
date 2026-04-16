@@ -42,33 +42,34 @@ function LiveIndicator() {
   return (
     <>
       <style>{LIVE_KEYFRAMES}</style>
-      <div
-        title={title}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          fontSize: 10,
-          fontFamily: 'var(--mono)',
-          color: connected ? 'var(--ok)' : 'var(--text-4)',
-        }}
-      >
-        <span
+      <Tooltip content={title} placement="right">
+        <div
           style={{
-            width: 7,
-            height: 7,
-            borderRadius: '50%',
-            flexShrink: 0,
-            background: connected ? 'var(--ok)' : 'var(--text-4)',
-            boxShadow: connected ? '0 0 6px var(--ok)' : 'none',
-            animation: connected ? 'jarvisLivePulse 1.4s ease-in-out infinite' : 'none',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 10,
+            fontFamily: 'var(--mono)',
+            color: connected ? 'var(--ok)' : 'var(--text-4)',
           }}
-        />
-        <span>{connected ? 'LIVE' : 'polling'}</span>
-        {connected && sinceSec !== null && (
-          <span style={{ color: 'var(--text-4)', marginLeft: 'auto' }}>{sinceSec}s</span>
-        )}
-      </div>
+        >
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              flexShrink: 0,
+              background: connected ? 'var(--ok)' : 'var(--text-4)',
+              boxShadow: connected ? '0 0 6px var(--ok)' : 'none',
+              animation: connected ? 'jarvisLivePulse 1.4s ease-in-out infinite' : 'none',
+            }}
+          />
+          <span>{connected ? 'LIVE' : 'polling'}</span>
+          {connected && sinceSec !== null && (
+            <span style={{ color: 'var(--text-4)', marginLeft: 'auto' }}>{sinceSec}s</span>
+          )}
+        </div>
+      </Tooltip>
     </>
   )
 }
