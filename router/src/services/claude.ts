@@ -573,10 +573,10 @@ async function askClaudeInternal(
         killProcess(pp);
         processes.delete(key);
         const newPp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope);
-        return await doSendWithTimeout(newPp, key, fullMessage, models[i], message.length, startTime, images);
+        return await doSendWithTimeout(newPp, key, fullMessage, model, message.length, startTime, images);
       }
 
-      return await doSendWithTimeout(pp, key, fullMessage, models[i], message.length, startTime, images);
+      return await doSendWithTimeout(pp, key, fullMessage, model, message.length, startTime, images);
     } catch (err: any) {
       const errMsg = err?.message ?? "";
 
