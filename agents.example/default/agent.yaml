@@ -6,7 +6,8 @@
 #
 # Routes in config.yaml reference agents by folder name: `use: default`
 
-# Model to use (claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5)
+# Model to use. Use an alias ("opus", "sonnet", "haiku") to always get the
+# latest version, or pin a specific ID (e.g. "claude-opus-4-7") if needed.
 model: opus
 
 # Thinking effort: low, medium, high, max
