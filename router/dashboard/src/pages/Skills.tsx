@@ -326,7 +326,7 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
               <dt style={dtStyle}>Path</dt>
               <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{sk.path}</dd>
               <dt style={dtStyle}>Modified</dt>
-              <dd style={ddStyle}>{sk.lastModified ? relTime(sk.lastModified) + ' · ' + new Date(sk.lastModified).toLocaleString('it-IT') : '—'}</dd>
+              <dd style={ddStyle}>{sk.lastModified ? relTime(sk.lastModified) + ' · ' + new Date(sk.lastModified).toLocaleString('en-US') : '—'}</dd>
               <dt style={dtStyle}>Description</dt>
               <dd style={ddStyle}>{sk.description || '—'}</dd>
               {sk.allowedTools && sk.allowedTools.length > 0 && (<>
@@ -387,7 +387,7 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
               <dt style={dtStyle}>Plugin</dt>
               <dd style={{ ...ddStyle, fontFamily: 'var(--mono)', fontSize: 11 }}>{ps.plugin}</dd>
               <dt style={dtStyle}>Modified</dt>
-              <dd style={ddStyle}>{ps.lastModified ? relTime(ps.lastModified) + ' · ' + new Date(ps.lastModified).toLocaleString('it-IT') : '—'}</dd>
+              <dd style={ddStyle}>{ps.lastModified ? relTime(ps.lastModified) + ' · ' + new Date(ps.lastModified).toLocaleString('en-US') : '—'}</dd>
               <dt style={dtStyle}>Description</dt>
               <dd style={ddStyle}>{ps.description || '—'}</dd>
               {ps.allowedTools && ps.allowedTools.length > 0 && (<>
@@ -452,7 +452,7 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
             {(panelData as unknown as InstalledPlugin).installedAt && (
               <>
                 <dt style={dtStyle}>Installed</dt>
-                <dd style={ddStyle}>{new Date((panelData as unknown as InstalledPlugin).installedAt!).toLocaleDateString('it-IT')}</dd>
+                <dd style={ddStyle}>{new Date((panelData as unknown as InstalledPlugin).installedAt!).toLocaleDateString('en-US')}</dd>
               </>
             )}
           </dl>

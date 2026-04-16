@@ -1,18 +1,67 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { RefreshCw, X } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
 import { Panel } from '../components/Panel'
-import { PageHeader } from '../components/ui/PageHeader'
+import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
 import { Badge } from '../components/ui/Badge'
 import { AgentName } from '../components/ui/AgentName'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Input, Select } from '../components/ui/Field'
+import { BadgeLink } from '../components/BadgeLink'
+import { ConversationThread } from '../components/ConversationThread'
+import { ActivityStream } from '../components/ActivityStream'
 import type { ProcessSession, CliSession } from '../api/client'
 
 type SortKey = 'lastMessageAt' | 'createdAt' | 'messageCount' | 'costUsd' | 'inputTokens' | 'timeToInactivityTimeout'
+
+export type SessionsFilterType = 'key' | 'agent' | 'channel' | 'route'
+export interface SessionsFilter {
+  type: SessionsFilterType
+  value: string
+}
+export type SessionsView = 'table' | 'live'
+
+/**
+ * Parse a Sessions filter from a URL hash.
+ * Expected format: `#/sessions?filter=<type>:<urlencoded-value>`
+ * where `<type>` is one of: key | agent | channel | route.
+ * Returns null if no valid filter is present.
+ */
+export function parseSessionsFilter(hash: string): SessionsFilter | null {
+  if (!hash) return null
+  const qIdx = hash.indexOf('?')
+  if (qIdx < 0) return null
+  const params = new URLSearchParams(hash.slice(qIdx + 1))
+  const raw = params.get('filter')
+  if (!raw) return null
+  const sep = raw.indexOf(':')
+  if (sep <= 0) return null
+  const type = raw.slice(0, sep)
+  const value = decodeURIComponent(raw.slice(sep + 1))
+  if (type !== 'key' && type !== 'agent' && type !== 'channel' && type !== 'route') return null
+  if (!value) return null
+  return { type, value }
+}
+
+/** Parse the view toggle from a URL hash. Defaults to `table`. */
+export function parseSessionsView(hash: string): SessionsView {
+  if (!hash) return 'table'
+  const qIdx = hash.indexOf('?')
+  if (qIdx < 0) return 'table'
+  const params = new URLSearchParams(hash.slice(qIdx + 1))
+  return params.get('view') === 'live' ? 'live' : 'table'
+}
+
+/** Build a Sessions hash with an optional filter and view. */
+export function buildSessionsHash(filter: SessionsFilter | null, view: SessionsView = 'table'): string {
+  const params: string[] = []
+  if (filter) params.push(`filter=${filter.type}:${encodeURIComponent(filter.value)}`)
+  if (view === 'live') params.push('view=live')
+  return params.length > 0 ? `#/sessions?${params.join('&')}` : '#/sessions'
+}
 
 function fmtDuration(ms: number): string {
   if (ms == null || ms < 0) ms = 0
@@ -63,13 +112,57 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('lastMessageAt')
   const [selected, setSelected] = useState<ProcessSession | null>(null)
+  const [hashFilter, setHashFilter] = useState<SessionsFilter | null>(() => parseSessionsFilter(window.location.hash))
+  const [view, setView] = useState<SessionsView>(() => parseSessionsView(window.location.hash))
 
   const processes = useMemo(() => procs || [], [procs])
   const cliSessions = useMemo(() => cliData || [], [cliData])
 
+  // Listen for hash changes (external navigation from other pages).
+  useEffect(() => {
+    const onHash = () => {
+      setHashFilter(parseSessionsFilter(window.location.hash))
+      setView(parseSessionsView(window.location.hash))
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  // When hashFilter=key and the matching ProcessSession appears, auto-open detail panel (table view only).
+  useEffect(() => {
+    if (view !== 'table') return
+    if (hashFilter?.type !== 'key') return
+    const match = processes.find(p => p.key === hashFilter.value)
+    if (match && selected?.key !== match.key) setSelected(match)
+  }, [view, hashFilter, processes, selected])
+
+  const setViewPersisted = useCallback((next: SessionsView) => {
+    setView(next)
+    const target = buildSessionsHash(hashFilter, next)
+    if (window.location.hash !== target) window.history.replaceState(null, '', target)
+  }, [hashFilter])
+
   const filtered = useMemo(() => {
     const q = filter.toLowerCase().trim()
     let list = processes.slice()
+    if (hashFilter) {
+      list = list.filter(p => {
+        switch (hashFilter.type) {
+          case 'key': return p.key === hashFilter.value
+          case 'agent': return (p.agentName || '') === hashFilter.value
+          case 'channel': return (p.channel || '') === hashFilter.value
+          case 'route': {
+            const idx = parseInt(hashFilter.value, 10)
+            if (!Number.isFinite(idx)) return false
+            // route index not directly on ProcessSession; match by agentName route mapping isn't available here,
+            // so we best-effort match against a `routeIndex` field if present.
+            const pAny = p as unknown as { routeIndex?: number }
+            return pAny.routeIndex === idx
+          }
+          default: return true
+        }
+      })
+    }
     if (q) {
       list = list.filter(p =>
         (p.agentName || '').toLowerCase().includes(q) ||
@@ -83,7 +176,19 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
     const asc = sortKey === 'timeToInactivityTimeout'
     list.sort((a, b) => (asc ? 1 : -1) * ((a[sortKey] as number) - (b[sortKey] as number)))
     return list
-  }, [processes, filter, sortKey])
+  }, [processes, filter, sortKey, hashFilter])
+
+  const clearHashFilter = useCallback(() => {
+    setHashFilter(null)
+    const next = buildSessionsHash(null, view)
+    if (window.location.hash !== next) window.history.replaceState(null, '', next)
+  }, [view])
+
+  const closeDetail = useCallback(() => {
+    setSelected(null)
+    // If the panel was opened via ?filter=key:..., clear that too.
+    if (hashFilter?.type === 'key') clearHashFilter()
+  }, [hashFilter, clearHashFilter])
 
   const totals = useMemo(() => {
     const alive = processes.filter(p => p.alive).length
@@ -101,12 +206,21 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
     try {
       await api.killSession(key)
       onToast('Session killed', 'success')
-      setSelected(null)
+      closeDetail()
       refreshProcs()
     } catch {
       onToast('Failed to kill session', 'error')
     }
   }
+
+  const openLogsForSession = useCallback((key: string) => {
+    // Contract with Logs page: hash filter, same format as sessions.
+    // Logs may ignore it; this is a best-effort link.
+    window.location.hash = `#/logs?filter=sessionKey:${encodeURIComponent(key)}`
+  }, [])
+
+  const streamInitialChannel = hashFilter?.type === 'channel' ? hashFilter.value : ''
+  const streamInitialAgent = hashFilter?.type === 'agent' ? hashFilter.value : ''
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -115,31 +229,66 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
         count={`${processes.length} persistent${cliSessions.length > 0 ? ` + ${cliSessions.length} CLI` : ''}`}
         actions={
           <>
-            <Input
-              type="text"
-              value={filter}
-              onChange={e => setFilter(e.target.value)}
-              placeholder="Filter by agent, channel, key…"
-              style={{ width: 240, padding: '6px 10px', fontSize: 12, background: 'var(--bg-0)' }}
-            />
-            <Select
-              value={sortKey}
-              onChange={e => setSortKey(e.target.value as SortKey)}
-              style={{ width: 150, padding: '6px 10px', fontSize: 12, background: 'var(--bg-0)' }}
-            >
-              <option value="lastMessageAt">Last activity</option>
-              <option value="createdAt">Created</option>
-              <option value="messageCount">Turns</option>
-              <option value="costUsd">Cost</option>
-              <option value="inputTokens">Tokens</option>
-              <option value="timeToInactivityTimeout">Time to kill</option>
-            </Select>
-            <IconButton icon={<RefreshCw size={13} />} label="Refresh" onClick={refreshProcs} disabled={loading} />
+            <ViewToggle view={view} onChange={setViewPersisted} />
+            {view === 'table' && (
+              <>
+                <Input
+                  type="text"
+                  value={filter}
+                  onChange={e => setFilter(e.target.value)}
+                  placeholder="Filter by agent, channel, key…"
+                  style={{ width: 240, padding: '6px 10px', fontSize: 12, background: 'var(--bg-0)' }}
+                />
+                <Select
+                  value={sortKey}
+                  onChange={e => setSortKey(e.target.value as SortKey)}
+                  style={{ width: 150, padding: '6px 10px', fontSize: 12, background: 'var(--bg-0)' }}
+                >
+                  <option value="lastMessageAt">Last activity</option>
+                  <option value="createdAt">Created</option>
+                  <option value="messageCount">Turns</option>
+                  <option value="costUsd">Cost</option>
+                  <option value="inputTokens">Tokens</option>
+                  <option value="timeToInactivityTimeout">Time to kill</option>
+                </Select>
+                <IconButton icon={<RefreshCw size={13} />} label="Refresh" onClick={refreshProcs} disabled={loading} />
+              </>
+            )}
           </>
         }
       />
 
-      {processes.length > 0 && (
+      {hashFilter && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '8px 12px',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--accent-border)',
+            background: 'var(--accent-tint)',
+            fontSize: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Badge tone="accent" size="xs">URL filter</Badge>
+            <span style={{ color: 'var(--text-2)' }}>
+              {hashFilter.type}: <span style={{ fontFamily: 'var(--mono)' }}>{hashFilter.value}</span>
+            </span>
+          </div>
+          <Button variant="ghost" size="xs" onClick={clearHashFilter}>
+            Clear
+          </Button>
+        </div>
+      )}
+
+      {view === 'live' && (
+        <ActivityStream initialChannel={streamInitialChannel} initialAgent={streamInitialAgent} />
+      )}
+
+      {view === 'table' && processes.length > 0 && (
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
           <SummaryCard label="Alive" value={`${totals.alive}/${processes.length}`} />
           <SummaryCard label="Processing" value={String(totals.processing)} color="var(--ok)" />
@@ -150,7 +299,7 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
         </div>
       )}
 
-      {processes.length > 0 ? (
+      {view === 'table' && (processes.length > 0 ? (
         <div className="rounded-lg overflow-auto" style={{ border: '1px solid var(--border)' }}>
           <table className="w-full text-sm">
             <thead>
@@ -273,9 +422,9 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
           title="No active persistent sessions"
           hint="Sessions spin up when a message arrives on a routed channel."
         />
-      )}
+      ))}
 
-      {cliSessions.length > 0 && (
+      {view === 'table' && cliSessions.length > 0 && (
         <div>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-medium" style={{ color: 'var(--text-2)' }}>
@@ -351,14 +500,63 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
         </div>
       )}
 
-      <Panel
-        open={!!selected}
-        title={selected ? `Session → ${selected.agentName || '(unrouted)'}` : ''}
-        onClose={() => setSelected(null)}
-      >
-        {selected && <SessionDetail session={selected} onKill={() => kill(selected.key)} />}
-      </Panel>
+      {view === 'table' && (
+        <Panel
+          open={!!selected}
+          title={selected ? `Session → ${selected.agentName || '(unrouted)'}` : ''}
+          onClose={closeDetail}
+        >
+          {selected && (
+            <SessionDetail
+              session={selected}
+              onKill={() => kill(selected.key)}
+              onOpenLogs={() => openLogsForSession(selected.key)}
+              onToast={onToast}
+            />
+          )}
+        </Panel>
+      )}
     </div>
+  )
+}
+
+function ViewToggle({ view, onChange }: { view: SessionsView; onChange: (next: SessionsView) => void }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 2,
+        background: 'var(--bg-0)',
+        borderRadius: 'var(--radius)',
+        padding: 2,
+        border: '1px solid var(--border)',
+      }}
+    >
+      <ViewToggleButton active={view === 'table'} label="Table" onClick={() => onChange('table')} />
+      <ViewToggleButton active={view === 'live'} label="Live stream" onClick={() => onChange('live')} />
+    </div>
+  )
+}
+
+function ViewToggleButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: '5px 12px',
+        fontSize: 11,
+        background: active ? 'var(--accent-tint-strong)' : 'transparent',
+        color: active ? 'var(--accent-bright)' : 'var(--text-3)',
+        border: 'none',
+        borderRadius: 'var(--radius-sm)',
+        cursor: 'pointer',
+        fontWeight: active ? 600 : 500,
+        transition: 'background 0.15s, color 0.15s',
+      }}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -407,146 +605,178 @@ function Td({
   )
 }
 
-function SessionDetail({ session: s, onKill }: { session: ProcessSession; onKill: () => void }) {
-  return (
-    <div className="space-y-5">
-      <Section label="Identity">
-        <KV label="Session key" value={s.key} mono />
-        <KV label="Channel" value={s.channel || '—'} />
-        <KV label="Target" value={s.targetLabel ? `${s.target} (${s.targetLabel})` : s.target} mono />
-        <KV label="Agent" value={<AgentName name={s.agentName || undefined} size="xs" />} />
-        <KV label="Model" value={s.model} mono />
-        <KV
-          label="Scope"
-          value={
-            <span className="flex gap-1">
-              {s.fullAccess && <Badge tone="accent" size="xs">FULL</Badge>}
-              <Badge tone={s.inheritUserScope ? 'ok' : 'warn'} size="xs">{s.inheritUserScope ? 'user-scope' : 'isolated'}</Badge>
-            </span>
-          }
-        />
-        <KV label="Workspace" value={s.workspace} mono small />
-        <KV label="PID" value={s.pid ?? '—'} mono />
-      </Section>
+function SessionDetail({
+  session: s,
+  onKill,
+  onOpenLogs,
+  onToast,
+}: {
+  session: ProcessSession
+  onKill: () => void
+  onOpenLogs: () => void
+  onToast: (msg: string, type: 'success' | 'error' | 'info') => void
+}) {
+  const goToAgent = () => {
+    if (s.agentName) window.location.hash = `#/agents?focus=${encodeURIComponent(s.agentName)}`
+  }
+  const goToChannel = () => {
+    if (s.channel) window.location.hash = `#/channels?focus=${encodeURIComponent(s.channel)}`
+  }
 
-      <Section label="Status">
-        <KV
-          label="State"
-          value={
-            <span className="flex gap-2 items-center">
-              <span style={{ color: s.alive ? 'var(--ok)' : 'var(--err)' }}>{s.alive ? 'Alive' : 'Dead'}</span>
-              {s.pending && <Badge tone="ok" size="xs">processing</Badge>}
-              {s.needsContext && <Badge tone="warn" size="xs">awaiting first msg</Badge>}
-            </span>
-          }
-        />
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {s.agentName && <Button size="sm" onClick={goToAgent}>Open Agent →</Button>}
+        {s.channel && <Button size="sm" onClick={goToChannel}>Open Channel →</Button>}
+        <Button size="sm" onClick={onOpenLogs}>Open Logs →</Button>
+        {s.alive && (
+          <Button size="sm" variant="danger-ghost" onClick={onKill}>Kill</Button>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <Badge tone={s.alive ? 'ok' : 'err'} size="sm">{s.alive ? 'alive' : 'dead'}</Badge>
+        {s.pending && <Badge tone="ok" size="sm">processing</Badge>}
+        {s.needsContext && <Badge tone="warn" size="sm">awaiting first msg</Badge>}
+        {s.fullAccess && <Badge tone="accent" size="sm">FULL</Badge>}
+        <Badge tone={s.inheritUserScope ? 'muted' : 'warn'} size="sm">
+          {s.inheritUserScope ? 'user-scope' : 'isolated'}
+        </Badge>
         {s.consecutiveTimeouts > 0 && (
-          <KV label="Timeouts" value={`${s.consecutiveTimeouts} consecutive`} color="var(--warn, #e69e28)" />
+          <Badge tone="warn" size="sm">{s.consecutiveTimeouts} timeouts</Badge>
         )}
         {s.pendingFilesCount > 0 && (
-          <KV label="Pending files" value={`${s.pendingFilesCount} being written`} />
+          <Badge tone="muted" size="sm">{s.pendingFilesCount} pending files</Badge>
         )}
-      </Section>
+      </div>
 
-      <Section label="Timing">
-        <KV label="Created" value={new Date(s.createdAt).toLocaleString('it-IT')} />
-        <KV label="Uptime" value={fmtDuration(s.uptime)} mono />
-        <KV label="Last activity" value={fmtAgo(s.lastMessageAt)} />
-        <KV label="Idle" value={fmtDuration(s.idleTime)} mono />
-        <KV
-          label="Inactivity kill"
-          value={`in ${fmtDuration(s.timeToInactivityTimeout)}`}
-          mono
-          color={s.timeToInactivityTimeout < 5 * 60 * 1000 ? 'var(--warn, #e69e28)' : undefined}
-        />
-        <KV
-          label="Lifetime kill"
-          value={`in ${fmtDuration(s.timeToLifetimeTimeout)}`}
-          mono
-          color={s.timeToLifetimeTimeout < 10 * 60 * 1000 ? 'var(--warn, #e69e28)' : undefined}
-        />
-      </Section>
+      <div>
+        <SectionHeader title="Identity" />
+        <dl style={dlGrid}>
+          <dt style={labelStyle}>Agent</dt>
+          <dd style={ddStyle}><AgentName name={s.agentName || undefined} size="xs" /></dd>
+          <dt style={labelStyle}>Channel</dt>
+          <dd style={ddStyle}>{s.channel || '—'}</dd>
+          <dt style={labelStyle}>Target</dt>
+          <dd style={ddStyle}>{s.targetLabel ? `${s.target} (${s.targetLabel})` : s.target || '—'}</dd>
+          <dt style={labelStyle}>Model</dt>
+          <dd style={ddStyle}>{s.model}</dd>
+          <dt style={labelStyle}>Session key</dt>
+          <dd style={{ ...ddStyle, wordBreak: 'break-all' }}>{s.key}</dd>
+          <dt style={labelStyle}>Workspace</dt>
+          <dd style={{ ...ddStyle, fontSize: 11, wordBreak: 'break-all' }}>{s.workspace}</dd>
+          <dt style={labelStyle}>PID</dt>
+          <dd style={ddStyle}>{s.pid ?? '—'}</dd>
+        </dl>
+      </div>
 
-      <Section label="Usage">
-        <KV label="Messages" value={`${s.messageCount} turns`} mono />
-        <KV label="Chars in/out" value={`${(s.charsIn / 1000).toFixed(1)}k / ${(s.charsOut / 1000).toFixed(1)}k`} mono />
-        <KV label="Input tokens" value={fmtTokens(s.inputTokens)} mono />
-        <KV label="Output tokens" value={fmtTokens(s.outputTokens)} mono />
-        <KV label="Cache read" value={fmtTokens(s.cacheRead)} mono color="var(--ok)" />
-        <KV label="Cache created" value={fmtTokens(s.cacheCreation)} mono />
-        <KV label="Cost" value={fmtCost(s.costUsd)} mono bold />
-        <KV label="Avg response" value={s.avgResponseMs > 0 ? `${(s.avgResponseMs / 1000).toFixed(1)}s` : '—'} mono />
-        <KV
-          label="Last response"
-          value={
-            s.lastDurationMs > 0
-              ? `${(s.lastDurationMs / 1000).toFixed(1)}s (api ${(s.lastApiDurationMs / 1000).toFixed(1)}s)`
-              : '—'
+      <div>
+        <SectionHeader title="Timing" />
+        <dl style={dlGrid}>
+          <dt style={labelStyle}>Created</dt>
+          <dd style={{ ...ddStyle, fontFamily: 'var(--sans)' }}>{new Date(s.createdAt).toLocaleString('en-US')}</dd>
+          <dt style={labelStyle}>Uptime</dt>
+          <dd style={ddStyle}>{fmtDuration(s.uptime)}</dd>
+          <dt style={labelStyle}>Last activity</dt>
+          <dd style={{ ...ddStyle, fontFamily: 'var(--sans)' }}>{fmtAgo(s.lastMessageAt)}</dd>
+          <dt style={labelStyle}>Idle</dt>
+          <dd style={ddStyle}>{fmtDuration(s.idleTime)}</dd>
+          <dt style={labelStyle}>Inactivity kill</dt>
+          <dd
+            style={{
+              ...ddStyle,
+              color: s.timeToInactivityTimeout < 5 * 60 * 1000 ? 'var(--warn, #e69e28)' : undefined,
+            }}
+          >
+            in {fmtDuration(s.timeToInactivityTimeout)}
+          </dd>
+          <dt style={labelStyle}>Lifetime kill</dt>
+          <dd
+            style={{
+              ...ddStyle,
+              color: s.timeToLifetimeTimeout < 10 * 60 * 1000 ? 'var(--warn, #e69e28)' : undefined,
+            }}
+          >
+            in {fmtDuration(s.timeToLifetimeTimeout)}
+          </dd>
+        </dl>
+      </div>
+
+      <div>
+        <SectionHeader
+          title="Usage"
+          action={
+            <BadgeLink
+              href={`#/analytics?groupBy=route&period=7d${s.agentName ? `&filter=agent:${encodeURIComponent(s.agentName)}` : ''}`}
+              tone="muted"
+              size="xs"
+              label="analytics"
+              title="Open Analytics for this agent"
+            />
           }
-          mono
         />
-      </Section>
+        <dl style={dlGrid}>
+          <dt style={labelStyle}>Messages</dt>
+          <dd style={ddStyle}>{s.messageCount} turns</dd>
+          <dt style={labelStyle}>Chars in/out</dt>
+          <dd style={ddStyle}>{(s.charsIn / 1000).toFixed(1)}k / {(s.charsOut / 1000).toFixed(1)}k</dd>
+          <dt style={labelStyle}>Input tokens</dt>
+          <dd style={ddStyle}>{fmtTokens(s.inputTokens)}</dd>
+          <dt style={labelStyle}>Output tokens</dt>
+          <dd style={ddStyle}>{fmtTokens(s.outputTokens)}</dd>
+          <dt style={labelStyle}>Cache read</dt>
+          <dd style={{ ...ddStyle, color: 'var(--ok)' }}>{fmtTokens(s.cacheRead)}</dd>
+          <dt style={labelStyle}>Cache created</dt>
+          <dd style={ddStyle}>{fmtTokens(s.cacheCreation)}</dd>
+          <dt style={labelStyle}>Cost</dt>
+          <dd style={{ ...ddStyle, fontWeight: 600 }}>{fmtCost(s.costUsd)}</dd>
+          <dt style={labelStyle}>Avg response</dt>
+          <dd style={ddStyle}>{s.avgResponseMs > 0 ? `${(s.avgResponseMs / 1000).toFixed(1)}s` : '—'}</dd>
+          <dt style={labelStyle}>Last response</dt>
+          <dd style={ddStyle}>
+            {s.lastDurationMs > 0
+              ? `${(s.lastDurationMs / 1000).toFixed(1)}s (api ${(s.lastApiDurationMs / 1000).toFixed(1)}s)`
+              : '—'}
+          </dd>
+        </dl>
+      </div>
 
-      <Section label={`Context window · ${ctxPct(s.estimatedTokens).toFixed(1)}% of 200k`}>
+      <div>
+        <SectionHeader
+          title="Context window"
+          count={`${ctxPct(s.estimatedTokens).toFixed(1)}% of 200k`}
+        />
         <div style={{ height: 12, background: 'var(--bg-0)', borderRadius: 6, overflow: 'hidden' }}>
           <div style={{ width: `${ctxPct(s.estimatedTokens)}%`, height: '100%', background: ctxColor(s.estimatedTokens) }} />
         </div>
-        <div className="text-[10px] mt-1" style={{ color: 'var(--text-4)' }}>
+        <div style={{ fontSize: 11, color: 'var(--text-4)', marginTop: 6 }}>
           {s.inputTokens > 0
             ? `Real: ${(s.estimatedTokens / 1000).toFixed(1)}k tokens`
             : 'Estimated from turn count (no API data yet)'}
         </div>
-      </Section>
-
-      {s.alive && (
-        <div style={{ paddingTop: 8 }}>
-          <Button variant="danger" size="md" onClick={onKill} style={{ width: '100%' }}>
-            Kill session
-          </Button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div
-        className="text-[10px] uppercase tracking-wide mb-2 pb-1"
-        style={{ color: 'var(--text-4)', borderBottom: '1px solid var(--border)' }}
-      >
-        {label}
       </div>
-      <div className="space-y-1">{children}</div>
+
+      <div>
+        <SectionHeader title="Conversation" />
+        <ConversationThread
+          sessionKey={s.key}
+          model={s.model}
+          onError={(msg) => onToast(`Thread: ${msg}`, 'error')}
+          onOpenLogs={onOpenLogs}
+        />
+      </div>
     </div>
   )
 }
 
-function KV({
-  label,
-  value,
-  mono,
-  bold,
-  small,
-  color,
-}: {
-  label: string
-  value: React.ReactNode
-  mono?: boolean
-  bold?: boolean
-  small?: boolean
-  color?: string
-}) {
-  return (
-    <div className="grid gap-2 text-xs" style={{ gridTemplateColumns: '130px 1fr' }}>
-      <span style={{ color: 'var(--text-4)' }}>{label}</span>
-      <span
-        className={`${mono ? 'font-mono' : ''} ${bold ? 'font-semibold' : ''} ${small ? 'text-[10px]' : ''}`}
-        style={{ color: color || 'var(--text-2)', wordBreak: 'break-all' }}
-      >
-        {value}
-      </span>
-    </div>
-  )
+const dlGrid: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '110px 1fr',
+  gap: 6,
+  fontSize: 12,
+  color: 'var(--text-2)',
+  margin: 0,
 }
+
+const labelStyle: React.CSSProperties = { color: 'var(--text-4)', margin: 0 }
+const ddStyle: React.CSSProperties = { margin: 0, fontFamily: 'var(--mono)', fontSize: 12 }

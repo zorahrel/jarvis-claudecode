@@ -3,14 +3,28 @@ import { createServer as createHttpsServer } from "https";
 import { readFileSync, existsSync, statSync } from "fs";
 import { join, extname } from "path";
 import { logger, setDashboardLogHook } from "../services/logger";
-import { pushLog } from "./state";
+import { pushLog, type LogEntry } from "./state";
 import { handleApi } from "./api";
+import { attachWebSocket, broadcast, clientCount } from "./ws";
 
 // Re-export for external consumers (handler.ts, index.ts)
 export { pushLog, trackMessage, trackResponseTime, getCliSessions } from "./state";
+export { broadcast, clientCount } from "./ws";
+export type { RouterEvent, SessionEventData, ExchangeEventData } from "./ws";
 
-// Wire pino logs to dashboard buffer
-setDashboardLogHook(pushLog);
+// Wire pino logs to dashboard buffer + broadcast (cheap when no WS clients).
+setDashboardLogHook((level, module, msg, extra) => {
+  pushLog(level, module, msg, extra);
+  if (clientCount() === 0) return;
+  const entry: LogEntry = {
+    ts: Date.now(),
+    level,
+    module,
+    msg,
+    ...(extra && Object.keys(extra).length ? { extra } : {}),
+  };
+  broadcast({ type: "log", data: entry });
+});
 
 const log = logger.child({ module: "dashboard" });
 const HOME = process.env.HOME!;
@@ -102,6 +116,7 @@ export function startDashboard(port: number): void {
   const bindHost = process.env.DASHBOARD_BIND || "127.0.0.1";
 
   const httpServer = createHttpServer(handler);
+  attachWebSocket(httpServer);
   httpServer.listen(port, bindHost, () => {
     log.info("Dashboard HTTP on http://%s:%d", bindHost, port);
   });
@@ -115,6 +130,7 @@ export function startDashboard(port: number): void {
         { key: readFileSync(keyPath), cert: readFileSync(certPath) },
         handler,
       );
+      attachWebSocket(httpsServer as unknown as import("http").Server);
       httpsServer.listen(port + 1, bindHost, () => {
         log.info("Dashboard HTTPS on https://%s:%d", bindHost, port + 1);
       });

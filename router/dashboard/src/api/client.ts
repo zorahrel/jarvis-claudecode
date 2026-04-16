@@ -142,12 +142,18 @@ export interface ProcessSession {
   timeToLifetimeTimeout: number
 }
 
+export type ResponseStatus = 'ok' | 'error' | 'timeout'
+
 export interface ResponseTimeEntry {
   ts: number
   key: string
+  channel?: string
+  agent?: string
+  routeIndex?: number
   wallMs: number
   apiMs: number
   model: string
+  status?: ResponseStatus
 }
 
 export interface ResponseTimesData {
@@ -188,6 +194,19 @@ export interface CliSession {
   startedAt: number
   lastSeen: number
   alive: boolean
+}
+
+export interface Exchange {
+  user: string
+  assistant: string
+  timestamp: number
+}
+
+export interface SessionThread {
+  key: string
+  exchanges: Exchange[]
+  truncated: boolean
+  total: number
 }
 
 export interface Tool {
@@ -547,6 +566,12 @@ export const api = {
   // Session kill
   killSession: (key: string) =>
     request<void>(`/api/kill/${encodeURIComponent(key)}`, { method: 'POST' }),
+
+  // Session thread (conversation drill-down)
+  sessionThread: (key: string, limit = 50) =>
+    request<SessionThread>(
+      `/api/sessions/${encodeURIComponent(key)}/thread?limit=${limit}`,
+    ),
 
   // CLI session pruning (persistent CLI registrations)
   pruneCliSessions: () =>

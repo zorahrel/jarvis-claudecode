@@ -2,21 +2,76 @@ import { useState, useEffect, useCallback } from 'react'
 import { Sparkles } from 'lucide-react'
 import { navIcons, ArrowUp } from '../icons'
 import type { ServiceStatus } from '../api/client'
+import { useRealtimeStatus } from '../hooks/usePolling'
+import { Tooltip } from './ui/Tooltip'
 
-const navItems = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'channels', label: 'Channels' },
-  { id: 'routes', label: 'Routes' },
-  { id: 'agents', label: 'Agents' },
-  { id: 'tools', label: 'Tools' },
-  { id: 'skills', label: 'Skills' },
-  { id: 'cron', label: 'Cron' },
-  { id: 'memory', label: 'Memory' },
-  { id: 'sessions', label: 'Sessions' },
-  { id: 'analytics', label: 'Analytics' },
-  { id: 'settings', label: 'Settings' },
-  { id: 'logs', label: 'Logs' },
+const navItems: { id: string; label: string; hint: string }[] = [
+  { id: 'overview',  label: 'Overview',  hint: 'Live status of channels, sessions, and performance' },
+  { id: 'channels',  label: 'Channels',  hint: 'Telegram, WhatsApp, Discord — connection status and config' },
+  { id: 'routes',    label: 'Routes',    hint: 'Channel → agent mappings that dispatch incoming messages' },
+  { id: 'agents',    label: 'Agents',    hint: 'Agent definitions, models, capabilities, and workspaces' },
+  { id: 'tools',     label: 'Tools',     hint: 'Tools exposed to agents via MCP and built-ins' },
+  { id: 'skills',    label: 'Skills',    hint: 'Installed Claude Code skills and plugin marketplaces' },
+  { id: 'cron',      label: 'Cron',      hint: 'Scheduled jobs that trigger agents on a recurring timer' },
+  { id: 'memory',    label: 'Memory',    hint: 'Memory graph — documents and conversation memory' },
+  { id: 'sessions',  label: 'Sessions',  hint: 'Active and historical conversations across channels' },
+  { id: 'analytics', label: 'Analytics', hint: 'Message volume, costs, and response-time trends' },
+  { id: 'settings',  label: 'Settings',  hint: 'Router, hooks, and MCP server configuration' },
+  { id: 'logs',      label: 'Logs',      hint: 'Live router log stream' },
 ]
+
+const LIVE_KEYFRAMES = `@keyframes jarvisLivePulse {
+  0% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(1.4); }
+  100% { opacity: 1; transform: scale(1); }
+}`
+
+function LiveIndicator() {
+  const { connected, lastEventAt } = useRealtimeStatus()
+  const [, force] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => force((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const sinceSec = lastEventAt ? Math.max(0, Math.floor((Date.now() - lastEventAt) / 1000)) : null
+  const title = connected
+    ? lastEventAt
+      ? `WebSocket connected · last event ${sinceSec}s ago`
+      : 'WebSocket connected · waiting for first event'
+    : 'WebSocket disconnected — falling back to polling'
+  return (
+    <>
+      <style>{LIVE_KEYFRAMES}</style>
+      <div
+        title={title}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 10,
+          fontFamily: 'var(--mono)',
+          color: connected ? 'var(--ok)' : 'var(--text-4)',
+        }}
+      >
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            flexShrink: 0,
+            background: connected ? 'var(--ok)' : 'var(--text-4)',
+            boxShadow: connected ? '0 0 6px var(--ok)' : 'none',
+            animation: connected ? 'jarvisLivePulse 1.4s ease-in-out infinite' : 'none',
+          }}
+        />
+        <span>{connected ? 'LIVE' : 'polling'}</span>
+        {connected && sinceSec !== null && (
+          <span style={{ color: 'var(--text-4)', marginLeft: 'auto' }}>{sinceSec}s</span>
+        )}
+      </div>
+    </>
+  )
+}
 
 function formatUptime(ms: number): string {
   const s = Math.floor(ms / 1000)
@@ -56,6 +111,7 @@ export function Sidebar({ active, onChange }: SidebarProps) {
 
   return (
     <nav
+      data-sidebar-root
       className="sidebar-nav"
       style={{
         width: 220,
@@ -106,8 +162,8 @@ export function Sidebar({ active, onChange }: SidebarProps) {
         {navItems.map((item) => {
           const isActive = active === item.id
           return (
+            <Tooltip key={item.id} content={item.hint} placement="right">
             <div
-              key={item.id}
               onClick={() => onChange(item.id)}
               className="nav-item"
               style={{
@@ -155,12 +211,14 @@ export function Sidebar({ active, onChange }: SidebarProps) {
               </span>
               <span className="nav-label">{item.label}</span>
             </div>
+            </Tooltip>
           )
         })}
       </div>
 
       {/* Footer */}
       <div style={{ padding: '14px 16px', borderTop: '1px solid var(--border)' }}>
+        <LiveIndicator />
         {uptime && (
           <div
             style={{
@@ -170,6 +228,7 @@ export function Sidebar({ active, onChange }: SidebarProps) {
               display: 'flex',
               alignItems: 'center',
               gap: 4,
+              marginTop: 6,
             }}
           >
             <ArrowUp size={11} style={{ display: 'inline-block' }} />
