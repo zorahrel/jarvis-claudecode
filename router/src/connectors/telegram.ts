@@ -8,6 +8,7 @@ import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
 import { processMedia, downloadMedia, saveMedia, cleanupMedia } from "../services/media";
+import { loadSlashCommands, pickMenuCommands, rewriteIncomingSlash, handleRouterCommand, type SlashCommand } from "../services/slash-commands";
 import { basename } from "path";
 
 const log = logger.child({ module: "telegram" });
@@ -15,6 +16,7 @@ const log = logger.child({ module: "telegram" });
 export class TelegramConnector implements Connector {
   readonly channel = "telegram" as const;
   private bot: Bot | null = null;
+  private slashCatalog: SlashCommand[] = [];
 
   constructor(private config: Config) {}
 
@@ -33,8 +35,30 @@ export class TelegramConnector implements Connector {
       // Start pipeline timings
       const timings: MessageTimings = { received: Date.now() };
 
-      // Extract text
+      // Extract text — rewrite TG-safe slash names (e.g. /caveman_compress) back
+      // to the CLI form (/caveman-compress) so Claude Code recognizes them.
       let text = m.text ?? m.caption ?? "";
+      if (text && this.slashCatalog.length > 0) {
+        text = rewriteIncomingSlash(text, this.slashCatalog);
+      }
+
+      // Router-native short-circuit (/help, /clear, /cost, /status) — reply
+      // without spawning Claude.
+      if (text && this.slashCatalog.length > 0) {
+        const routerReply = handleRouterCommand(text, this.slashCatalog, {
+          channel: "telegram",
+          from: String(ctx.from?.id ?? ""),
+          group: ctx.chat.type !== "private" ? String(chatId) : undefined,
+        });
+        if (routerReply) {
+          try {
+            await ctx.reply(routerReply, { parse_mode: "Markdown" });
+          } catch {
+            await ctx.reply(routerReply);
+          }
+          return;
+        }
+      }
 
       // Cache contact/group names for dashboard
       if (ctx.from) {
@@ -218,6 +242,33 @@ export class TelegramConnector implements Connector {
     this.bot.start({
       onStart: () => log.info("Telegram bot started"),
     });
+
+    // Publish slash commands to Telegram's native `/` menu. Runs after start
+    // so failures don't block the bot — it's a UX polish, not critical path.
+    this.syncSlashCommands().catch(err =>
+      log.warn({ err }, "Failed to sync Telegram slash commands"),
+    );
+  }
+
+  /** Register the user's Claude Code slash commands with Telegram's /-menu. */
+  private async syncSlashCommands(): Promise<void> {
+    if (!this.bot) return;
+    this.slashCatalog = loadSlashCommands();
+    if (this.slashCatalog.length === 0) {
+      log.debug("No slash commands to register");
+      return;
+    }
+    const menu = pickMenuCommands(this.slashCatalog);
+    const payload = menu.map(c => ({ command: c.tgName, description: c.description }));
+    try {
+      await this.bot.api.setMyCommands(payload);
+      log.info(
+        { menu: payload.length, catalog: this.slashCatalog.length },
+        "Registered Telegram slash commands",
+      );
+    } catch (err) {
+      log.warn({ err, menuSize: payload.length }, "setMyCommands failed — menu not updated (rewrite + /help still work)");
+    }
   }
 
   /** Download a Telegram file by file_id */
