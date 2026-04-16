@@ -333,6 +333,23 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       scanSkillsIn(claudeDir);
       scanSkillsIn(join(claudeDir, "skills"));
 
+      // Local-path marketplaces registered via `claude plugin marketplace add <path>`:
+      // their installLocation in known_marketplaces.json points at an external dir,
+      // never copied to ~/.claude/plugins/marketplaces/. Scan them too.
+      try {
+        const kmPath = join(claudeDir, "plugins", "known_marketplaces.json");
+        if (existsSync(kmPath)) {
+          const km = JSON.parse(readFileSync(kmPath, "utf-8"));
+          for (const entry of Object.values(km) as any[]) {
+            const src = entry?.source;
+            const loc = entry?.installLocation;
+            if (src?.source === "directory" && typeof loc === "string" && existsSync(loc)) {
+              scanSkillsIn(join(loc, "skills"));
+            }
+          }
+        }
+      } catch {}
+
       // Plugin skills (SKILL.md in ~/.claude/plugins/marketplaces/*/plugins/*/skills/*)
       const pluginSkills: any[] = [];
       const marketplacesDir = join(claudeDir, "plugins", "marketplaces");
@@ -379,7 +396,28 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     const claudeDir = join(process.env.HOME || "", ".claude");
     const flatPath = join(claudeDir, skillName, "SKILL.md");
     const nestedPath = join(claudeDir, "skills", skillName, "SKILL.md");
-    const skillPath = existsSync(flatPath) ? flatPath : nestedPath;
+
+    // Also consider local-path marketplaces registered via known_marketplaces.json
+    const marketplacePaths: string[] = [];
+    try {
+      const kmPath = join(claudeDir, "plugins", "known_marketplaces.json");
+      if (existsSync(kmPath)) {
+        const km = JSON.parse(readFileSync(kmPath, "utf-8"));
+        for (const entry of Object.values(km) as any[]) {
+          const src = entry?.source;
+          const loc = entry?.installLocation;
+          if (src?.source === "directory" && typeof loc === "string") {
+            marketplacePaths.push(join(loc, "skills", skillName, "SKILL.md"));
+          }
+        }
+      }
+    } catch {}
+
+    const skillPath = existsSync(flatPath)
+      ? flatPath
+      : existsSync(nestedPath)
+        ? nestedPath
+        : marketplacePaths.find((p) => existsSync(p)) || nestedPath;
     if (req.method === "GET") {
       try {
         if (!existsSync(skillPath)) { json(req, res, { error: "not found" }, 404); return; }
