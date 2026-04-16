@@ -13,21 +13,16 @@ export interface SlashCommand {
   /** 3–256 chars. */
   description: string;
   /** Origin — helps dashboards/debug. */
-  source: "user" | "native" | "plugin";
+  source: "user" | "router" | "plugin";
 }
 
-/** Curated native Claude Code commands that are useful via a chat bot. */
-const NATIVE_COMMANDS: Array<{ name: string; description: string }> = [
-  { name: "clear", description: "Clear conversation context" },
-  { name: "compact", description: "Compact conversation context" },
-  { name: "cost", description: "Show token cost for this session" },
-  { name: "help", description: "Show Claude Code help" },
-  { name: "status", description: "Show session status" },
-  { name: "review", description: "Review a pull request or diff" },
-  { name: "init", description: "Initialize CLAUDE.md for this project" },
-  { name: "resume", description: "Resume a previous session" },
-  { name: "doctor", description: "Run environment health check" },
-  { name: "bug", description: "Report a Claude Code bug" },
+/**
+ * Router-native commands — intercepted BEFORE the Claude spawn and handled
+ * by the router itself. Claude Code's TUI built-ins (`/help`, `/clear`, `/cost`…)
+ * are not exposed over stream-json, so we re-implement the useful ones.
+ */
+export const ROUTER_COMMANDS: Array<{ name: string; description: string }> = [
+  { name: "help", description: "List available slash commands" },
 ];
 
 /** Telegram limits: 1–32 chars, [a-z0-9_] only. */
@@ -95,29 +90,57 @@ function loadUserCommands(): SlashCommand[] {
   return out;
 }
 
-/** Load native curated commands. */
-function loadNativeCommands(): SlashCommand[] {
-  return NATIVE_COMMANDS.map(c => ({
+/** Load router-native commands (handled in-process, never reach Claude). */
+function loadRouterCommands(): SlashCommand[] {
+  return ROUTER_COMMANDS.map(c => ({
     tgName: c.name,
     cliName: c.name,
     description: sanitizeDescription(c.description),
-    source: "native" as const,
+    source: "router" as const,
   }));
 }
 
 /**
- * Return the merged command catalog. Later sources override earlier ones on
- * tgName collision (user > native), and we hard-cap at Telegram's soft limit.
+ * Return the merged command catalog. Router-natives come first, then user
+ * commands override on collision. Hard-capped at Telegram's soft menu limit.
  */
 export function loadSlashCommands(): SlashCommand[] {
   const byTgName = new Map<string, SlashCommand>();
-  for (const cmd of loadNativeCommands()) byTgName.set(cmd.tgName, cmd);
+  for (const cmd of loadRouterCommands()) byTgName.set(cmd.tgName, cmd);
   for (const cmd of loadUserCommands()) byTgName.set(cmd.tgName, cmd);
   const list = Array.from(byTgName.values())
     .sort((a, b) => a.tgName.localeCompare(b.tgName))
-    .slice(0, 100); // Telegram renders up to ~100 menu entries cleanly
+    .slice(0, 100);
   log.info({ count: list.length }, "Loaded slash commands");
   return list;
+}
+
+/**
+ * If `text` is a router-native command, return the synthesized response to
+ * send back to the user. Otherwise return `null` and let the message flow
+ * continue to Claude.
+ */
+export function handleRouterCommand(text: string, catalog: SlashCommand[]): string | null {
+  if (!text.startsWith("/")) return null;
+  const match = text.match(/^\/([a-z0-9_-]+)/i);
+  if (!match) return null;
+  const token = match[1].toLowerCase();
+
+  if (token === "help") {
+    const userCmds = catalog.filter(c => c.source === "user");
+    const lines = ["*Comandi disponibili*", ""];
+    if (userCmds.length === 0) {
+      lines.push("_Nessun comando utente trovato in ~/.claude/commands/_");
+    } else {
+      for (const c of userCmds) {
+        lines.push(`• /${c.tgName} — ${c.description}`);
+      }
+    }
+    lines.push("", "_I comandi `/clear`, `/cost`, `/compact` di Claude Code non sono supportati via chat (richiedono TUI)._");
+    return lines.join("\n");
+  }
+
+  return null;
 }
 
 /**

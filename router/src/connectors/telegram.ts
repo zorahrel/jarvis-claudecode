@@ -8,7 +8,7 @@ import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
 import { processMedia, downloadMedia, saveMedia, cleanupMedia } from "../services/media";
-import { loadSlashCommands, rewriteIncomingSlash, type SlashCommand } from "../services/slash-commands";
+import { loadSlashCommands, rewriteIncomingSlash, handleRouterCommand, type SlashCommand } from "../services/slash-commands";
 import { basename } from "path";
 
 const log = logger.child({ module: "telegram" });
@@ -40,6 +40,19 @@ export class TelegramConnector implements Connector {
       let text = m.text ?? m.caption ?? "";
       if (text && this.slashCatalog.length > 0) {
         text = rewriteIncomingSlash(text, this.slashCatalog);
+      }
+
+      // Router-native short-circuit (e.g. /help) — reply without spawning Claude.
+      if (text && this.slashCatalog.length > 0) {
+        const routerReply = handleRouterCommand(text, this.slashCatalog);
+        if (routerReply) {
+          try {
+            await ctx.reply(routerReply, { parse_mode: "Markdown" });
+          } catch {
+            await ctx.reply(routerReply);
+          }
+          return;
+        }
       }
 
       // Cache contact/group names for dashboard
