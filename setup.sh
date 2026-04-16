@@ -190,8 +190,11 @@ MP_DIR="$HOME/jarvis/skills-marketplace"
 MP_MANIFEST="$MP_DIR/.claude-plugin/marketplace.json"
 TEMPLATE="$REPO_ROOT/skills-marketplace.template"
 
-# Detect pre-1.1 install and delegate to the migration script.
-if [ -L "$HOME/.claude/skills/jarvis-config" ] || [ -d "$HOME/.claude/skills/reel-factory" ] 2>/dev/null; then
+# Detect pre-1.1 install: the only signature this setup.sh ever created was
+# the symlink at ~/.claude/skills/jarvis-config → $REPO_ROOT/skills/jarvis-config.
+# If it's present, the install predates the marketplace layout and needs the
+# migration script before setup can proceed with the new flow.
+if [ -L "$HOME/.claude/skills/jarvis-config" ]; then
   warn "pre-marketplace skill layout detected"
   info "run:  bash scripts/migrate-to-marketplace.sh"
   info "(or re-run setup.sh after migration)"

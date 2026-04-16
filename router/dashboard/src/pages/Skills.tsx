@@ -188,7 +188,7 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
       <PageHeader
         title="Skills & Plugins"
         count={`${allSkills.length} skills · ${plugins.length} plugins`}
-        description="Skills discovered in ~/.claude/skills/ and from installed plugins."
+        description="Skills discovered in ~/jarvis/skills-marketplace/, ~/.claude/skills/, and from installed plugins."
         actions={
           <IconButton
             icon={<RefreshCw size={13} />}
@@ -201,7 +201,7 @@ export function Skills({ onToast }: { onToast: (msg: string, type: 'success' | '
       <div>
         <SectionHeader title="Skills" count={allSkills.length} />
         {allSkills.length === 0 ? (
-          <EmptyState title="No skills" hint="Drop a folder with SKILL.md in ~/.claude/skills/ to add one." />
+          <EmptyState title="No skills" hint="Drop a folder with SKILL.md in ~/jarvis/skills-marketplace/skills/ to add one." />
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
             {allSkills.map((s) => {
