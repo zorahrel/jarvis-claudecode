@@ -8,7 +8,7 @@ import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
 import { processMedia, downloadMedia, saveMedia, cleanupMedia } from "../services/media";
-import { loadSlashCommands, rewriteIncomingSlash, handleRouterCommand, type SlashCommand } from "../services/slash-commands";
+import { loadSlashCommands, pickMenuCommands, rewriteIncomingSlash, handleRouterCommand, type SlashCommand } from "../services/slash-commands";
 import { basename } from "path";
 
 const log = logger.child({ module: "telegram" });
@@ -42,9 +42,14 @@ export class TelegramConnector implements Connector {
         text = rewriteIncomingSlash(text, this.slashCatalog);
       }
 
-      // Router-native short-circuit (e.g. /help) — reply without spawning Claude.
+      // Router-native short-circuit (/help, /clear, /cost, /status) — reply
+      // without spawning Claude.
       if (text && this.slashCatalog.length > 0) {
-        const routerReply = handleRouterCommand(text, this.slashCatalog);
+        const routerReply = handleRouterCommand(text, this.slashCatalog, {
+          channel: "telegram",
+          from: String(ctx.from?.id ?? ""),
+          group: ctx.chat.type !== "private" ? String(chatId) : undefined,
+        });
         if (routerReply) {
           try {
             await ctx.reply(routerReply, { parse_mode: "Markdown" });
@@ -253,12 +258,17 @@ export class TelegramConnector implements Connector {
       log.debug("No slash commands to register");
       return;
     }
-    const payload = this.slashCatalog.map(c => ({
-      command: c.tgName,
-      description: c.description,
-    }));
-    await this.bot.api.setMyCommands(payload);
-    log.info({ count: payload.length }, "Registered Telegram slash commands");
+    const menu = pickMenuCommands(this.slashCatalog);
+    const payload = menu.map(c => ({ command: c.tgName, description: c.description }));
+    try {
+      await this.bot.api.setMyCommands(payload);
+      log.info(
+        { menu: payload.length, catalog: this.slashCatalog.length },
+        "Registered Telegram slash commands",
+      );
+    } catch (err) {
+      log.warn({ err, menuSize: payload.length }, "setMyCommands failed — menu not updated (rewrite + /help still work)");
+    }
   }
 
   /** Download a Telegram file by file_id */

@@ -6,14 +6,16 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
-- **Telegram slash-command menu.** Router publishes user commands from
-  `~/.claude/commands/*.md` to Telegram's native `/`-menu via
-  `setMyCommands`. Hyphenated CLI names (`/caveman-compress`) are registered
-  in Telegram's `a-z0-9_` form and rewritten back to the CLI form before
-  reaching Claude Code, so custom `.md` commands work verbatim. Adds a
-  router-native `/help` that lists available commands without spawning Claude
-  (Claude Code TUI built-ins like `/clear`, `/cost` aren't exposed over
-  stream-json, so the router handles the discoverable ones itself).
+- **Telegram slash-command menu.** Router publishes a curated subset (top
+  50) of your Claude Code commands to Telegram's native `/`-menu via
+  `setMyCommands`, pulling from `~/.claude/commands/**/*.md` (including
+  namespaced like `gsd/*.md`) and installed plugin commands under
+  `~/.claude/plugins/marketplaces/*/plugins/*/commands/*.md`. Names
+  incompatible with Telegram (hyphens, namespace `:`) are registered in
+  `a-z0-9_` form and rewritten back to the CLI form on incoming messages.
+  Adds router-native `/help`, `/clear`, `/cost`, `/status` — Claude Code's
+  TUI built-ins aren't exposed over stream-json, so the router handles them
+  itself (reset session, show today's cost aggregate, show active sessions).
 - **Dashboard real-time activity stream.** New WebSocket endpoint at `/ws`
   broadcasts session lifecycle, exchanges, response timings, and log events.
   The UI switches to push updates when connected and falls back to polling
