@@ -34,39 +34,6 @@ Dates are ISO (YYYY-MM-DD).
   session key the chat handler uses (`whatsapp:<group>`, `telegram:<from>`,
   etc.). When the human replies, the agent now sees the cron message as its
   own previous turn — no more "what were we talking about?".
-
-### Changed
-- **Cron jobs inherit the agent config.** `cron.ts` now derives the agent
-  name from the job's workspace path and pulls `fullAccess`, `tools`, `env`,
-  `inheritUserScope`, and `model` from `agent.yaml` — matching OpenClaw's
-  agent-scoped model. Removes the need for per-job access flags in YAML.
-- **`askClaudeFresh` returns structured output.** Shape changed from a raw
-  string to `{ result, model, sessionId, usage, costUsd, status, exitCode,
-  error }`, so cron can log token/cost telemetry and distinguish timeouts
-  from errors. Only `cron.ts` calls this helper — no external breakage.
-- **`CronState` tracks delivery + streak health.** New fields
-  `consecutiveErrors` and `lastDeliveryStatus` alongside the existing
-  lastRun/lastStatus, matching OpenClaw's job-state granularity.
-- **JSONL is the single source of truth.** The in-memory `CronState` is
-  rehydrated from the tail of the job's JSONL at boot, so there's no
-  parallel `stats.json` to keep in sync. The legacy `cron-stats.json` is
-  no longer read or written.
-
-### Fixed
-- **Cron delivery chunks long messages on every channel.** Telegram and
-  WhatsApp now chunk via `splitMessage(text, 4000)`; Discord uses the
-  existing `chunkForDiscord` helper (preserves code fences at 1950). Prevents
-  `Bad Request: text is too long` failures seen on multi-section morning
-  reports.
-- **WhatsApp cron delivery no longer loops.** `sendMessage` now tracks the
-  outbound message id in `sentMsgIds` — the same mechanism used by chat
-  replies — so Baileys' own-message echo is recognized as bot-sent and
-  doesn't trigger the route agent to reply to itself.
-- **Fresh Claude calls strip `--verbose`.** With `--verbose --output-format
-  json` the CLI emits an event array (no `.result` field), so cron
-  deliveries were sending raw JSON. Non-streaming calls now ask for plain
-  `json` only, restoring `{ result: "…" }` and clean message bodies.
-
 - **Telegram slash-command menu.** Router publishes a curated subset (top
   50) of your Claude Code commands to Telegram's native `/`-menu via
   `setMyCommands`, pulling from `~/.claude/commands/**/*.md` (including
@@ -95,6 +62,21 @@ Dates are ISO (YYYY-MM-DD).
   `timeout`), so the dashboard can attribute latency to the right route.
 
 ### Changed
+- **Cron jobs inherit the agent config.** `cron.ts` now derives the agent
+  name from the job's workspace path and pulls `fullAccess`, `tools`, `env`,
+  `inheritUserScope`, and `model` from `agent.yaml` — matching OpenClaw's
+  agent-scoped model. Removes the need for per-job access flags in YAML.
+- **`askClaudeFresh` returns structured output.** Shape changed from a raw
+  string to `{ result, model, sessionId, usage, costUsd, status, exitCode,
+  error }`, so cron can log token/cost telemetry and distinguish timeouts
+  from errors. Only `cron.ts` calls this helper — no external breakage.
+- **`CronState` tracks delivery + streak health.** New fields
+  `consecutiveErrors` and `lastDeliveryStatus` alongside the existing
+  lastRun/lastStatus, matching OpenClaw's job-state granularity.
+- **JSONL is the single source of truth.** The in-memory `CronState` is
+  rehydrated from the tail of the job's JSONL at boot, so there's no
+  parallel `stats.json` to keep in sync. The legacy `cron-stats.json` is
+  no longer read or written.
 - **Model resolution now delegated to Claude Code CLI.** Removed the hardcoded
   alias→ID map in `router/src/services/claude.ts`. Aliases (`opus`, `sonnet`,
   `haiku`) in `agent.yaml` pass through unchanged, letting the CLI resolve them
@@ -102,6 +84,19 @@ Dates are ISO (YYYY-MM-DD).
   specific ID (e.g. `claude-opus-4-6`) in `agent.yaml` if you need version-lock.
 
 ### Fixed
+- **Cron delivery chunks long messages on every channel.** Telegram and
+  WhatsApp now chunk via `splitMessage(text, 4000)`; Discord uses the
+  existing `chunkForDiscord` helper (preserves code fences at 1950). Prevents
+  `Bad Request: text is too long` failures seen on multi-section morning
+  reports.
+- **WhatsApp cron delivery no longer loops.** `sendMessage` now tracks the
+  outbound message id in `sentMsgIds` — the same mechanism used by chat
+  replies — so Baileys' own-message echo is recognized as bot-sent and
+  doesn't trigger the route agent to reply to itself.
+- **Fresh Claude calls strip `--verbose`.** With `--verbose --output-format
+  json` the CLI emits an event array (no `.result` field), so cron
+  deliveries were sending raw JSON. Non-streaming calls now ask for plain
+  `json` only, restoring `{ result: "…" }` and clean message bodies.
 - **Retry-path model attribution.** The fallback loop in
   `askClaudeInternal` was passing `models[i]` (first fallback) to
   `doSendWithTimeout` instead of the current retry model, so logs and
@@ -119,6 +114,10 @@ Dates are ISO (YYYY-MM-DD).
   and the sidebar's WS status pill. `Tooltip` now also strips the cloned
   child's native `title` (preventing double-tooltips) and renders strings
   containing `\n` as multi-line content.
+- **Dashboard screenshots refreshed.** `docs/images/dashboard-*.png`
+  regenerated at 1440x900 with personal data replaced by generic demo
+  placeholders (phones, group JIDs, emails, user/agent names, project/client
+  names). Scrollbars hidden in the captured frames.
 
 ### Removed
 - _(nothing yet)_
