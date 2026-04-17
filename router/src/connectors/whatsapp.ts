@@ -506,7 +506,7 @@ export class WhatsAppConnector implements Connector {
     for (const chunk of chunks) {
       const sent = await this.sock?.sendMessage(target, { text: chunk });
       // Track the id so the inbound echo is recognized as bot-sent and skipped,
-      // preventing agents (e.g. cecilia) from replying to their own cron delivery.
+      // preventing the routed agent from replying to its own cron delivery.
       if (sent?.key?.id) {
         this.sentMsgIds.add(sent.key.id);
         if (this.sentMsgIds.size > 200) {
