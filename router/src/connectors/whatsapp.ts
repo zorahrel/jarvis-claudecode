@@ -4,7 +4,7 @@ type WASocket = ReturnType<typeof makeWASocket>;
 import type { Connector } from "./base";
 import type { IncomingMessage, MediaAttachment, QuotedMessage, Config } from "../types";
 import type { MessageTimings } from "../types/message";
-import { handleMessage } from "../services/handler";
+import { handleMessage, splitMessage } from "../services/handler";
 import { findRoute, getFullAgent } from "../services/router";
 import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
@@ -500,7 +500,21 @@ export class WhatsAppConnector implements Connector {
   }
 
   async sendMessage(target: string, text: string): Promise<void> {
-    await this.sock?.sendMessage(target, { text });
+    // WhatsApp tolerates long messages but readability drops past ~4k.
+    // Chunking keeps cron deliveries in line with Telegram/Discord behavior.
+    const chunks = splitMessage(text, 4000);
+    for (const chunk of chunks) {
+      const sent = await this.sock?.sendMessage(target, { text: chunk });
+      // Track the id so the inbound echo is recognized as bot-sent and skipped,
+      // preventing agents (e.g. cecilia) from replying to their own cron delivery.
+      if (sent?.key?.id) {
+        this.sentMsgIds.add(sent.key.id);
+        if (this.sentMsgIds.size > 200) {
+          const first = this.sentMsgIds.values().next().value;
+          if (first) this.sentMsgIds.delete(first);
+        }
+      }
+    }
   }
 
   updateConfig(config: Config): void {

@@ -6,6 +6,65 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
+- **Cron run history (per-job JSONL).** Each scheduled/manual run appends a
+  structured record to `router/cron/runs/<job>.jsonl` — timestamp, duration,
+  status, model, sessionId, token usage, cost, delivery outcome, summary, and
+  full output. Schema mirrors OpenClaw for future tooling compatibility. Files
+  auto-rotate at 2 MB. Exposed via `GET /api/crons/:name/runs?limit=N`.
+- **Run history UI in Cron detail panel.** Expandable list per run showing
+  status badge, trigger (`manual`/`schedule`), duration, token counts, cost,
+  delivery channel/target, full message text (`result`) with a "Copia" button,
+  and errors. Auto-reloads when the panel re-opens or a new run is triggered.
+- **CronBuilder component.** Human-readable schedule picker with 5 modes
+  (daily / weekdays with day chips / every N minutes / monthly / custom). Live
+  preview in Italian ("Ogni giorno alle 08:00") + generated cron expression.
+  Used in both the "New Cron Job" form and the edit panel. A `humanizeCron`
+  helper renders the friendly phrase in the cron list and detail view.
+- **Click-outside to close side panels.** The shared `Panel` component now
+  ships a z-30 backdrop that captures off-panel clicks, matching modal UX
+  conventions. Works for every panel in the dashboard (Cron, Sessions, Routes,
+  Agents, Tools, …). Esc already worked; backdrop is transparent to avoid
+  dimming the dashboard.
+- **Cron delivery: ASCII footer.** Scheduled/manual results now include the
+  same `[t 10.8s | llm 10.7s | tok 22.1k>132 | agent/model]` footer used by
+  chat replies, so messages sent to Telegram/WhatsApp/Discord carry the
+  standard run telemetry.
+- **Cron seeds the conversation cache.** After a successful delivery the job
+  appends an `assistant` turn to the agent's `session-cache` under the same
+  session key the chat handler uses (`whatsapp:<group>`, `telegram:<from>`,
+  etc.). When the human replies, the agent now sees the cron message as its
+  own previous turn — no more "what were we talking about?".
+
+### Changed
+- **Cron jobs inherit the agent config.** `cron.ts` now derives the agent
+  name from the job's workspace path and pulls `fullAccess`, `tools`, `env`,
+  `inheritUserScope`, and `model` from `agent.yaml` — matching OpenClaw's
+  agent-scoped model. Removes the need for per-job access flags in YAML.
+- **`askClaudeFresh` returns structured output.** Shape changed from a raw
+  string to `{ result, model, sessionId, usage, costUsd, status, exitCode,
+  error }`, so cron can log token/cost telemetry and distinguish timeouts
+  from errors. Only `cron.ts` calls this helper — no external breakage.
+- **`CronState` tracks delivery + streak health.** New fields
+  `consecutiveErrors` and `lastDeliveryStatus` alongside the existing
+  lastRun/lastStatus, matching OpenClaw's job-state granularity.
+- **Legacy `cron-stats.json` auto-migrates** to `router/cron/stats.json` on
+  first boot (no manual action required; idempotent).
+
+### Fixed
+- **Cron delivery chunks long messages on every channel.** Telegram and
+  WhatsApp now chunk via `splitMessage(text, 4000)`; Discord uses the
+  existing `chunkForDiscord` helper (preserves code fences at 1950). Prevents
+  `Bad Request: text is too long` failures seen on multi-section morning
+  reports.
+- **WhatsApp cron delivery no longer loops.** `sendMessage` now tracks the
+  outbound message id in `sentMsgIds` — the same mechanism used by chat
+  replies — so Baileys' own-message echo is recognized as bot-sent and
+  doesn't trigger the route agent to reply to itself.
+- **Fresh Claude calls strip `--verbose`.** With `--verbose --output-format
+  json` the CLI emits an event array (no `.result` field), so cron
+  deliveries were sending raw JSON. Non-streaming calls now ask for plain
+  `json` only, restoring `{ result: "…" }` and clean message bodies.
+
 - **Telegram slash-command menu.** Router publishes a curated subset (top
   50) of your Claude Code commands to Telegram's native `/`-menu via
   `setMyCommands`, pulling from `~/.claude/commands/**/*.md` (including

@@ -428,7 +428,7 @@ async function replyWithRetry(msg: IncomingMessage, text: string, attempt = 0): 
 }
 
 /** Split a message into chunks at newline boundaries */
-function splitMessage(text: string, maxLen: number): string[] {
+export function splitMessage(text: string, maxLen: number): string[] {
   if (text.length <= maxLen) return [text];
 
   const chunks: string[] = [];

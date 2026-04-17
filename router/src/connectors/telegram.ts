@@ -3,7 +3,7 @@ import type { Connector } from "./base";
 import type { IncomingMessage, MediaAttachment, QuotedMessage, Config } from "../types";
 import type { MessageTimings } from "../types/message";
 import { findRoute } from "../services/router";
-import { handleMessage } from "../services/handler";
+import { handleMessage, splitMessage } from "../services/handler";
 import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
@@ -297,13 +297,17 @@ export class TelegramConnector implements Connector {
     log.info("Telegram bot stopped");
   }
 
-  /** Send a text message to an arbitrary chat — used by cron delivery and crash recovery notices */
+  /** Send a text message to an arbitrary chat — used by cron delivery and crash recovery notices.
+   *  Splits payloads above Telegram's 4096-char cap across sequential messages. */
   async sendMessage(target: string, text: string): Promise<void> {
     if (!this.bot) throw new Error("Telegram bot not started");
-    try {
-      await this.bot.api.sendMessage(target, text, { parse_mode: "Markdown" });
-    } catch {
-      await this.bot.api.sendMessage(target, text);
+    const chunks = splitMessage(text, 4000);
+    for (const chunk of chunks) {
+      try {
+        await this.bot.api.sendMessage(target, chunk, { parse_mode: "Markdown" });
+      } catch {
+        await this.bot.api.sendMessage(target, chunk);
+      }
     }
   }
 
