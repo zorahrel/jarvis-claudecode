@@ -12,8 +12,9 @@ import { Tooltip } from '../components/ui/Tooltip'
 import { EmptyState } from '../components/ui/EmptyState'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Field, Input, Select, Textarea } from '../components/ui/Field'
-import type { CronJob } from '../api/client'
+import type { CronJob, CronRun } from '../api/client'
 import { CronStatusIcon } from '../icons'
+import { CronBuilder, humanizeCron } from '../components/CronBuilder'
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -95,8 +96,27 @@ interface CronState {
   lastStatus?: string
   lastDurationMs?: number
   lastError?: string
-  lastResult?: string
   runCount?: number
+  consecutiveErrors?: number
+  lastDeliveryStatus?: string | null
+}
+
+function fmtAbs(ts: number): string {
+  try { return new Date(ts).toLocaleString() } catch { return '' }
+}
+function fmtDurationMs(ms: number): string {
+  if (!ms || ms < 0) return '—'
+  if (ms < 1000) return `${ms}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(1)}s`
+  const m = Math.floor(s / 60)
+  const rest = Math.round(s % 60)
+  return `${m}m ${rest}s`
+}
+function fmtTokensCompact(n?: number): string {
+  if (!n) return '—'
+  if (n < 1000) return String(n)
+  return `${(n / 1000).toFixed(1)}k`
 }
 
 export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'error' | 'info') => void }) {
@@ -107,7 +127,6 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
   const [editingCron, setEditingCron] = useState(false)
   const [cronEditForm, setCronEditForm] = useState<Record<string, string>>({})
   const [savingCron, setSavingCron] = useState(false)
-  const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({})
   const [newCronForm, setNewCronForm] = useState({
     name: '',
     schedule: '',
@@ -122,6 +141,45 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
   const [creatingCron, setCreatingCron] = useState(false)
   const [agentNames, setAgentNames] = useState<string[]>([])
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [runs, setRuns] = useState<CronRun[] | null>(null)
+  const [runsLoading, setRunsLoading] = useState(false)
+  const [expandedRun, setExpandedRun] = useState<number | null>(null)
+  const [triggering, setTriggering] = useState(false)
+
+  const loadRuns = useCallback(async (name: string): Promise<CronRun[]> => {
+    setRunsLoading(true)
+    try {
+      const { runs } = await api.cronRuns(name, 50)
+      setRuns(runs)
+      return runs
+    } catch {
+      setRuns([])
+      return []
+    } finally {
+      setRunsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (cronPanel === 'cron-detail' && cronPanelData?.name) {
+      loadRuns(cronPanelData.name)
+    } else {
+      setRuns(null)
+      setExpandedRun(null)
+    }
+  }, [cronPanel, cronPanelData?.name, loadRuns])
+
+  // Keep the open detail panel in sync with the polled list — otherwise the
+  // "Ultimo messaggio" section keeps showing the snapshot taken at open time.
+  useEffect(() => {
+    if (!cronPanelData || cronPanel !== 'cron-detail' || !cronJobs) return
+    const fresh = cronJobs.find((cj) => (cj as unknown as CronState).name === cronPanelData.name)
+    if (!fresh) return
+    const freshState = fresh as unknown as CronState
+    if (freshState.lastRun !== cronPanelData.lastRun || freshState.lastStatus !== cronPanelData.lastStatus) {
+      setCronPanelData(freshState)
+    }
+  }, [cronJobs, cronPanel, cronPanelData])
 
   useEffect(() => {
     apiFetch<Record<string, unknown>>('/api/dashboard-state')
@@ -131,15 +189,38 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
 
   const triggerCron = useCallback(
     async (name: string) => {
+      setTriggering(true)
+      const before = runs && runs[0] ? runs[0].ts : 0
       try {
         await api.runCron(name)
-        onToast('Cron triggered: ' + name, 'success')
+        onToast('Cron avviato: ' + name, 'info')
         refreshCrons()
+        // Poll up to ~20 min (timeout of the biggest cron). First tick after 3s, then every 4s.
+        const deadline = Date.now() + 20 * 60 * 1000
+        const tick = async () => {
+          const latest = await loadRuns(name)
+          refreshCrons()
+          if (latest[0] && latest[0].ts > before) {
+            setTriggering(false)
+            onToast(
+              latest[0].status === 'ok' ? 'Run OK: ' + name : 'Run failed: ' + name,
+              latest[0].status === 'ok' ? 'success' : 'error',
+            )
+            return
+          }
+          if (Date.now() > deadline) {
+            setTriggering(false)
+            return
+          }
+          setTimeout(tick, 4000)
+        }
+        setTimeout(tick, 3000)
       } catch (e: unknown) {
+        setTriggering(false)
         onToast(e instanceof Error ? e.message : String(e), 'error')
       }
     },
-    [onToast, refreshCrons],
+    [onToast, refreshCrons, loadRuns, runs],
   )
 
   const confirmDeleteCron = useCallback(async () => {
@@ -269,7 +350,6 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
             const cs = cj as unknown as CronState
             const nextRun = nextCronRun(cs.schedule || '')
             const nextLabel = nextRun ? `in ${fmtInterval(nextRun.getTime() - Date.now())}` : '?'
-            const isHistoryOpen = !!historyOpen[cs.name]
             return (
               <Card key={cs.name} padding="12px 16px">
                 <div
@@ -303,9 +383,11 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                       </a>
                     </Tooltip>
                   )}
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-4)', marginLeft: 'auto' }}>
-                    {cs.schedule}
-                  </span>
+                  <Tooltip content={cs.schedule} placement="top">
+                    <span style={{ fontSize: 11, color: 'var(--text-3)', marginLeft: 'auto' }}>
+                      {humanizeCron(cs.schedule)}
+                    </span>
+                  </Tooltip>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11, color: 'var(--text-4)', marginTop: 6 }}>
                   <span>
@@ -314,64 +396,7 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                       : 'Last: ' + ago(cs.lastRun || 0) + ' · ' + (cs.runCount || 0) + ' runs'}
                   </span>
                   <span>Next run: <span style={{ color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{nextLabel}</span></span>
-                  {(cs.runCount || 0) > 0 && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setHistoryOpen(prev => ({ ...prev, [cs.name]: !isHistoryOpen }))
-                      }}
-                      style={{
-                        marginLeft: 'auto',
-                        fontSize: 10,
-                        padding: '2px 8px',
-                        background: 'transparent',
-                        color: 'var(--accent-bright)',
-                        border: '1px solid var(--border)',
-                        borderRadius: 'var(--radius-xs)',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {isHistoryOpen ? 'Hide history' : 'View run history'}
-                    </button>
-                  )}
                 </div>
-                {isHistoryOpen && (
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    style={{
-                      marginTop: 8,
-                      padding: 10,
-                      borderRadius: 'var(--radius)',
-                      background: 'var(--bg-0)',
-                      border: '1px solid var(--border)',
-                      display: 'grid',
-                      gridTemplateColumns: '100px 1fr',
-                      gap: '4px 12px',
-                      fontSize: 11,
-                      fontFamily: 'var(--mono)',
-                      color: 'var(--text-3)',
-                    }}
-                  >
-                    <span style={{ color: 'var(--text-4)' }}>runs</span>
-                    <span>{cs.runCount || 0}</span>
-                    <span style={{ color: 'var(--text-4)' }}>last status</span>
-                    <span>{cs.lastStatus || 'never'}</span>
-                    <span style={{ color: 'var(--text-4)' }}>last run</span>
-                    <span>{cs.lastRun ? ago(cs.lastRun) : 'never'}</span>
-                    {cs.lastDurationMs != null && (
-                      <>
-                        <span style={{ color: 'var(--text-4)' }}>last duration</span>
-                        <span>{((cs.lastDurationMs || 0) / 1000).toFixed(1)}s</span>
-                      </>
-                    )}
-                    {cs.lastError && (
-                      <>
-                        <span style={{ color: 'var(--text-4)' }}>last error</span>
-                        <span style={{ color: 'var(--err)', whiteSpace: 'pre-wrap' }}>{cs.lastError}</span>
-                      </>
-                    )}
-                  </div>
-                )}
               </Card>
             )
           })}
@@ -410,10 +435,15 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
             {!editingCron ? (
               <>
                 <div>
-                  <SectionHeader title="Schedule" />
+                  <SectionHeader title="Pianificazione" />
                   <dl style={{ display: 'grid', gridTemplateColumns: '90px 1fr', gap: 6, fontSize: 12, color: 'var(--text-2)', margin: 0 }}>
-                    <dt style={dt}>Cron</dt>
-                    <dd style={{ ...dd, fontFamily: 'var(--mono)' }}>{cronPanelData.schedule}</dd>
+                    <dt style={dt}>Quando</dt>
+                    <dd style={dd}>
+                      {humanizeCron(cronPanelData.schedule)}
+                      <code style={{ marginLeft: 8, color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+                        {cronPanelData.schedule}
+                      </code>
+                    </dd>
                     <dt style={dt}>Timezone</dt>
                     <dd style={dd}>{cronPanelData.timezone}</dd>
                     <dt style={dt}>Model</dt>
@@ -465,32 +495,54 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                   <pre style={preStyle}>{cronPanelData.prompt}</pre>
                 </div>
 
-                {cronPanelData.lastResult && (
+                {cronPanelData.lastError && cronPanelData.lastStatus === 'error' && (
                   <div>
-                    <SectionHeader title="Last Result" />
-                    <pre style={preStyle}>{cronPanelData.lastResult}</pre>
-                  </div>
-                )}
-
-                {cronPanelData.lastError && (
-                  <div>
-                    <SectionHeader title="Last Error" />
+                    <SectionHeader title="Ultimo errore" />
                     <div style={{ fontSize: 12, color: 'var(--err)' }}>{cronPanelData.lastError}</div>
                   </div>
                 )}
 
+                <div>
+                  <SectionHeader
+                    title="Run history"
+                    action={
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => loadRuns(cronPanelData.name)}
+                        loading={runsLoading}
+                      >
+                        Refresh
+                      </Button>
+                    }
+                  />
+                  <RunHistoryList
+                    runs={runs}
+                    loading={runsLoading}
+                    expanded={expandedRun}
+                    onToggle={(ts) => setExpandedRun(prev => (prev === ts ? null : ts))}
+                  />
+                </div>
+
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <Button variant="primary" size="md" onClick={() => triggerCron(cronPanelData.name)}>Run Now</Button>
+                  <Button
+                    variant="primary"
+                    size="md"
+                    onClick={() => triggerCron(cronPanelData.name)}
+                    loading={triggering}
+                    disabled={triggering}
+                  >
+                    {triggering ? 'Running…' : 'Run Now'}
+                  </Button>
                   <Button variant="danger-ghost" size="md" onClick={() => setDeleteTarget(cronPanelData.name)}>Delete</Button>
                 </div>
               </>
             ) : (
               <>
-                <Field label="Schedule (cron expression)">
-                  <Input
+                <Field label="Quando">
+                  <CronBuilder
                     value={cronEditForm.schedule || ''}
-                    onChange={(e) => setCronEditForm({ ...cronEditForm, schedule: e.target.value })}
-                    placeholder="0 9 * * 1-5"
+                    onChange={(expr) => setCronEditForm((prev) => (prev.schedule === expr ? prev : { ...prev, schedule: expr }))}
                   />
                 </Field>
                 <Field label="Timezone">
@@ -562,11 +614,10 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                 placeholder="daily-report"
               />
             </Field>
-            <Field label="Schedule (cron expression) *" hint="minute hour day month weekday">
-              <Input
+            <Field label="Quando *">
+              <CronBuilder
                 value={newCronForm.schedule}
-                onChange={(e) => setNewCronForm({ ...newCronForm, schedule: e.target.value })}
-                placeholder="0 9 * * *"
+                onChange={(expr) => setNewCronForm((prev) => (prev.schedule === expr ? prev : { ...prev, schedule: expr }))}
               />
             </Field>
             <Field label="Timezone">
@@ -639,9 +690,12 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
               </div>
             </Field>
 
-            <InfoBox tone="warn">
-              Cron jobs run in isolation without MCP tools or email access. They can only execute prompts using the
-              agent's <code style={codeInline}>CLAUDE.md</code> context.
+            <InfoBox tone="neutral">
+              Cron jobs run in a fresh isolated session and inherit the selected agent's config
+              (<code style={codeInline}>model</code>, <code style={codeInline}>tools</code>,
+              <code style={codeInline}>fullAccess</code>, MCP servers). Pick the agent whose scope
+              matches the job — a personal job should run on <code style={codeInline}>jarvis</code>,
+              a client job on its dedicated agent.
             </InfoBox>
 
             <div style={{ display: 'flex', gap: 8 }}>
@@ -663,8 +717,153 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
   )
 }
 
+function RunHistoryList({
+  runs,
+  loading,
+  expanded,
+  onToggle,
+}: {
+  runs: CronRun[] | null
+  loading: boolean
+  expanded: number | null
+  onToggle: (ts: number) => void
+}) {
+  if (loading && !runs) {
+    return <div style={{ fontSize: 11, color: 'var(--text-4)' }}>Loading run history…</div>
+  }
+  if (!runs || runs.length === 0) {
+    return <div style={{ fontSize: 11, color: 'var(--text-4)' }}>No runs logged yet.</div>
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {runs.map((run) => {
+        const isOpen = expanded === run.ts
+        const tone = run.status === 'ok' ? 'ok' : run.status === 'timeout' ? 'warn' : 'err'
+        return (
+          <div
+            key={run.ts}
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--bg-0)',
+              overflow: 'hidden',
+            }}
+          >
+            <button
+              onClick={() => onToggle(run.ts)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 10px',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-2)',
+                cursor: 'pointer',
+                textAlign: 'left',
+                fontSize: 11,
+                fontFamily: 'var(--mono)',
+              }}
+            >
+              <Badge tone={tone} size="xs">{run.status}</Badge>
+              <span style={{ color: 'var(--text-3)' }}>{fmtAbs(run.runAtMs)}</span>
+              <span style={{ color: 'var(--text-4)' }}>· {fmtDurationMs(run.durationMs)}</span>
+              {run.trigger === 'manual' && (
+                <Badge tone="muted" size="xs">manual</Badge>
+              )}
+              {run.delivery && (
+                <span style={{ color: run.delivery.ok ? 'var(--ok)' : 'var(--err)', fontSize: 10 }}>
+                  → {run.delivery.channel}
+                </span>
+              )}
+              {run.usage?.total_tokens && (
+                <span style={{ marginLeft: 'auto', color: 'var(--text-4)' }}>
+                  {fmtTokensCompact(run.usage.total_tokens)} tok
+                  {run.costUsd ? ` · $${run.costUsd.toFixed(3)}` : ''}
+                </span>
+              )}
+            </button>
+            {isOpen && (
+              <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <dl style={{ display: 'grid', gridTemplateColumns: '110px 1fr', gap: '4px 12px', fontSize: 11, margin: 0, fontFamily: 'var(--mono)' }}>
+                  <dt style={dt}>trigger</dt><dd style={dd}>{run.trigger}</dd>
+                  <dt style={dt}>status</dt><dd style={dd}>{run.status}</dd>
+                  <dt style={dt}>started</dt><dd style={dd}>{fmtAbs(run.runAtMs)}</dd>
+                  <dt style={dt}>duration</dt><dd style={dd}>{fmtDurationMs(run.durationMs)}</dd>
+                  {run.model && (<><dt style={dt}>model</dt><dd style={dd}>{run.model}</dd></>)}
+                  {run.sessionId && (<><dt style={dt}>session</dt><dd style={{ ...dd, wordBreak: 'break-all' }}>{run.sessionId}</dd></>)}
+                  {run.nextRunAtMs && (<><dt style={dt}>next fire</dt><dd style={dd}>{fmtAbs(run.nextRunAtMs)}</dd></>)}
+                  {run.usage && (
+                    <>
+                      <dt style={dt}>tokens in</dt><dd style={dd}>{fmtTokensCompact(run.usage.input_tokens)}</dd>
+                      <dt style={dt}>tokens out</dt><dd style={dd}>{fmtTokensCompact(run.usage.output_tokens)}</dd>
+                    </>
+                  )}
+                  {run.costUsd != null && (<><dt style={dt}>cost</dt><dd style={dd}>${run.costUsd.toFixed(4)}</dd></>)}
+                  {run.delivery && (
+                    <>
+                      <dt style={dt}>delivery</dt>
+                      <dd style={{ ...dd, color: run.delivery.ok ? 'var(--ok)' : 'var(--err)' }}>
+                        {run.delivery.channel} → {run.delivery.target} {run.delivery.ok ? '✓' : '✗'}
+                        {run.delivery.error ? ` (${run.delivery.error})` : ''}
+                      </dd>
+                    </>
+                  )}
+                </dl>
+                {run.result && (
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <div style={{ fontSize: 10, color: 'var(--text-4)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Messaggio inviato</div>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(run.result || '')}
+                        style={{
+                          fontSize: 10,
+                          color: 'var(--text-3)',
+                          background: 'transparent',
+                          border: '1px solid var(--border)',
+                          borderRadius: 'var(--radius-xs)',
+                          padding: '2px 6px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Copia
+                      </button>
+                    </div>
+                    <div style={messageBox}>{run.result}</div>
+                  </div>
+                )}
+                {run.error && (
+                  <div>
+                    <div style={{ fontSize: 10, color: 'var(--err)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>Error</div>
+                    <pre style={{ ...preStyle, color: 'var(--err)' }}>{run.error}</pre>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 const dt: React.CSSProperties = { color: 'var(--text-4)', margin: 0 }
 const dd: React.CSSProperties = { margin: 0 }
+const messageBox: React.CSSProperties = {
+  maxHeight: 320,
+  overflow: 'auto',
+  padding: 12,
+  background: 'var(--bg-1)',
+  borderRadius: 'var(--radius)',
+  border: '1px solid var(--border)',
+  fontSize: 13,
+  lineHeight: 1.5,
+  color: 'var(--text-1)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  fontFamily: 'var(--sans, system-ui)',
+}
 const preStyle: React.CSSProperties = {
   maxHeight: 220,
   overflow: 'auto',

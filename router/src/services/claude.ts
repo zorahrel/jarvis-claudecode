@@ -204,15 +204,17 @@ function buildSpawnArgs(opts: {
   const args: string[] = [
     "--print",
     "--permission-mode", permissionMode,
-    "--verbose",
     "--model", model,
     "--setting-sources", settingSources,
     "--exclude-dynamic-system-prompt-sections",
   ];
 
   if (streaming) {
-    args.push("--input-format", "stream-json", "--output-format", "stream-json");
+    // Streaming mode needs --verbose so the CLI emits per-step events we can parse.
+    args.push("--verbose", "--input-format", "stream-json", "--output-format", "stream-json");
   } else {
+    // Non-streaming ("fresh") call: plain JSON, no --verbose so we get a single
+    // object with `.result` instead of an event array.
     args.push("--output-format", "json");
   }
 
@@ -687,20 +689,37 @@ async function doSendWithTimeout(
   };
 }
 
+export interface FreshClaudeResult {
+  result: string;
+  model: string;
+  sessionId?: string;
+  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+  costUsd?: number;
+  exitCode: number | null;
+  status: "ok" | "error" | "timeout";
+  error?: string;
+}
+
 export async function askClaudeFresh(
   workspace: string,
   prompt: string,
   model?: string,
   timeoutMs: number = MESSAGE_TIMEOUT_MS,
-): Promise<string> {
+  opts?: { fullAccess?: boolean; tools?: string[]; agentEnv?: Record<string, string>; inheritUserScope?: boolean },
+): Promise<FreshClaudeResult> {
   const resolvedModel = resolveModel(model);
-  log.info({ workspace, model: resolvedModel }, "Fresh Claude call (cron)");
+  log.info({ workspace, model: resolvedModel, fullAccess: !!opts?.fullAccess }, "Fresh Claude call (cron)");
 
   const { args, env } = buildSpawnArgs({
-    model: resolvedModel, tools: [], streaming: false,
+    model: resolvedModel,
+    tools: opts?.tools ?? [],
+    streaming: false,
+    fullAccess: opts?.fullAccess,
+    agentEnv: opts?.agentEnv,
+    inheritUserScope: opts?.inheritUserScope,
   });
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const proc = spawn(resolveCliPath(), args, {
       cwd: workspace,
       stdio: ["pipe", "pipe", "pipe"],
@@ -709,34 +728,53 @@ export async function askClaudeFresh(
 
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
 
     proc.stdout!.on("data", (d: Buffer) => { stdout += d.toString(); });
     proc.stderr!.on("data", (d: Buffer) => { stderr += d.toString(); });
 
     const timer = setTimeout(() => {
+      timedOut = true;
       proc.kill("SIGKILL");
-      reject(new Error("TIMEOUT"));
     }, timeoutMs);
 
     proc.on("close", (code) => {
       clearTimeout(timer);
+      if (timedOut) {
+        resolve({ result: "Error: timeout", model: resolvedModel, exitCode: code, status: "timeout", error: "TIMEOUT" });
+        return;
+      }
       if (code !== 0) {
         log.error({ code, stderr: stderr.slice(0, 200), workspace }, "Cron Claude call failed");
-        resolve(`Error: CLI exited with code ${code}`);
+        resolve({
+          result: `Error: CLI exited with code ${code}`,
+          model: resolvedModel,
+          exitCode: code,
+          status: "error",
+          error: stderr.slice(0, 500) || `exit ${code}`,
+        });
         return;
       }
       try {
         const parsed = JSON.parse(stdout);
-        resolve(parsed.result ?? stdout.trim());
+        resolve({
+          result: parsed.result ?? stdout.trim(),
+          model: parsed.model || resolvedModel,
+          sessionId: parsed.session_id,
+          usage: parsed.usage,
+          costUsd: parsed.total_cost_usd,
+          exitCode: code,
+          status: "ok",
+        });
       } catch {
-        resolve(stdout.trim());
+        resolve({ result: stdout.trim(), model: resolvedModel, exitCode: code, status: "ok" });
       }
     });
 
     proc.on("error", (err) => {
       clearTimeout(timer);
       log.error({ err: err.message, workspace }, "Cron Claude call error");
-      resolve(`Error: ${err.message}`);
+      resolve({ result: `Error: ${err.message}`, model: resolvedModel, exitCode: null, status: "error", error: err.message });
     });
 
     proc.stdin!.write(prompt);

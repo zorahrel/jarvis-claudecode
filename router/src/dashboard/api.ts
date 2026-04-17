@@ -6,7 +6,7 @@ import { getProcesses, killProcessByKey, resolveCliPath } from "../services/clau
 import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
-import { getCronStates, triggerCronJob } from "../services/cron";
+import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns } from "../services/cron";
 import { queryCosts, aggregateCosts, getTotalCost } from "../services/cost-tracker";
 import { logger } from "../services/logger";
 import { clearLogEntries } from "./state";
@@ -243,9 +243,16 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       lastStatus: s.lastStatus,
       lastDurationMs: s.lastDurationMs,
       lastError: s.lastError,
-      lastResult: s.lastResult,
       runCount: s.runCount,
+      consecutiveErrors: s.consecutiveErrors,
+      lastDeliveryStatus: s.lastDeliveryStatus,
     })));
+
+  } else if (path.match(/^\/api\/crons\/[^/]+\/runs$/) && req.method === "GET") {
+    const name = decodeURIComponent(path.split("/")[3]);
+    const limitParam = new URL(req.url!, "http://x").searchParams.get("limit");
+    const limit = Math.min(500, Math.max(1, parseInt(limitParam || "50", 10) || 50));
+    json(req, res, { runs: listCronRuns(name, limit) });
 
   } else if (path.match(/^\/api\/crons\/[^/]+\/run$/) && req.method === "POST") {
     const name = decodeURIComponent(path.split("/")[3]);
@@ -1509,6 +1516,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       raw.crons.splice(idx, 1);
       if (raw.crons.length === 0) raw.crons = null;
       await writeRawConfig(raw);
+      deleteCronRuns(name);
       invalidateHtmlCache();
       log.info("[dashboard] Deleted cron job: %s", name);
       json(req, res, { ok: true });

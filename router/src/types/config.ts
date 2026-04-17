@@ -1,5 +1,5 @@
 /** Channel types */
-export type Channel = "whatsapp" | "telegram" | "discord";
+export type Channel = "whatsapp" | "telegram" | "discord" | "notch";
 
 /** Route match criteria */
 export interface RouteMatch {
@@ -67,6 +67,9 @@ export interface ChannelConfig {
   discord?: {
     enabled: boolean;
     botToken?: string;
+  };
+  notch?: {
+    enabled: boolean;
   };
 }
 
