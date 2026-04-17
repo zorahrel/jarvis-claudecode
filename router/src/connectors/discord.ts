@@ -5,6 +5,7 @@ import type { MessageTimings } from "../types/message";
 import { findRoute } from "../services/router";
 import { getConfig } from "../services/config-loader";
 import { handleMessage } from "../services/handler";
+import { chunkForDiscord } from "../services/discord-chunker";
 import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
@@ -249,7 +250,11 @@ export class DiscordConnector implements Connector {
     if (!channel || !channel.isTextBased() || !("send" in channel)) {
       throw new Error(`Discord channel ${target} not sendable`);
     }
-    await (channel as any).send(text);
+    // Discord caps single messages at 2000 chars — chunker splits preserving code fences.
+    const chunks = chunkForDiscord(text);
+    for (const chunk of chunks) {
+      await (channel as any).send(chunk);
+    }
   }
 
   updateConfig(config: Config): void {

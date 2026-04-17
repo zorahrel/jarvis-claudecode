@@ -236,6 +236,23 @@ export interface CronJob {
   [key: string]: unknown
 }
 
+export interface CronRun {
+  ts: number
+  jobName: string
+  trigger: 'schedule' | 'manual'
+  status: 'ok' | 'error' | 'timeout'
+  runAtMs: number
+  durationMs: number
+  nextRunAtMs?: number
+  model?: string
+  sessionId?: string
+  result?: string
+  error?: string
+  delivery?: { channel: string; target: string; ok: boolean; error?: string }
+  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number }
+  costUsd?: number
+}
+
 export interface CostEntry {
   date: string
   cost: number
@@ -555,6 +572,8 @@ export const api = {
     }),
   runCron: (name: string) =>
     request<void>(`/api/crons/${encodeURIComponent(name)}/run`, { method: 'POST' }),
+  cronRuns: (name: string, limit = 50) =>
+    request<{ runs: CronRun[] }>(`/api/crons/${encodeURIComponent(name)}/runs?limit=${limit}`),
 
   // Channels
   updateChannel: (name: string, data: Record<string, unknown>) =>
