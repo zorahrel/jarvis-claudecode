@@ -13,6 +13,7 @@ import { acquirePid, releasePid } from "./services/pid";
 import { logger } from "./services/logger";
 import { activeCount, activeJobs, loadPersistedJobs, clearPersistedJobs, type PendingJob } from "./services/pending-jobs";
 import { killAllProcesses } from "./services/claude";
+import { ensureHooksInstalled } from "./services/localSessions";
 
 const log = logger.child({ module: "main" });
 
@@ -120,6 +121,10 @@ async function main() {
   process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
 
   log.info("Jarvis Router ready — %d connectors active", connectors.length);
+
+  // Install jarvis-control status hooks for local session discovery.
+  // Best-effort — failure just means the dashboard falls back to heuristic status.
+  ensureHooksInstalled().catch((err) => log.warn({ err }, "hook install failed"));
 
   // Start dashboard
   startDashboard(3340);

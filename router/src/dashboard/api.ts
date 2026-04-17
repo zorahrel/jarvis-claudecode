@@ -14,6 +14,7 @@ import { corsOrigin, json, parseBody, requireConfirm, validateAgentName, safeRea
 import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, persistCliSessionsNow } from "./state";
 import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
 import { getAllServices, generatePlist } from "../services/services";
+import { discoverLocalSessions, dispatchOpenTarget, availableTargets, type OpenTargetId } from "../services/localSessions";
 
 const log = logger.child({ module: "dashboard" });
 const HOME = process.env.HOME!;
@@ -1579,6 +1580,39 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
   } else if (path === "/api/logs" && req.method === "DELETE") {
     clearLogEntries();
     json(req, res, { ok: true });
+
+  } else if (path === "/api/local-sessions" && req.method === "GET") {
+    try {
+      const sessions = await discoverLocalSessions();
+      json(req, res, sessions);
+    } catch (err: unknown) {
+      log.warn({ err }, "[local-sessions] discovery failed");
+      json(req, res, { error: "discovery failed" }, 500);
+    }
+
+  } else if (/^\/api\/local-sessions\/\d+\/targets$/.test(path) && req.method === "GET") {
+    const pid = parseInt(path.split("/")[3], 10);
+    const sessions = await discoverLocalSessions();
+    const session = sessions.find((s) => s.pid === pid);
+    if (!session) { json(req, res, { error: "session not found" }, 404); return; }
+    json(req, res, await availableTargets(session));
+
+  } else if (/^\/api\/local-sessions\/\d+\/open$/.test(path) && req.method === "POST") {
+    const pid = parseInt(path.split("/")[3], 10);
+    let body: { target?: OpenTargetId };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const target = body.target;
+    if (!target) { json(req, res, { error: "missing target" }, 400); return; }
+    const sessions = await discoverLocalSessions();
+    const session = sessions.find((s) => s.pid === pid);
+    if (!session) { json(req, res, { error: "session not found" }, 404); return; }
+    try {
+      await dispatchOpenTarget(target, session);
+      json(req, res, { ok: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(req, res, { error: msg }, 500);
+    }
 
   } else {
     json(req, res, { error: "not found" }, 404);

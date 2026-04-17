@@ -6,6 +6,21 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
+- **Local Claude Code session monitor.** New Sessions-tab section
+  auto-discovers every `claude` CLI running on the host via `ps`+`lsof`,
+  not just router-spawned ones. Each card shows cwd, branch, last
+  user/assistant preview, status (working / idle / waiting / errored /
+  finished / unknown) and quick-open buttons for **iTerm**, **Terminal.app**,
+  **Topics** (via the existing HTTPS :3333 `/api/open-project` endpoint),
+  **Finder**, **Editor**, and **PR** (via `gh pr view --web`). Target
+  availability is probed live — Topics button disables when Topics is not
+  running, PR disables on `main`/`master`. Status comes from
+  `jarvis-control` hooks that the router installs into
+  `~/.claude/settings.json` on boot (idempotent merge, never replaces
+  existing hooks); events land in `~/.claude/jarvis/events/<pid>.json` and
+  are auto-pruned after 24h. Cached 2s on the backend. New endpoints:
+  `GET /api/local-sessions`, `GET /api/local-sessions/:pid/targets`,
+  `POST /api/local-sessions/:pid/open`.
 - **Cron run history (per-job JSONL).** Each scheduled/manual run appends a
   structured record to `router/cron/runs/<job>.jsonl` — timestamp, duration,
   status, model, sessionId, token usage, cost, delivery outcome, summary, and

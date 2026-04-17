@@ -14,6 +14,7 @@ import { Input, Select } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
 import { ConversationThread } from '../components/ConversationThread'
 import { ActivityStream } from '../components/ActivityStream'
+import { LocalSessionsSection } from '../components/LocalSessionsSection'
 import type { ProcessSession, CliSession } from '../api/client'
 
 type SortKey = 'lastMessageAt' | 'createdAt' | 'messageCount' | 'costUsd' | 'inputTokens' | 'timeToInactivityTimeout'
@@ -505,6 +506,8 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
           </div>
         </div>
       )}
+
+      {view === 'table' && <LocalSessionsSection onToast={onToast} />}
 
       {view === 'table' && (
         <Panel

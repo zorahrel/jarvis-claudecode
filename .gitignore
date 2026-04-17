@@ -19,6 +19,12 @@ data/
 router/wa-auth/
 router/certs/
 router/data/
+# Local-sessions monitor runtime dirs — created by the hooks installer at
+# $HOME/.claude/jarvis/{events,hooks}, which lands inside the repo when it's
+# cloned as ~/.claude/jarvis. Anchored to repo root to avoid masking
+# `router/dashboard/src/hooks/` (which IS source code).
+/events/
+/hooks/
 router/logs/
 router/cli-sessions.json
 router/session-stats.json
