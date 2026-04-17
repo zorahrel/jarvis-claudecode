@@ -322,9 +322,8 @@ Use Jarvis Claude Code if you want a personal, Claude-Code-native, config-driven
 See [`TODO.md`](TODO.md) for the full list. Highlights on deck:
 
 - Sub-agents from chat — "do X in background" spawns a background Claude task
-- Custom slash commands (`/clear`, `/scope`, `/status`)
-- Cron runtime: schedule Claude jobs from `config.yaml` with channel delivery
 - Dashboard auth for exposure outside localhost/LAN
+- Log rotation for service logs
 
 ## Responsible use
 
