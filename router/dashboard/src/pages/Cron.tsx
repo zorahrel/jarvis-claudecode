@@ -96,7 +96,6 @@ interface CronState {
   lastStatus?: string
   lastDurationMs?: number
   lastError?: string
-  lastResult?: string
   runCount?: number
   consecutiveErrors?: number
   lastDeliveryStatus?: string | null
@@ -128,7 +127,6 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
   const [editingCron, setEditingCron] = useState(false)
   const [cronEditForm, setCronEditForm] = useState<Record<string, string>>({})
   const [savingCron, setSavingCron] = useState(false)
-  const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({})
   const [newCronForm, setNewCronForm] = useState({
     name: '',
     schedule: '',
@@ -352,7 +350,6 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
             const cs = cj as unknown as CronState
             const nextRun = nextCronRun(cs.schedule || '')
             const nextLabel = nextRun ? `in ${fmtInterval(nextRun.getTime() - Date.now())}` : '?'
-            const isHistoryOpen = !!historyOpen[cs.name]
             return (
               <Card key={cs.name} padding="12px 16px">
                 <div
@@ -399,64 +396,7 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                       : 'Last: ' + ago(cs.lastRun || 0) + ' · ' + (cs.runCount || 0) + ' runs'}
                   </span>
                   <span>Next run: <span style={{ color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{nextLabel}</span></span>
-                  {(cs.runCount || 0) > 0 && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setHistoryOpen(prev => ({ ...prev, [cs.name]: !isHistoryOpen }))
-                      }}
-                      style={{
-                        marginLeft: 'auto',
-                        fontSize: 10,
-                        padding: '2px 8px',
-                        background: 'transparent',
-                        color: 'var(--accent-bright)',
-                        border: '1px solid var(--border)',
-                        borderRadius: 'var(--radius-xs)',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {isHistoryOpen ? 'Hide history' : 'View run history'}
-                    </button>
-                  )}
                 </div>
-                {isHistoryOpen && (
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    style={{
-                      marginTop: 8,
-                      padding: 10,
-                      borderRadius: 'var(--radius)',
-                      background: 'var(--bg-0)',
-                      border: '1px solid var(--border)',
-                      display: 'grid',
-                      gridTemplateColumns: '100px 1fr',
-                      gap: '4px 12px',
-                      fontSize: 11,
-                      fontFamily: 'var(--mono)',
-                      color: 'var(--text-3)',
-                    }}
-                  >
-                    <span style={{ color: 'var(--text-4)' }}>runs</span>
-                    <span>{cs.runCount || 0}</span>
-                    <span style={{ color: 'var(--text-4)' }}>last status</span>
-                    <span>{cs.lastStatus || 'never'}</span>
-                    <span style={{ color: 'var(--text-4)' }}>last run</span>
-                    <span>{cs.lastRun ? ago(cs.lastRun) : 'never'}</span>
-                    {cs.lastDurationMs != null && (
-                      <>
-                        <span style={{ color: 'var(--text-4)' }}>last duration</span>
-                        <span>{((cs.lastDurationMs || 0) / 1000).toFixed(1)}s</span>
-                      </>
-                    )}
-                    {cs.lastError && (
-                      <>
-                        <span style={{ color: 'var(--text-4)' }}>last error</span>
-                        <span style={{ color: 'var(--err)', whiteSpace: 'pre-wrap' }}>{cs.lastError}</span>
-                      </>
-                    )}
-                  </div>
-                )}
               </Card>
             )
           })}
@@ -555,34 +495,9 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                   <pre style={preStyle}>{cronPanelData.prompt}</pre>
                 </div>
 
-                {cronPanelData.lastResult && (
+                {cronPanelData.lastError && cronPanelData.lastStatus === 'error' && (
                   <div>
-                    <SectionHeader
-                      title="Ultimo messaggio"
-                      action={
-                        <button
-                          onClick={() => navigator.clipboard?.writeText(cronPanelData.lastResult || '')}
-                          style={{
-                            fontSize: 10,
-                            color: 'var(--text-3)',
-                            background: 'transparent',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-xs)',
-                            padding: '2px 6px',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Copia
-                        </button>
-                      }
-                    />
-                    <div style={messageBox}>{cronPanelData.lastResult}</div>
-                  </div>
-                )}
-
-                {cronPanelData.lastError && (
-                  <div>
-                    <SectionHeader title="Last Error" />
+                    <SectionHeader title="Ultimo errore" />
                     <div style={{ fontSize: 12, color: 'var(--err)' }}>{cronPanelData.lastError}</div>
                   </div>
                 )}
@@ -896,12 +811,12 @@ function RunHistoryList({
                     </>
                   )}
                 </dl>
-                {(run.result || run.summary) && (
+                {run.result && (
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
                       <div style={{ fontSize: 10, color: 'var(--text-4)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Messaggio inviato</div>
                       <button
-                        onClick={() => navigator.clipboard?.writeText(run.result || run.summary || '')}
+                        onClick={() => navigator.clipboard?.writeText(run.result || '')}
                         style={{
                           fontSize: 10,
                           color: 'var(--text-3)',
@@ -915,7 +830,7 @@ function RunHistoryList({
                         Copia
                       </button>
                     </div>
-                    <div style={messageBox}>{run.result || run.summary}</div>
+                    <div style={messageBox}>{run.result}</div>
                   </div>
                 )}
                 {run.error && (

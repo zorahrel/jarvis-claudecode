@@ -246,7 +246,6 @@ export interface CronRun {
   nextRunAtMs?: number
   model?: string
   sessionId?: string
-  summary?: string
   result?: string
   error?: string
   delivery?: { channel: string; target: string; ok: boolean; error?: string }

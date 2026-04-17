@@ -243,7 +243,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       lastStatus: s.lastStatus,
       lastDurationMs: s.lastDurationMs,
       lastError: s.lastError,
-      lastResult: s.lastResult,
       runCount: s.runCount,
       consecutiveErrors: s.consecutiveErrors,
       lastDeliveryStatus: s.lastDeliveryStatus,

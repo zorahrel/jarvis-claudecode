@@ -1,9 +1,8 @@
 import cronParser from "cron-parser";
 const parseExpression = cronParser.parseExpression;
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync } from "fs";
+import { readFileSync, appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
-import { basename } from "path";
+import { join, basename } from "path";
 import type { CronJob, Config } from "../types";
 import { askClaudeFresh, sessionKey } from "./claude";
 import { expandHome, getAgentRegistry } from "./config-loader";
@@ -12,8 +11,9 @@ import { logger } from "./logger";
 
 const log = logger.child({ module: "cron" });
 
-/** One line in the per-job JSONL run log. Fields mirror OpenClaw's schema
- *  (see ~/.openclaw/cron/runs/*.jsonl) so future tooling can stay consistent. */
+/** One line in the per-job JSONL run log. Fields mirror OpenClaw's schema so
+ *  future tooling can stay consistent. The JSONL is the single source of truth
+ *  for a job's history — in-memory state is rebuilt from it at boot. */
 export interface CronRun {
   ts: number;
   jobName: string;
@@ -24,23 +24,23 @@ export interface CronRun {
   nextRunAtMs?: number;
   model?: string;
   sessionId?: string;
-  /** Short preview (first ~240 chars) shown collapsed in the UI. */
-  summary?: string;
-  /** Full Claude output — not length-capped. Shown in the expanded run view. */
+  /** Full Claude output (ok runs). Readers truncate for previews. */
   result?: string;
+  /** Error message (non-ok runs). */
   error?: string;
   delivery?: { channel: string; target: string; ok: boolean; error?: string };
   usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
   costUsd?: number;
 }
 
+/** In-memory snapshot of a job's latest status. Rehydrated from JSONL at boot;
+ *  updated after each run. Not persisted separately — JSONL is the truth. */
 export interface CronState {
   job: CronJob;
   lastRun: number;
   lastStatus: "ok" | "error" | "running" | "never";
   lastDurationMs: number;
   lastError: string | null;
-  lastResult: string | null;
   runCount: number;
   consecutiveErrors: number;
   lastDeliveryStatus: "ok" | "error" | "not-delivered" | null;
@@ -49,7 +49,7 @@ export interface CronState {
 let cronStates: CronState[] = [];
 let ticker: ReturnType<typeof setInterval> | null = null;
 
-/** Delivery callback — set by index.ts to send messages to connectors */
+/** Delivery callback — set by index.ts to send messages to connectors. */
 let deliverFn: ((channel: string, target: string, text: string) => Promise<void>) | null = null;
 
 export function setDeliveryFn(fn: (channel: string, target: string, text: string) => Promise<void>): void {
@@ -57,14 +57,10 @@ export function setDeliveryFn(fn: (channel: string, target: string, text: string
 }
 
 // ---- Paths ----
-const CRON_DIR = `${homedir()}/.claude/jarvis/router/cron`;
-const CRON_STATS_FILE = `${CRON_DIR}/stats.json`;
-const CRON_RUNS_DIR = `${CRON_DIR}/runs`;
-// Legacy path (pre-2026-04-16) — migrated on first load.
-const LEGACY_STATS_FILE = `${homedir()}/.claude/jarvis/router/cron-stats.json`;
+const CRON_RUNS_DIR = `${homedir()}/.claude/jarvis/router/cron/runs`;
 
 /** Soft cap on JSONL file size. When exceeded, the file is rotated to `.1`. */
-const RUNS_FILE_SOFT_CAP_BYTES = 2 * 1024 * 1024; // 2MB — ~5k runs
+const RUNS_FILE_SOFT_CAP_BYTES = 2 * 1024 * 1024; // ~5k runs
 
 function ensureDirs(): void {
   try { mkdirSync(CRON_RUNS_DIR, { recursive: true }); } catch { /* exists */ }
@@ -76,62 +72,11 @@ function runFileFor(jobName: string): string {
   return join(CRON_RUNS_DIR, `${safe}.jsonl`);
 }
 
-// ---- Cron stats persistence ----
-function loadCronStats(): void {
-  ensureDirs();
-  // One-shot migration from the pre-refactor flat file.
-  if (!existsSync(CRON_STATS_FILE) && existsSync(LEGACY_STATS_FILE)) {
-    try {
-      renameSync(LEGACY_STATS_FILE, CRON_STATS_FILE);
-      log.info("Migrated legacy cron-stats.json → cron/stats.json");
-    } catch (err) {
-      log.warn({ err }, "Legacy cron-stats migration failed");
-    }
-  }
-  try {
-    const raw = readFileSync(CRON_STATS_FILE, "utf-8");
-    const data = JSON.parse(raw);
-    for (const state of cronStates) {
-      const saved = data[state.job.name];
-      if (saved) {
-        state.lastRun = saved.lastRun || 0;
-        state.lastStatus = saved.lastStatus || "never";
-        state.lastDurationMs = saved.lastDurationMs || 0;
-        state.lastError = saved.lastError || null;
-        state.lastResult = saved.lastResult || null;
-        state.runCount = saved.runCount || 0;
-        state.consecutiveErrors = saved.consecutiveErrors || 0;
-        state.lastDeliveryStatus = saved.lastDeliveryStatus || null;
-      }
-    }
-  } catch { /* first run or corrupt file */ }
-}
-
-function persistCronStats(): void {
-  try {
-    const data: Record<string, any> = {};
-    for (const s of cronStates) {
-      data[s.job.name] = {
-        lastRun: s.lastRun,
-        lastStatus: s.lastStatus,
-        lastDurationMs: s.lastDurationMs,
-        lastError: s.lastError,
-        lastResult: s.lastResult,
-        runCount: s.runCount,
-        consecutiveErrors: s.consecutiveErrors,
-        lastDeliveryStatus: s.lastDeliveryStatus,
-      };
-    }
-    writeFileSync(CRON_STATS_FILE, JSON.stringify(data, null, 2), "utf-8");
-  } catch { /* ignore write errors */ }
-}
-
 /** Append one run record to the per-job JSONL log. */
 function appendRun(run: CronRun): void {
   ensureDirs();
   const file = runFileFor(run.jobName);
   try {
-    // Rotate if the file is getting too big.
     if (existsSync(file)) {
       const size = statSync(file).size;
       if (size > RUNS_FILE_SOFT_CAP_BYTES) {
@@ -153,9 +98,9 @@ export function listCronRuns(jobName: string, limit = 50): CronRun[] {
     const raw = readFileSync(file, "utf-8");
     const lines = raw.split("\n").filter(l => l.trim().length > 0);
     const recent = lines.slice(-limit).reverse();
-    return recent.map(l => {
-      try { return JSON.parse(l) as CronRun; } catch { return null; }
-    }).filter((r): r is CronRun => r !== null);
+    return recent
+      .map(l => { try { return JSON.parse(l) as CronRun; } catch { return null; } })
+      .filter((r): r is CronRun => r !== null);
   } catch {
     return [];
   }
@@ -171,7 +116,30 @@ export function deleteCronRuns(jobName: string): void {
   } catch { /* ignore */ }
 }
 
-/** Initialize cron jobs from config */
+/** Rehydrate in-memory state from the tail of the JSONL log. JSONL is the
+ *  source of truth; the state is a cache for fast dashboard reads. */
+function hydrateFromJsonl(state: CronState): void {
+  const runs = listCronRuns(state.job.name, 200);
+  if (runs.length === 0) return;
+  state.runCount = runs.length;
+  // runs are newest-first; count error streak from the head.
+  let streak = 0;
+  for (const r of runs) {
+    if (r.status === "ok") break;
+    streak++;
+  }
+  state.consecutiveErrors = streak;
+  const last = runs[0];
+  state.lastRun = last.runAtMs;
+  state.lastStatus = last.status === "ok" ? "ok" : "error";
+  state.lastDurationMs = last.durationMs;
+  state.lastError = last.error ?? null;
+  state.lastDeliveryStatus = last.delivery
+    ? (last.delivery.ok ? "ok" : "error")
+    : (state.job.delivery ? "not-delivered" : null);
+}
+
+/** Initialize cron jobs from config. */
 export function initCrons(config: Config): void {
   if (ticker) clearInterval(ticker);
   cronStates = [];
@@ -182,42 +150,33 @@ export function initCrons(config: Config): void {
   }
 
   for (const job of config.crons) {
-    cronStates.push({
+    const state: CronState = {
       job: { ...job, workspace: expandHome(job.workspace) },
       lastRun: 0,
       lastStatus: "never",
       lastDurationMs: 0,
       lastError: null,
-      lastResult: null,
       runCount: 0,
       consecutiveErrors: 0,
       lastDeliveryStatus: null,
-    });
-    log.info({ name: job.name, schedule: job.schedule }, "Cron job registered");
+    };
+    hydrateFromJsonl(state);
+    cronStates.push(state);
+    log.info({ name: job.name, schedule: job.schedule, runs: state.runCount }, "Cron job registered");
   }
 
-  // Tick every 60 seconds
   ticker = setInterval(() => tick(), 60_000);
   log.info("Cron ticker started (%d jobs)", cronStates.length);
-
-  // Restore persisted cron stats
-  loadCronStats();
 }
 
-/** Stop cron ticker */
 export function stopCrons(): void {
-  if (ticker) {
-    clearInterval(ticker);
-    ticker = null;
-  }
+  if (ticker) { clearInterval(ticker); ticker = null; }
 }
 
-/** Get all cron states for dashboard */
 export function getCronStates(): CronState[] {
   return cronStates;
 }
 
-/** Trigger a cron job manually by name */
 export async function triggerCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
   const state = cronStates.find(s => s.job.name === name);
   if (!state) return { ok: false, error: "Job not found: " + name };
@@ -239,10 +198,9 @@ function nextFireMs(state: CronState, after: Date = new Date()): number | undefi
   } catch { return undefined; }
 }
 
-/** Check all jobs and run if due */
+/** Check all jobs and run the ones that are due. */
 function tick(): void {
   const now = new Date();
-
   for (const state of cronStates) {
     if (state.lastStatus === "running") continue;
     try {
@@ -250,9 +208,7 @@ function tick(): void {
         tz: state.job.timezone ?? "UTC",
         currentDate: now,
       });
-
       const prev = expr.prev().getTime();
-
       if (prev > state.lastRun && now.getTime() - prev < 90_000) {
         runJob(state, "schedule").catch((err) => {
           log.error({ err, name: state.job.name }, "Cron job failed");
@@ -264,7 +220,6 @@ function tick(): void {
   }
 }
 
-/** Execute a single cron job with state tracking */
 async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise<void> {
   const job = state.job;
   log.info({ name: job.name, trigger }, "Running cron job");
@@ -287,12 +242,10 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
   });
   const durationMs = Date.now() - startMs;
 
-  // Core state + run record shared fields.
   let deliveryRecord: CronRun["delivery"] | undefined;
 
   if (res.status === "ok") {
     state.lastStatus = "ok";
-    state.lastResult = res.result;
     state.consecutiveErrors = 0;
     log.info({ name: job.name, durationMs, resultLen: res.result.length }, "Cron job completed");
 
@@ -312,10 +265,9 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
         log.info({ name: job.name, channel: job.delivery.channel, target: job.delivery.target }, "Cron result delivered");
 
         // Seed the agent's conversation cache so when the human replies the agent
-        // sees the cron message as its own previous turn. Uses the same session
-        // key the chat handler derives (channel:group or channel:from) — so the
-        // cache is unified with the normal conversation thread.
-        const isGroup = job.delivery.target.endsWith("@g.us") || job.delivery.target.includes("@g.us");
+        // sees the cron message as its own previous turn. Uses the chat handler's
+        // session-key shape so the cache is unified with the normal thread.
+        const isGroup = job.delivery.target.includes("@g.us");
         const key = sessionKey(
           job.delivery.channel,
           job.delivery.target,
@@ -341,7 +293,6 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
   state.lastDurationMs = durationMs;
   state.runCount++;
 
-  // Append the full record to the per-job JSONL (openclaw-style).
   const run: CronRun = {
     ts: Date.now(),
     jobName: job.name,
@@ -352,9 +303,6 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
     nextRunAtMs: nextFireMs(state),
     model: res.model,
     sessionId: res.sessionId,
-    summary: res.status === "ok"
-      ? (res.result.length > 240 ? res.result.slice(0, 240) + "…" : res.result)
-      : undefined,
     result: res.status === "ok" ? res.result : undefined,
     error: res.status !== "ok" ? (res.error ?? res.result) : undefined,
     delivery: deliveryRecord,
@@ -366,20 +314,4 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
     costUsd: res.costUsd,
   };
   appendRun(run);
-
-  persistCronStats();
-}
-
-/** List JSONL files that no longer correspond to any configured job. */
-export function orphanRunFiles(): string[] {
-  try {
-    if (!existsSync(CRON_RUNS_DIR)) return [];
-    const configured = new Set(cronStates.map(s => runFileFor(s.job.name)));
-    return readdirSync(CRON_RUNS_DIR)
-      .filter(f => f.endsWith(".jsonl"))
-      .map(f => join(CRON_RUNS_DIR, f))
-      .filter(p => !configured.has(p));
-  } catch {
-    return [];
-  }
 }

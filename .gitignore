@@ -26,7 +26,6 @@ router/*.pid
 router/cron/
 chroma-data/
 mem0-data/
-cron-stats.json
 stats.json
 
 # Build artifacts

@@ -47,8 +47,10 @@ Dates are ISO (YYYY-MM-DD).
 - **`CronState` tracks delivery + streak health.** New fields
   `consecutiveErrors` and `lastDeliveryStatus` alongside the existing
   lastRun/lastStatus, matching OpenClaw's job-state granularity.
-- **Legacy `cron-stats.json` auto-migrates** to `router/cron/stats.json` on
-  first boot (no manual action required; idempotent).
+- **JSONL is the single source of truth.** The in-memory `CronState` is
+  rehydrated from the tail of the job's JSONL at boot, so there's no
+  parallel `stats.json` to keep in sync. The legacy `cron-stats.json` is
+  no longer read or written.
 
 ### Fixed
 - **Cron delivery chunks long messages on every channel.** Telegram and
