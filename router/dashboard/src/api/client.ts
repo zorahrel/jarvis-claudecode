@@ -196,6 +196,33 @@ export interface CliSession {
   alive: boolean
 }
 
+export type LocalSessionStatus = 'working' | 'idle' | 'waiting' | 'finished' | 'errored' | 'unknown'
+
+export interface LocalSession {
+  pid: number
+  cwd: string
+  repoName: string
+  branch: string | null
+  status: LocalSessionStatus
+  hookEvent: string | null
+  sessionId: string | null
+  transcriptPath: string | null
+  lastActivity: number
+  tty: string | null
+  parentCommand: string | null
+  preview: { lastUserMessage: string | null; lastAssistantText: string | null }
+  isRouterSpawned: boolean
+}
+
+export type OpenTargetId = 'iterm' | 'terminal' | 'topics' | 'finder' | 'editor' | 'pr'
+
+export interface TargetAvailability {
+  id: OpenTargetId
+  available: boolean
+  label: string
+  reason?: string
+}
+
 export interface Exchange {
   user: string
   assistant: string
@@ -597,4 +624,15 @@ export const api = {
     request<{ ok: boolean; removed: number }>('/api/cli-sessions', { method: 'DELETE' }),
   removeCliSession: (id: string) =>
     request<{ ok: boolean }>(`/api/cli-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Local Claude Code sessions (auto-discovered from the process table)
+  localSessions: () => request<LocalSession[]>('/api/local-sessions'),
+  localSessionTargets: (pid: number) =>
+    request<TargetAvailability[]>(`/api/local-sessions/${pid}/targets`),
+  openLocalSession: (pid: number, target: OpenTargetId) =>
+    request<{ ok: boolean }>(`/api/local-sessions/${pid}/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    }),
 }
