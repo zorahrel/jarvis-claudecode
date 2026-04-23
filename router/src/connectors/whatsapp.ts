@@ -215,7 +215,7 @@ export class WhatsAppConnector implements Connector {
 
     const text = waMsg.message?.conversation ?? waMsg.message?.extendedTextMessage?.text ?? "";
 
-    // Pre-compute routing context for early tool authorization check
+    // Pre-compute routing context
     const jid = waMsg.key.remoteJid ?? "";
     const isGroup = jid.endsWith("@g.us");
     const fromMe = waMsg.key.fromMe ?? false;
@@ -227,65 +227,138 @@ export class WhatsAppConnector implements Connector {
       setContactName("+" + senderPhone, waMsg.pushName);
     }
     const selfChat = this.isSelfChat(jid);
+    const owner = isOwnerMessage(fromMe, senderPhone);
 
-    // Preview route to decide which media types are allowed to be processed
-    const previewFrom = (selfChat && fromMe)
-      ? "self"
-      : "+" + senderPhone;
-    const previewMsg: any = {
-      channel: "whatsapp",
-      from: previewFrom,
-      group: isGroup ? jid : undefined,
-      rawJid: jid,
-      text: "",
-      timestamp: 0,
-      reply: async () => {},
-    };
-    const previewRoute = findRoute(previewMsg);
-    const agent = previewRoute?.agent;
+    // Quoted message + "reply to Jarvis" detection (needed for decision tree)
+    let quotedMessage: QuotedMessage | undefined;
+    const ctxInfo = waMsg.message?.extendedTextMessage?.contextInfo ?? waMsg.message?.imageMessage?.contextInfo ?? waMsg.message?.audioMessage?.contextInfo;
+    if (ctxInfo?.quotedMessage) {
+      quotedMessage = {
+        text: ctxInfo.quotedMessage.conversation ?? ctxInfo.quotedMessage.extendedTextMessage?.text,
+        from: ctxInfo.participant ? "+" + ctxInfo.participant.split(":")[0].split("@")[0] : undefined,
+      };
+    }
+    const quotedParticipant = ctxInfo?.participant ?? "";
+    const isReplyToJarvis = quotedParticipant === this.selfJid ||
+      (!!this.myLidBase && quotedParticipant.split(":")[0]?.split("@")[0] === this.myLidBase);
+
+    // ── DECISION TREE ──────────────────────────────────────
+    //
+    // 1. Self-chat + fromMe                          → route (from:self → full)
+    // 2. alwaysReplyGroups                           → route
+    // 3. @jarvis + owner (ONE-SHOT, no session)      → full agent override
+    // 4. Reply to a Jarvis message (not fromMe)      → route
+    // 5. Explicit route + alwaysReply                → route
+    // 6. Everything else                             → skip (no eye, no download)
+    //
+    // Rationale: @jarvis is owner-only and one-shot — each invocation is
+    // processed with the full agent regardless of chat; no 30-min session.
+    // The decision is computed BEFORE touching media so we don't drop 👀
+    // eyes on attachments that will be ignored.
+    // ───────────────────────────────────────────────────────
+    const config = getConfig();
+    const alwaysReplyGroups: string[] = (config as any).jarvis?.alwaysReplyGroups ?? [];
+    const isBotSent = fromMe && !!msgId && this.sentMsgIds.has(msgId);
+    const jarvisInvoked = isJarvisInvocation(text);
+
+    type Decision =
+      | { kind: "skip" }
+      | { kind: "self" }
+      | { kind: "alwaysReplyGroup" }
+      | { kind: "jarvisOneShot" }
+      | { kind: "replyToJarvis" }
+      | { kind: "explicitRoute" };
+
+    let decision: Decision = { kind: "skip" };
+    if (selfChat && fromMe) {
+      decision = { kind: "self" };
+    } else if (isGroup && alwaysReplyGroups.includes(jid)) {
+      decision = { kind: "alwaysReplyGroup" };
+    } else if (jarvisInvoked) {
+      if (!owner) {
+        log.debug({ jid, from: senderPhone }, "@jarvis invoked by non-owner — ignoring");
+        return;
+      }
+      decision = { kind: "jarvisOneShot" };
+    } else if (isReplyToJarvis && !fromMe) {
+      decision = { kind: "replyToJarvis" };
+    } else if (hasExplicitRoute(jid, isGroup) && !isBotSent) {
+      const route = this.getRouteForJid(jid, isGroup);
+      if (route?.agent?.alwaysReply !== false) {
+        decision = { kind: "explicitRoute" };
+      }
+    }
+
+    if (decision.kind === "skip") {
+      if (isGroup) log.debug({ jid, from: senderPhone }, "Skipped group message (no route)");
+      return;
+    }
+
+    // We WILL respond — now resolve the agent used for capability checks.
+    // @jarvis one-shots use the full agent regardless of the chat's preview route.
+    let agent: import("../types").AgentConfig | undefined;
+    let previewRouteMatch: any;
+    if (decision.kind === "jarvisOneShot") {
+      agent = getFullAgent();
+    } else {
+      const previewFrom = (selfChat && fromMe) ? "self" : "+" + senderPhone;
+      const previewMsg: any = {
+        channel: "whatsapp",
+        from: previewFrom,
+        group: isGroup ? jid : undefined,
+        rawJid: jid,
+        text: "",
+        timestamp: 0,
+        reply: async () => {},
+      };
+      const previewRoute = findRoute(previewMsg);
+      agent = previewRoute?.agent;
+      previewRouteMatch = previewRoute?.match;
+    }
     const hasVoice = canVoice(agent);
     const hasVision = canVision(agent);
 
-    // Send 👀 reaction IMMEDIATELY for media messages (before slow transcription)
-    const wmEarly = waMsg.message;
-    const hasAnyMedia = !!(wmEarly?.audioMessage || wmEarly?.pttMessage || wmEarly?.imageMessage || wmEarly?.documentMessage);
-    // Only process media that the route is authorized for
-    const willProcessVoice = (!!(wmEarly?.audioMessage || wmEarly?.pttMessage)) && hasVoice;
-    const willProcessImage = !!wmEarly?.imageMessage && hasVision;
-    const willProcessDoc = !!wmEarly?.documentMessage; // documents always allowed
+    const wm = waMsg.message;
+    const hasVoiceMsg = !!(wm?.audioMessage || wm?.pttMessage);
+    const hasImageMsg = !!wm?.imageMessage;
+    const hasDocMsg = !!wm?.documentMessage;
+    const hasAnyMedia = hasVoiceMsg || hasImageMsg || hasDocMsg;
+    const willProcessVoice = hasVoiceMsg && hasVoice;
+    const willProcessImage = hasImageMsg && hasVision;
+    const willProcessDoc = hasDocMsg; // documents always allowed when chat is routed
     const willProcess = willProcessVoice || willProcessImage || willProcessDoc;
 
+    // 👀 reaction only once we've confirmed the chat is actually routed
     if (hasAnyMedia && willProcess) {
-      this.sock?.sendMessage(waMsg.key.remoteJid!, { react: { text: "👀", key: waMsg.key } }).catch(() => {});
+      this.sock?.sendMessage(jid, { react: { text: "👀", key: waMsg.key } }).catch(() => {});
     }
 
-    // Process media (tracked) — only authorized types
+    // Process media (only authorized types, and only now that we'll respond)
     const media: MediaAttachment[] = [];
     if (willProcess) timings.mediaStart = Date.now();
     try {
-      const wm = waMsg.message;
-      if ((wm?.audioMessage || wm?.pttMessage) && hasVoice) {
+      if (willProcessVoice) {
         const buffer = await downloadMediaMessage(waMsg, "buffer", {});
         const path = saveMedia(buffer as Buffer, "voice.ogg");
         const processed = await processMedia("voice", path);
-        media.push({ type: "voice", processedText: processed, caption: wm.audioMessage?.caption });
-      } else if (wm?.audioMessage || wm?.pttMessage) {
-        log.warn({ jid, route: previewRoute?.match }, "Voice received but 'voice' tool not authorized — skipping transcription");
+        media.push({ type: "voice", processedText: processed, caption: wm!.audioMessage?.caption });
+      } else if (hasVoiceMsg) {
+        log.warn({ jid, route: previewRouteMatch }, "Voice received but 'voice' tool not authorized — skipping transcription");
       }
-      if (wm?.imageMessage && hasVision) {
+      if (willProcessImage) {
         const buffer = await downloadMediaMessage(waMsg, "buffer", {});
         const path = saveMedia(buffer as Buffer, "image.jpg");
         const processed = await processMedia("image", path);
-        media.push({ type: "image", processedText: processed, localPath: path, caption: wm.imageMessage.caption || undefined });
-      } else if (wm?.imageMessage) {
-        log.warn({ jid, route: previewRoute?.match }, "Image received but 'vision' tool not authorized — skipping processing");
+        media.push({ type: "image", processedText: processed, localPath: path, caption: wm!.imageMessage!.caption || undefined });
+      } else if (hasImageMsg) {
+        log.warn({ jid, route: previewRouteMatch }, "Image received but 'vision' tool not authorized — skipping processing");
       }
-      if (wm?.documentMessage) {
+      if (willProcessDoc) {
         const buffer = await downloadMediaMessage(waMsg, "buffer", {});
-        const fname = wm.documentMessage.fileName || "document";
+        const fname = wm!.documentMessage!.fileName || "document";
         const path = saveMedia(buffer as Buffer, fname);
-        const processed = await processMedia("document", path, wm.documentMessage.mimetype || undefined);
-        media.push({ type: "document", processedText: processed, fileName: fname, caption: wm.documentMessage.caption || undefined });
+        const processed = await processMedia("document", path, wm!.documentMessage!.mimetype || undefined);
+        media.push({ type: "document", processedText: processed, fileName: fname, caption: wm!.documentMessage!.caption || undefined });
       }
     } catch (err) {
       log.error({ err }, "Error processing WhatsApp media");
@@ -295,81 +368,25 @@ export class WhatsAppConnector implements Connector {
     // Attach timings to waMsg so dispatch can propagate them
     (waMsg as any)._timings = timings;
 
-    // Quoted message
-    let quotedMessage: QuotedMessage | undefined;
-    const ctxInfo = waMsg.message?.extendedTextMessage?.contextInfo ?? waMsg.message?.imageMessage?.contextInfo ?? waMsg.message?.audioMessage?.contextInfo;
-    if (ctxInfo?.quotedMessage) {
-      quotedMessage = {
-        text: ctxInfo.quotedMessage.conversation ?? ctxInfo.quotedMessage.extendedTextMessage?.text,
-        from: ctxInfo.participant ? "+" + ctxInfo.participant.split(":")[0].split("@")[0] : undefined,
-      };
-    }
-
-    // Skip if no text and no media
+    // Skip if no text and no media and no quote (nothing to dispatch)
     if (!text && media.length === 0 && !quotedMessage) return;
-
-    // (jid, isGroup, fromMe, senderJid, senderPhone, selfChat already computed above for route preview)
-    const owner = isOwnerMessage(fromMe, senderPhone);
 
     log.debug({ jid, fromMe, selfChat, isGroup, owner, text: text.slice(0, 50) }, "Processing WA message");
 
-    // ── DECISION TREE ──────────────────────────────────────
-    //
-    // 1. Self-chat + fromMe                          → route (from:self → full)
-    // 2. alwaysReplyGroups                           → route
-    // 3. @jarvis + owner (ONE-SHOT, no session)      → full agent override
-    // 4. Reply to a Jarvis message (not fromMe)      → route
-    // 5. Explicit route + alwaysReply                → route
-    // 6. Everything else                             → skip
-    //
-    // Rationale: @jarvis is owner-only and one-shot — each invocation is
-    // processed with the full agent regardless of chat; no 30-min session.
-    // ───────────────────────────────────────────────────────
-
-    // 1. Self-chat
-    if (selfChat && fromMe) {
-      return this.dispatch(waMsg, jid, isGroup, true, senderJid, text, media, quotedMessage);
-    }
-
-    // 2. alwaysReplyGroups — respond to ALL messages in configured groups
-    const config = getConfig();
-    const alwaysReplyGroups: string[] = (config as any).jarvis?.alwaysReplyGroups ?? [];
-    if (isGroup && alwaysReplyGroups.includes(jid)) {
-      return this.dispatch(waMsg, jid, isGroup, false, senderJid, text, media, quotedMessage);
-    }
-
-    // 3. @Jarvis one-shot override (owner-only, any chat)
-    if (isJarvisInvocation(text)) {
-      if (!owner) {
-        log.debug({ jid, from: senderPhone }, "@jarvis invoked by non-owner — ignoring");
-        return;
-      }
-      log.info({ jid }, "@jarvis one-shot (owner, full agent)");
-      return this.dispatch(waMsg, jid, isGroup, fromMe, senderJid, text, media, quotedMessage, getFullAgent());
-    }
-
-    // 4. Reply to Jarvis message → always respond (using route)
-    const quotedParticipant = waMsg.message?.extendedTextMessage?.contextInfo?.participant ?? "";
-    const isReplyToJarvis = quotedParticipant === this.selfJid ||
-      (this.myLidBase && quotedParticipant.split(":")[0]?.split("@")[0] === this.myLidBase);
-    if (isReplyToJarvis && !fromMe) {
-      return this.dispatch(waMsg, jid, isGroup, false, senderJid, text, media, quotedMessage);
-    }
-
-    // 5. Explicit route with alwaysReply flag
-    // In groups: fromMe can be true even for owner messages (LID-based WhatsApp v7)
-    // Use sentMsgIds to distinguish bot-sent messages from owner messages
-    const isBotSent = fromMe && msgId && this.sentMsgIds.has(msgId);
-    if (hasExplicitRoute(jid, isGroup) && !isBotSent) {
-      const route = this.getRouteForJid(jid, isGroup);
-      if (route?.agent?.alwaysReply !== false) {
+    switch (decision.kind) {
+      case "self":
+        return this.dispatch(waMsg, jid, isGroup, true, senderJid, text, media, quotedMessage);
+      case "alwaysReplyGroup":
+        return this.dispatch(waMsg, jid, isGroup, false, senderJid, text, media, quotedMessage);
+      case "jarvisOneShot":
+        log.info({ jid }, "@jarvis one-shot (owner, full agent)");
+        return this.dispatch(waMsg, jid, isGroup, fromMe, senderJid, text, media, quotedMessage, getFullAgent());
+      case "replyToJarvis":
+        return this.dispatch(waMsg, jid, isGroup, false, senderJid, text, media, quotedMessage);
+      case "explicitRoute":
         // In groups, never mark as "self" — it's the owner writing in the group
         return this.dispatch(waMsg, jid, isGroup, isGroup ? false : fromMe, senderJid, text, media, quotedMessage);
-      }
     }
-
-    // 6. Skip
-    if (isGroup) log.debug({ jid, from: senderPhone }, "Skipped group message (no route)");
   }
 
   private async dispatch(

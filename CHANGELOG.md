@@ -99,6 +99,19 @@ Dates are ISO (YYYY-MM-DD).
   specific ID (e.g. `claude-opus-4-6`) in `agent.yaml` if you need version-lock.
 
 ### Fixed
+- **WhatsApp 👀 reaction no longer leaks on unrouted chats.** The eye
+  reaction on attachments was placed (and the media downloaded + transcribed)
+  based on agent capabilities alone, before the routing decision tree ran —
+  so any document dropped into any chat, and any voice/image in chats where
+  the sender phone happened to match an unrelated route preview, got marked
+  "seen" even though the bot would never reply. `processMessage` in
+  `router/src/connectors/whatsapp.ts` now evaluates the full decision tree
+  (self-chat, `alwaysReplyGroups`, `@jarvis` owner invocation, reply-to-Jarvis,
+  explicit route with `alwaysReply`) **before** any reaction, media download,
+  or transcription. As a side-effect fix, `@jarvis` one-shot invocations on
+  media now correctly use the full-access agent's capabilities for voice/vision
+  gating (previously they were gated by the chat's preview route, so media
+  could be silently skipped when `@jarvis`-summoned in an unrelated chat).
 - **Cron delivery chunks long messages on every channel.** Telegram and
   WhatsApp now chunk via `splitMessage(text, 4000)`; Discord uses the
   existing `chunkForDiscord` helper (preserves code fences at 1950). Prevents
