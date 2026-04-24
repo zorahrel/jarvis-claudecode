@@ -12,6 +12,7 @@ import {
   type ExchangeEventData,
   type LogEventData,
   type ResponseTimingData,
+  type NotifyOutboundData,
 } from '../hooks/usePolling'
 
 type VisibleType =
@@ -21,6 +22,7 @@ type VisibleType =
   | 'session.killed'
   | 'log'
   | 'response.timing'
+  | 'notify.outbound'
 
 interface FeedEntry {
   id: string
@@ -37,6 +39,7 @@ const ALL_TYPES: { id: VisibleType; label: string }[] = [
   { id: 'session.killed', label: 'Session killed' },
   { id: 'response.timing', label: 'Timings' },
   { id: 'log', label: 'Logs (warn+)' },
+  { id: 'notify.outbound', label: 'Notify out' },
 ]
 
 const DEFAULT_VISIBLE = new Set<VisibleType>([
@@ -45,6 +48,7 @@ const DEFAULT_VISIBLE = new Set<VisibleType>([
   'session.updated',
   'session.killed',
   'log',
+  'notify.outbound',
 ])
 
 interface FeedFiltersProps {
@@ -189,6 +193,8 @@ function EventRow({ entry }: { entry: FeedEntry }) {
       return <LogRow ts={entry.ts} data={ev.data} />
     case 'response.timing':
       return <TimingRow ts={entry.ts} data={ev.data} />
+    case 'notify.outbound':
+      return <NotifyOutboundRow ts={entry.ts} data={ev.data} />
     default:
       return null
   }
@@ -312,12 +318,32 @@ function TimingRow({ ts, data }: { ts: number; data: ResponseTimingData }) {
   )
 }
 
+function NotifyOutboundRow({ ts, data }: { ts: number; data: NotifyOutboundData }) {
+  return (
+    <div style={rowShell}>
+      <span style={tsStyle}>{fmtTime(ts)}</span>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1, minWidth: 0 }}>
+        <Badge tone="accent" size="xs">notify</Badge>
+        {data.channel && <ChannelIcon channel={data.channel} size={12} />}
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-3)' }}>
+          {`→ ${data.channel}:${data.target}`}
+        </span>
+        <span style={{ fontSize: 12, color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+          {truncate(data.preview, 120)}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function eventChannel(ev: RouterEvent): string | undefined {
   switch (ev.type) {
     case 'exchange.new':
     case 'session.created':
     case 'session.updated':
     case 'session.killed':
+      return ev.data.channel
+    case 'notify.outbound':
       return ev.data.channel
     default:
       return undefined
@@ -469,7 +495,8 @@ export function ActivityStream({ initialChannel = '', initialAgent = '' }: Activ
         t === 'session.created' ||
         t === 'session.updated' ||
         t === 'session.killed' ||
-        t === 'response.timing'
+        t === 'response.timing' ||
+        t === 'notify.outbound'
       ) {
         if (!visible.has(t)) return false
       } else {

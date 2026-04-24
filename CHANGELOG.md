@@ -6,6 +6,90 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
+- **Proactive notify endpoint (`POST /api/notify`).** Agents can now send
+  messages to the originating channel from background jobs, `Bash(run_in_background)`
+  tasks, or subprocess hooks — not only from the live CLI turn. At spawn time
+  the router issues a bound notify token (`{channel, target}`) and injects it
+  into the child CLI as `JARVIS_NOTIFY_URL` + `JARVIS_NOTIFY_TOKEN` (plus
+  `JARVIS_CHANNEL`, `JARVIS_REPLY_TARGET`, `JARVIS_SESSION_KEY` for context).
+  The token is bound to a single `(channel, target)` pair — cross-target
+  spoofing is impossible by construction. Persisted as SHA-256 hash only
+  (plaintext lives only in memory + the child process env), file mode `0600`,
+  24h TTL with hourly GC. Endpoint enforces: per-session budget (100 msg),
+  per-target sliding-window rate (30/min), and identical-text dedup (5 s).
+  Broadcasts a `notify.outbound` WebSocket event rendered in the Activity
+  Stream.
+- **Subagent-aware spawn flag.** `askClaudeFresh` (and anyone plumbing
+  `opts.isSubagent`) now sets `JARVIS_IS_SUBAGENT=1` and appends a minimal
+  subagent system prompt via `--append-system-prompt` — the documented
+  exception to the "two identity layers" rule, safe because a subagent has
+  no agent-specific CLAUDE.md to fight with. Subagents do not receive a
+  notify token; only the primary agent can deliver to the origin channel.
+  Cron jobs (`askClaudeFresh`) now spawn as subagents by default.
+
+### Fixed
+- **Discord mention resolution.** Raw Discord mention markers
+  (`<@userId>`, `<@&roleId>`, `<#channelId>`) used to leak into prompts —
+  in one observed session the agent had to guess that
+  `hi<@&1105067705649864776>.io` meant `hi@armonia.io` because Discord had
+  replaced `@armonia` with the raw role mention. Now resolved at the
+  connector boundary (`discord.ts`) to `@username` / `@rolename` /
+  `#channelname` before the text ever reaches the router. Applied to both
+  the main `text` and to `quotedMessage.text` of replies.
+- **Discord multi-speaker context in guilds.** Guild messages are now
+  prefixed with `[@username]: …` so the agent can tell different speakers
+  apart — DMs are unchanged. Fixes the class of bugs where the same
+  guild-level session saw messages from multiple users with no attribution,
+  and the agent could respond to user B using user A's context.
+- **Relative timestamps on quoted replies.** The `[Replying to from X: "…"]`
+  header now carries `(30s fa)` / `(5m fa)` / `(3h fa)` / `(ieri)` /
+  `(3g fa)` when the connector exposes the quoted message's timestamp
+  (Discord today; Telegram/WhatsApp left as TODO — connectors just need to
+  populate `quotedMessage.timestampEpoch`).
+- **Automatic log redaction.** The `logger.ts` pino config now redacts
+  `token`, `JARVIS_NOTIFY_TOKEN`, `headers.authorization`, `*.token`, and
+  nested forms with `[REDACTED]`. Defense-in-depth: callers should still
+  avoid logging them by convention, but accidental inclusion is now a
+  no-op instead of a leak.
+- **Stop-hook resilience (`~/.claude/notify.sh`).** The hook used to abort
+  with `Abort trap: 6` when Core Audio's `AudioQueueStart` failed,
+  propagating non-zero exit to Claude Code → "Stop hook error" noise. Now
+  wraps `afplay` + `terminal-notifier` in `… 2>/dev/null || true`, passes
+  `-sound ''` (the `afplay` background invocation handles sound), and
+  explicit `exit 0`. Hook is idempotent regardless of Core Audio state.
+- **tsconfig bun → node.** `router/tsconfig.json` referenced `@types/bun`
+  that was never a dependency, so `npx tsc --noEmit` would fail on a fresh
+  clone. Runtime is `tsx` + node (per `CLAUDE.md`); tsconfig now reflects
+  that.
+- **Connector bootstrap resilience.** Telegram, Discord e WhatsApp non bloccano
+  più il router al boot se la rete / DNS non è ancora disponibile. Il helper
+  `startWithRetry` (in `router/src/index.ts`) ritenta con back-off esponenziale
+  (5 s / 15 s / 45 s / 2 min / 5 min) fino a 6 tentativi totali; dopo l'ultimo
+  fallimento logga un errore e prosegue — il router rimane UP per gli altri
+  canali. `setDeliveryFn` e `initCrons` partono subito senza aspettare.
+- **Telegram slash commands al boot.** `syncSlashCommands` ora ritenta
+  `setMyCommands` una volta dopo 60 s se la prima chiamata fallisce (DNS non
+  ancora pronto quando il long-poll del bot è già attivo).
+
+### Added
+- **Context-window auto-compaction.** Long Claude CLI sessions no longer
+  saturate their context and silently truncate. The router now tracks
+  cumulative input tokens per persistent process and, at 80% of the model's
+  window (200k for standard Opus/Sonnet/Haiku, 1M for `[1m]` variants),
+  summarizes the conversation, kills the process, and respawns with the
+  summary injected as the first user turn — never via
+  `--append-system-prompt` (respects the "two identity layers" rule in
+  `CLAUDE.md`). Tries the native `/compact` slash command first and falls
+  back to a custom structured-summary prompt. Hard-caps at 5 compactions
+  per session lifetime; beyond that, the session resets cleanly without
+  carrying a summary over. New `services/context.ts` exposes
+  `contextWindowFor(model)` and `shouldCompact(used, model, threshold)`.
+  Sessions tab shows a `compacted ×N` badge per session (hover for the
+  latest summary preview) and a `ctx-near` warning badge when a live
+  session crosses the threshold. Every compaction emits a
+  `session.compacted` WebSocket event with `tokensBefore`,
+  `compactionCount`, and a 300-char summary preview for downstream
+  consumers.
 - **Local Claude Code session monitor.** New Sessions-tab section
   auto-discovers every `claude` CLI running on the host via `ps`+`lsof`,
   not just router-spawned ones. Each card shows cwd, branch, last

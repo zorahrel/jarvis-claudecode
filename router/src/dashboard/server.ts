@@ -10,7 +10,7 @@ import { attachWebSocket, broadcast, clientCount } from "./ws";
 // Re-export for external consumers (handler.ts, index.ts)
 export { pushLog, trackMessage, trackResponseTime, getCliSessions } from "./state";
 export { broadcast, clientCount } from "./ws";
-export type { RouterEvent, SessionEventData, ExchangeEventData } from "./ws";
+export type { RouterEvent, SessionEventData, ExchangeEventData, NotifyOutboundEventData } from "./ws";
 
 // Wire pino logs to dashboard buffer + broadcast (cheap when no WS clients).
 setDashboardLogHook((level, module, msg, extra) => {

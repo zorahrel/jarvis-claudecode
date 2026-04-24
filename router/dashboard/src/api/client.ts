@@ -140,6 +140,10 @@ export interface ProcessSession {
   idleTime: number
   timeToInactivityTimeout: number
   timeToLifetimeTimeout: number
+  totalInputTokens?: number
+  compactionCount?: number
+  nearContextLimit?: boolean
+  lastSummaryPreview?: string
 }
 
 export type ResponseStatus = 'ok' | 'error' | 'timeout'

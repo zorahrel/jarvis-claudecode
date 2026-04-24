@@ -21,10 +21,31 @@ export type RouterEvent =
   | { type: "session.created"; data: SessionEventData }
   | { type: "session.updated"; data: SessionEventData }
   | { type: "session.killed"; data: SessionEventData }
+  | { type: "session.compacted"; data: CompactionEventData }
   | { type: "log"; data: LogEntry }
   | { type: "stats"; data: Record<string, unknown> }
   | { type: "exchange.new"; data: ExchangeEventData }
-  | { type: "response.timing"; data: ResponseTime };
+  | { type: "response.timing"; data: ResponseTime }
+  | { type: "notify.outbound"; data: NotifyOutboundEventData };
+
+export interface NotifyOutboundEventData {
+  channel: string;
+  target: string;
+  /** First 120 chars of the delivered text (server truncates for privacy). */
+  preview: string;
+  messageId?: string | null;
+  ts: number;
+}
+
+export interface CompactionEventData {
+  ts: number;
+  key: string;
+  tokensBefore: number;
+  threshold: number;
+  compactionCount: number;
+  summaryPreview?: string;
+  hardReset?: boolean;
+}
 
 export interface SessionEventData {
   key: string;

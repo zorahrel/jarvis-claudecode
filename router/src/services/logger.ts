@@ -9,12 +9,29 @@ export function setDashboardLogHook(fn: (level: string, module: string, msg: str
 
 const levelNames: Record<number, string> = { 10: "trace", 20: "debug", 30: "info", 40: "warn", 50: "error", 60: "fatal" };
 
+// Token redaction: JARVIS_NOTIFY_TOKEN binds to a {channel, target} pair and must never
+// appear in plaintext logs. This automatic pino redaction is defense-in-depth — callers
+// should also avoid passing tokens into log objects by convention, but this catches slips.
+const REDACT_PATHS = [
+  "token",
+  "JARVIS_NOTIFY_TOKEN",
+  "env.JARVIS_NOTIFY_TOKEN",
+  "headers.authorization",
+  "req.headers.authorization",
+  "*.token",
+  "*.JARVIS_NOTIFY_TOKEN",
+];
+
 export const logger = pino({
   transport: {
     target: "pino-pretty",
     options: { colorize: true, translateTime: "HH:MM:ss" },
   },
   level: process.env.LOG_LEVEL ?? "info",
+  redact: {
+    paths: REDACT_PATHS,
+    censor: "[REDACTED]",
+  },
   hooks: {
     logMethod(inputArgs, method, level) {
       // Forward to dashboard log buffer

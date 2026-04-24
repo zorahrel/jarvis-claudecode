@@ -19,6 +19,53 @@ const log = logger.child({ module: "main" });
 
 const connectors: Connector[] = [];
 
+/**
+ * Retry strategy for connector.start() on transient failures (e.g. DNS not yet
+ * available when WiFi comes up after the router does).
+ *
+ * Delays (exponential-ish): 5 s → 15 s → 45 s → 2 min → 5 min.
+ * After all attempts are exhausted we log an error and return — we deliberately
+ * don't throw so the router keeps running for the other connectors.
+ *
+ * Callers fire-and-forget this (no await) so it never blocks the main startup
+ * path; initCrons / setDeliveryFn run immediately as usual.
+ */
+const RETRY_DELAYS_MS = [5_000, 15_000, 45_000, 120_000, 300_000];
+
+async function startWithRetry(
+  connector: { start: () => Promise<void>; channel: string },
+  opts: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<void> {
+  const maxAttempts = opts.attempts ?? RETRY_DELAYS_MS.length + 1; // 6 total (1 immediate + 5 retries)
+  const delays = RETRY_DELAYS_MS;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await connector.start();
+      if (attempt > 1) {
+        log.info({ channel: connector.channel, attempt }, "Connector started successfully after retry");
+      }
+      return;
+    } catch (err) {
+      const isLast = attempt >= maxAttempts;
+      if (isLast) {
+        log.error(
+          { err, channel: connector.channel, attempts: maxAttempts },
+          `Connector ${connector.channel} permanently failed to start after ${maxAttempts} attempts`,
+        );
+        return;
+      }
+      const delayMs = delays[attempt - 1] ?? delays[delays.length - 1];
+      const delaySec = Math.round(delayMs / 1000);
+      log.warn(
+        { err: (err as Error)?.message, channel: connector.channel, attempt, nextRetryInSec: delaySec },
+        `Connector ${connector.channel} failed to start (attempt ${attempt}/${maxAttempts}), retrying in ${delaySec}s`,
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 async function main() {
   log.info("Jarvis Router starting...");
 
@@ -27,35 +74,31 @@ async function main() {
 
   const config = await loadConfig();
 
-  // Start enabled connectors
+  // Start enabled connectors — fire-and-forget with exponential-backoff retry so
+  // the router is UP immediately even if a channel (e.g. Telegram, Discord) can't
+  // reach its API yet because WiFi / DNS came up after us.
   if (config.channels.whatsapp?.enabled) {
     const wa = new WhatsAppConnector(config);
     connectors.push(wa);
-    try {
-      await wa.start();
-    } catch (err) {
-      log.error({ err }, "Failed to start WhatsApp connector");
-    }
+    startWithRetry(wa).catch((err) =>
+      log.error({ err, channel: "whatsapp" }, "startWithRetry unexpectedly threw"),
+    );
   }
 
   if (config.channels.telegram?.enabled) {
     const tg = new TelegramConnector(config);
     connectors.push(tg);
-    try {
-      await tg.start();
-    } catch (err) {
-      log.error({ err }, "Failed to start Telegram connector");
-    }
+    startWithRetry(tg).catch((err) =>
+      log.error({ err, channel: "telegram" }, "startWithRetry unexpectedly threw"),
+    );
   }
 
   if (config.channels.discord?.enabled) {
     const dc = new DiscordConnector(config);
     connectors.push(dc);
-    try {
-      await dc.start();
-    } catch (err) {
-      log.error({ err }, "Failed to start Discord connector");
-    }
+    startWithRetry(dc).catch((err) =>
+      log.error({ err, channel: "discord" }, "startWithRetry unexpectedly threw"),
+    );
   }
 
   // Set up cron delivery function

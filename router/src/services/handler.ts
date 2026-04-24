@@ -19,6 +19,22 @@ import { startJob, endJob, type PendingChannel } from "./pending-jobs";
 import { randomUUID } from "crypto";
 import type { MessageTimings } from "../types/message";
 
+/**
+ * Human-readable relative time label for a quoted message timestamp.
+ * @param fromEpoch  Unix epoch seconds of the quoted message
+ * @param nowEpoch   Unix epoch seconds of "now" (defaults to wall clock)
+ * @returns e.g. "(30s fa)", "(5m fa)", "(3h fa)", "(ieri)", "(3g fa)"
+ */
+function relativeTime(fromEpoch: number, nowEpoch = Date.now() / 1000): string {
+  const diff = Math.max(0, nowEpoch - fromEpoch);
+  if (diff < 60) return `(${Math.round(diff)}s fa)`;
+  if (diff < 3600) return `(${Math.round(diff / 60)}m fa)`;
+  if (diff < 86400) return `(${Math.round(diff / 3600)}h fa)`;
+  const days = Math.round(diff / 86400);
+  if (days === 1) return "(ieri)";
+  return `(${days}g fa)`;
+}
+
 /** Compose full message text including quoted messages and media transcriptions */
 function composeFullMessage(msg: IncomingMessage): string {
   const parts: string[] = [];
@@ -27,7 +43,10 @@ function composeFullMessage(msg: IncomingMessage): string {
   if (msg.quotedMessage) {
     if (msg.quotedMessage.text) {
       const from = msg.quotedMessage.from ? ` from ${msg.quotedMessage.from}` : "";
-      parts.push(`[Replying to${from}: "${msg.quotedMessage.text.slice(0, 500)}"]`);
+      const when = msg.quotedMessage.timestampEpoch
+        ? ` ${relativeTime(msg.quotedMessage.timestampEpoch)}`
+        : "";
+      parts.push(`[Replying to${from}${when}: "${msg.quotedMessage.text.slice(0, 500)}"]`);
     }
     if (msg.quotedMessage.media) {
       for (const m of msg.quotedMessage.media) {
