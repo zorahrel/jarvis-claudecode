@@ -21,6 +21,7 @@ export type RouterEvent =
   | { type: "session.created"; data: SessionEventData }
   | { type: "session.updated"; data: SessionEventData }
   | { type: "session.killed"; data: SessionEventData }
+  | { type: "session.compacted"; data: CompactionEventData }
   | { type: "log"; data: LogEntry }
   | { type: "stats"; data: Record<string, unknown> }
   | { type: "exchange.new"; data: ExchangeEventData }
@@ -32,6 +33,16 @@ export interface NotifyOutboundEventData {
   target: string;
   textPreview: string;
   ts: number;
+}
+
+export interface CompactionEventData {
+  ts: number;
+  key: string;
+  tokensBefore: number;
+  threshold: number;
+  compactionCount: number;
+  summaryPreview?: string;
+  hardReset?: boolean;
 }
 
 export interface SessionEventData {

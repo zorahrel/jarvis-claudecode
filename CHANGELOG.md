@@ -6,6 +6,24 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
+- **Context-window auto-compaction.** Long Claude CLI sessions no longer
+  saturate their context and silently truncate. The router now tracks
+  cumulative input tokens per persistent process and, at 80% of the model's
+  window (200k for standard Opus/Sonnet/Haiku, 1M for `[1m]` variants),
+  summarizes the conversation, kills the process, and respawns with the
+  summary injected as the first user turn — never via
+  `--append-system-prompt` (respects the "two identity layers" rule in
+  `CLAUDE.md`). Tries the native `/compact` slash command first and falls
+  back to a custom structured-summary prompt. Hard-caps at 5 compactions
+  per session lifetime; beyond that, the session resets cleanly without
+  carrying a summary over. New `services/context.ts` exposes
+  `contextWindowFor(model)` and `shouldCompact(used, model, threshold)`.
+  Sessions tab shows a `compacted ×N` badge per session (hover for the
+  latest summary preview) and a `ctx-near` warning badge when a live
+  session crosses the threshold. Every compaction emits a
+  `session.compacted` WebSocket event with `tokensBefore`,
+  `compactionCount`, and a 300-char summary preview for downstream
+  consumers.
 - **Local Claude Code session monitor.** New Sessions-tab section
   auto-discovers every `claude` CLI running on the host via `ps`+`lsof`,
   not just router-spawned ones. Each card shows cwd, branch, last

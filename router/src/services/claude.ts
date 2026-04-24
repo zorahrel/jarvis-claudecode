@@ -8,6 +8,8 @@ import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
 import { issueToken, revokeToken } from "./notify-tokens";
+import { shouldCompact, contextWindowFor } from "./context";
+import { broadcast, clientCount } from "../dashboard/ws";
 
 const log = logger.child({ module: "claude" });
 
@@ -215,9 +217,35 @@ interface PersistentProcess {
   notifyToken: string | null;
   /** Whether this process was spawned as a subagent (no notify, dedicated prompt). */
   isSubagent: boolean;
+  /**
+   * Authoritative cumulative input-token count for this session.
+   * Updated after each assistant response to the latest per-call
+   * `input_tokens + cache_*` reported by the CLI, which already represents
+   * the full conversation size Claude API charged for (i.e. running total
+   * of the conversation, not a delta). Used by `shouldCompact`.
+   */
+  totalInputTokens: number;
+  /** Number of times this session has been compacted. Hard reset at 5. */
+  compactionCount: number;
+  /**
+   * Summary captured at the last compaction. Prepended as a USER turn on the
+   * first send to the respawned process, then cleared. Never passed via
+   * --append-system-prompt (that would collide with agent-specific identity —
+   * see CLAUDE.md "two layers only" rule).
+   */
+  lastSummary?: string;
 }
 
 const processes = new Map<string, PersistentProcess>();
+
+/**
+ * Summaries carried over from compacted sessions, indexed by session key.
+ * Populated by `compactSession` just before the old process dies, consumed
+ * (and cleared) by `doSendWithTimeout` on the next turn so the summary is
+ * injected as the FIRST USER TURN of the respawned process — never via
+ * --append-system-prompt (that would collide with agent identity).
+ */
+const pendingSummaries = new Map<string, { summary: string; compactionCount: number }>();
 
 /** Build CLI args and env for spawning Claude Code */
 function buildSpawnArgs(opts: {
@@ -368,6 +396,8 @@ function spawnPersistentProcess(
     lifetimeTimer: null,
     notifyToken,
     isSubagent: !!isSubagent,
+    totalInputTokens: 0,
+    compactionCount: 0,
   };
 
   // Handle NDJSON lines from stdout
@@ -414,6 +444,13 @@ function spawnPersistentProcess(
         const cacheRead = u.cache_read_input_tokens ?? 0;
         const inputTokens = (u.input_tokens ?? 0) + cacheCreation + cacheRead;
         const outputTokens = u.output_tokens ?? 0;
+        // `inputTokens` from the CLI is the full per-call conversation size
+        // the API charged for — i.e. it grows turn by turn with the running
+        // context. Use the MAX seen (not sum) as the authoritative cumulative
+        // figure for compaction thresholding.
+        if (inputTokens > pp.totalInputTokens) {
+          pp.totalInputTokens = inputTokens;
+        }
         resolve({
           text: event.result ?? "",
           durationMs: event.duration_ms,
@@ -534,6 +571,13 @@ function getOrCreateProcess(
   const mcpCount = tools.filter(t => t.startsWith("mcp:")).length;
   log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false, isSubagent: !!isSubagent }, "Spawning new persistent process");
   const pp = spawnPersistentProcess(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent);
+  // Carry forward compaction counter if this session has been compacted before.
+  // The pending summary is injected as a user turn in `doSendWithTimeout`,
+  // not here — this function stays about process lifecycle only.
+  const pending = pendingSummaries.get(key);
+  if (pending) {
+    pp.compactionCount = pending.compactionCount;
+  }
   processes.set(key, pp);
   return pp;
 }
@@ -573,6 +617,135 @@ function sendMessage(
 
     pp.proc.stdin!.write(input);
   });
+}
+
+// --- Context-window compaction ---
+//
+// When cumulative input tokens cross 80% of the model's window (see
+// `services/context.ts`), the CLI will start silently truncating responses.
+// Fix: ask the current process for a structured summary, kill it, then
+// inject that summary as the FIRST USER TURN of the respawned process so
+// the conversation continues coherently with a fresh context budget.
+//
+// Implementation choice:
+//  1. Try `/compact` first — it's Claude Code's native slash command and
+//     handles the operation idiomatically when it works in stream-json mode.
+//  2. Fall back to a custom summarise prompt if `/compact` returns empty /
+//     fails. In practice the CLI today often passes `/compact` through as a
+//     literal user message (no summary emitted), so the fallback is the
+//     path that actually produces usable text. We still try `/compact`
+//     first because if a future CLI version handles it natively, we
+//     immediately get the better behaviour with zero code change.
+//
+// Why summary-as-user-turn and NOT --append-system-prompt:
+//   CLAUDE.md forbids a third identity layer. The agent's language / scope /
+//   branding live in `<workspace>/CLAUDE.md` — injecting a system-prompt
+//   append would fight those rules (observed historically with subagent
+//   prompts). A user turn is "just context" and leaves identity intact.
+const COMPACT_FALLBACK_PROMPT = [
+  "Summarize the conversation so far in a structured list:",
+  "- Decisions made",
+  "- Files/paths touched or referenced",
+  "- Open TODOs",
+  "- Current task focus",
+  "Maximum 20 bullets. No commentary, no preamble. Plain text only.",
+].join("\n");
+
+async function compactSession(pp: PersistentProcess, key: string): Promise<void> {
+  const tokensBefore = pp.totalInputTokens;
+  const window = contextWindowFor(pp.model);
+  log.info(
+    { key, model: pp.model, tokensBefore, window, threshold: 0.80, compactionCount: pp.compactionCount },
+    "Compacting session",
+  );
+
+  let summary = "";
+
+  // Step 1: try the native /compact slash command. Wrap in timeout so a
+  // non-responsive CLI doesn't block the turn indefinitely.
+  try {
+    const result = await Promise.race([
+      sendMessage(pp, "/compact"),
+      new Promise<{ text: string }>((_, reject) =>
+        setTimeout(() => reject(new Error("COMPACT_TIMEOUT")), 90_000),
+      ),
+    ]);
+    const text = (result.text ?? "").trim();
+    // Heuristic: accept `/compact`'s reply only if it looks like a real
+    // summary (has structure / length). Otherwise fall through to the
+    // custom prompt.
+    if (text.length > 40 && /[-•*]|summary|decision|file/i.test(text)) {
+      summary = text;
+      log.info({ key, summaryLen: summary.length }, "Native /compact produced summary");
+    } else {
+      log.info({ key, textLen: text.length }, "Native /compact did not produce usable summary — falling back");
+    }
+  } catch (err: any) {
+    log.warn({ key, err: err?.message }, "Native /compact failed — falling back to custom prompt");
+  }
+
+  // Step 2: custom fallback prompt.
+  if (!summary && pp.alive) {
+    try {
+      const result = await Promise.race([
+        sendMessage(pp, COMPACT_FALLBACK_PROMPT),
+        new Promise<{ text: string }>((_, reject) =>
+          setTimeout(() => reject(new Error("COMPACT_TIMEOUT")), 120_000),
+        ),
+      ]);
+      summary = (result.text ?? "").trim();
+      log.info({ key, summaryLen: summary.length }, "Fallback compaction produced summary");
+    } catch (err: any) {
+      log.warn({ key, err: err?.message }, "Fallback compaction failed — session will respawn WITHOUT summary");
+    }
+  }
+
+  // Step 3: kill the old process, stash summary for the next spawn.
+  pp.compactionCount++;
+  const nextCompactionCount = pp.compactionCount;
+  if (summary) {
+    pendingSummaries.set(key, { summary, compactionCount: nextCompactionCount });
+  }
+  killProcess(pp);
+  processes.delete(key);
+
+  // Step 4: broadcast dashboard event so the UI can show the compaction badge.
+  if (clientCount() > 0) {
+    broadcast({
+      type: "session.compacted",
+      data: {
+        ts: Date.now(),
+        key,
+        tokensBefore,
+        threshold: 0.80,
+        compactionCount: nextCompactionCount,
+        summaryPreview: summary ? summary.slice(0, 300) : undefined,
+      },
+    });
+  }
+}
+
+function hardResetSession(pp: PersistentProcess, key: string, tokensBefore: number, compactionCount: number): void {
+  log.warn(
+    { key, compactionCount, tokensBefore },
+    "Max compactions reached — hard reset without carrying summary",
+  );
+  pendingSummaries.delete(key); // belt-and-suspenders: don't carry anything over
+  killProcess(pp);
+  processes.delete(key);
+  if (clientCount() > 0) {
+    broadcast({
+      type: "session.compacted",
+      data: {
+        ts: Date.now(),
+        key,
+        tokensBefore,
+        threshold: 0.80,
+        compactionCount,
+        hardReset: true,
+      },
+    });
+  }
 }
 
 // --- Serial queue ---
@@ -655,14 +828,29 @@ async function askClaudeInternal(
     const model = resolveModel(models[i]);
     try {
       const tools = agent.tools ?? [];
-      const pp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+      let pp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
 
       // If model changed (fallback), need new process
       if (pp.model !== model) {
         killProcess(pp);
         processes.delete(key);
-        const newPp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
-        return await doSendWithTimeout(newPp, key, fullMessage, model, message.length, startTime, images);
+        pp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+      }
+
+      // Context-window guard (turn boundary): if the session is over the
+      // compaction threshold, summarise + respawn BEFORE sending the new
+      // user turn. Only fires when the process is alive and has real
+      // token history (fresh spawns are always safe).
+      if (pp.alive && pp.totalInputTokens > 0 && shouldCompact(pp.totalInputTokens, pp.model)) {
+        const tokensBefore = pp.totalInputTokens;
+        if (pp.compactionCount >= 5) {
+          hardResetSession(pp, key, tokensBefore, pp.compactionCount);
+        } else {
+          await compactSession(pp, key);
+        }
+        // Respawn for the actual user turn. getOrCreateProcess will pick up
+        // the pending summary's compactionCount for budget tracking.
+        pp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
       }
 
       return await doSendWithTimeout(pp, key, fullMessage, model, message.length, startTime, images);
@@ -728,6 +916,18 @@ async function doSendWithTimeout(
       message = context + "\n" + message;
       log.info({ key, contextLen: context.length }, "Injected session context from cache");
     }
+  }
+
+  // Inject compaction summary as the FIRST USER TURN of the respawned
+  // process (never via --append-system-prompt — that would fight agent
+  // identity rules in CLAUDE.md). Cleared after injection so subsequent
+  // turns don't re-prepend it.
+  const pending = pendingSummaries.get(key);
+  if (pending) {
+    pendingSummaries.delete(key);
+    pp.lastSummary = pending.summary;
+    message = `[CONTEXT RESTORED — previous session summary]\n${pending.summary}\n[NEW TURN]\n${message}`;
+    log.info({ key, summaryLen: pending.summary.length, compactionCount: pending.compactionCount }, "Injected compaction summary as first user turn");
   }
 
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -908,6 +1108,14 @@ export interface ProcessInfo {
   cacheCreation: number;
   cacheRead: number;
   costUsd: number;
+  /** Authoritative running input-token count for context-window thresholding. */
+  totalInputTokens: number;
+  /** Times this session has been compacted (hard cap: 5). */
+  compactionCount: number;
+  /** True when `totalInputTokens >= 80%` of the model's context window. */
+  nearContextLimit: boolean;
+  /** Preview of the last compaction summary, if any (first 300 chars). */
+  lastSummaryPreview?: string;
 }
 
 export function getProcesses(): ProcessInfo[] {
@@ -940,6 +1148,10 @@ export function getProcesses(): ProcessInfo[] {
       cacheCreation: stats.cacheCreation,
       cacheRead: stats.cacheRead,
       costUsd: stats.costUsd,
+      totalInputTokens: pp.totalInputTokens,
+      compactionCount: pp.compactionCount,
+      nearContextLimit: shouldCompact(pp.totalInputTokens, pp.model),
+      lastSummaryPreview: pp.lastSummary ? pp.lastSummary.slice(0, 300) : undefined,
     });
   }
   return result;

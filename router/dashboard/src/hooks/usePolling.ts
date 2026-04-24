@@ -92,12 +92,23 @@ export interface ResponseTimingData {
   model: string
 }
 
+export interface CompactionEventData {
+  ts: number
+  key: string
+  tokensBefore: number
+  threshold: number
+  compactionCount: number
+  summaryPreview?: string
+  hardReset?: boolean
+}
+
 export type RouterEvent =
   | { type: 'hello'; data: { serverTime: number; protocolVersion: number } }
   | { type: 'ping'; data: { ts: number } }
   | { type: 'session.created'; data: SessionEventData }
   | { type: 'session.updated'; data: SessionEventData }
   | { type: 'session.killed'; data: SessionEventData }
+  | { type: 'session.compacted'; data: CompactionEventData }
   | { type: 'log'; data: LogEventData }
   | { type: 'stats'; data: Record<string, unknown> }
   | { type: 'exchange.new'; data: ExchangeEventData }
