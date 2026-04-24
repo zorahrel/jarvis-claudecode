@@ -7,6 +7,7 @@ import type { AgentConfig } from "../types";
 import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
+import { issueToken, revokeToken } from "./notify-tokens";
 
 const log = logger.child({ module: "claude" });
 
@@ -46,7 +47,17 @@ const ENV_BLOCKLIST_PATTERNS = [
 
 const ENV_BLOCKLIST_EXCEPTIONS = new Set(["ANTHROPIC_API_KEY"]);
 
-function buildSafeEnv(agentEnv?: Record<string, string>): Record<string, string> {
+interface NotifyEnvContext {
+  sessionKey: string;
+  channel: string;
+  target: string;
+  token: string;
+}
+
+function buildSafeEnv(
+  agentEnv?: Record<string, string>,
+  opts?: { isSubagent?: boolean; notify?: NotifyEnvContext },
+): Record<string, string> {
   const env: Record<string, string> = {};
 
   // Pass through only allowlisted vars from process.env
@@ -67,6 +78,22 @@ function buildSafeEnv(agentEnv?: Record<string, string>): Record<string, string>
   if (agentEnv) Object.assign(env, agentEnv);
 
   env.JARVIS_SPAWN = "1";
+
+  if (opts?.isSubagent) {
+    env.JARVIS_IS_SUBAGENT = "1";
+  }
+
+  // Notify context — only for primary spawns. Subagents never get a token:
+  // they cannot notify, by design. The token binds this CLI process to one
+  // (channel, target) pair for proactive replies.
+  if (opts?.notify && !opts.isSubagent) {
+    env.JARVIS_SESSION_KEY = opts.notify.sessionKey;
+    env.JARVIS_CHANNEL = opts.notify.channel;
+    env.JARVIS_REPLY_TARGET = opts.notify.target;
+    env.JARVIS_NOTIFY_URL = "http://127.0.0.1:3340/api/notify";
+    env.JARVIS_NOTIFY_TOKEN = opts.notify.token;
+  }
+
   return env;
 }
 
@@ -79,6 +106,11 @@ const MESSAGE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min — generous, crash is hand
 //  2. <workspace>/CLAUDE.md → per-route agent identity (auto-loaded by Claude Code from cwd)
 // External/client agents (inheritUserScope=false) run with project,local only — no user scope leakage.
 // Any third layer would risk conflicting with agent-specific rules (e.g. language, scope).
+//
+// Subagents are the ONE documented exception: spawns flagged `isSubagent=true`
+// (e.g. cron jobs) get a third layer via --append-system-prompt because they
+// have no identity of their own — no fight to lose. See CLAUDE.md.
+const SUBAGENT_SYSTEM_PROMPT = "You are a subagent. Respond ONLY to the specific task. No preambles, no personal memory, no brand. Terse, bullet-form when natural, no decorative markdown unless asked.";
 
 // --- Model resolution ---
 // Claude Code CLI resolves aliases ("opus"/"sonnet"/"haiku") to the latest model
@@ -179,6 +211,10 @@ interface PersistentProcess {
   needsContext: boolean;
   inactivityTimer: ReturnType<typeof setTimeout> | null;
   lifetimeTimer: ReturnType<typeof setTimeout> | null;
+  /** Plaintext notify token issued at spawn — revoked on killProcess. */
+  notifyToken: string | null;
+  /** Whether this process was spawned as a subagent (no notify, dedicated prompt). */
+  isSubagent: boolean;
 }
 
 const processes = new Map<string, PersistentProcess>();
@@ -192,8 +228,10 @@ function buildSpawnArgs(opts: {
   fullAccess?: boolean;
   agentEnv?: Record<string, string>;
   inheritUserScope?: boolean;
+  isSubagent?: boolean;
+  notify?: NotifyEnvContext;
 }): { args: string[]; env: Record<string, string> } {
-  const { model, tools, effort, streaming, fullAccess, inheritUserScope = true } = opts;
+  const { model, tools, effort, streaming, fullAccess, inheritUserScope = true, isSubagent, notify } = opts;
   // Readonly routes need acceptEdits mode so --disallowed-tools actually blocks.
   // bypassPermissions skips ALL permission checks including the disallowed list.
   // fullAccess overrides everything → bypassPermissions, no restrictions.
@@ -254,19 +292,55 @@ function buildSpawnArgs(opts: {
     args.push("--disallowed-tools", "Write Edit NotebookEdit Bash(rm:*) Bash(mv:*)");
   }
 
-  const env = buildSafeEnv(opts.agentEnv);
+  // Subagent: append the dedicated system prompt. Only safe here because
+  // subagents have no identity of their own (see comment on SUBAGENT_SYSTEM_PROMPT).
+  if (isSubagent) {
+    args.push("--append-system-prompt", SUBAGENT_SYSTEM_PROMPT);
+  }
+
+  const env = buildSafeEnv(opts.agentEnv, { isSubagent, notify });
 
   return { args, env };
 }
 
+/** Parse `channel:target[:group]` session keys into notify binding parts.
+ *  Mirror of sessionKey() — kept local so notify context is derived from the
+ *  same invariant we use everywhere else. */
+function parseSessionKey(key: string): { channel: string; target: string } | null {
+  const idx = key.indexOf(":");
+  if (idx <= 0 || idx === key.length - 1) return null;
+  const channel = key.slice(0, idx);
+  const target = key.slice(idx + 1);
+  return { channel, target };
+}
+
 function spawnPersistentProcess(
+  key: string,
   model: string, workspace: string, tools: string[] = [],
   effort?: "low" | "medium" | "high" | "max",
   fullAccess?: boolean,
   agentEnv?: Record<string, string>,
   inheritUserScope?: boolean,
+  isSubagent?: boolean,
 ): PersistentProcess {
-  const { args, env } = buildSpawnArgs({ model, tools, effort, streaming: true, fullAccess, agentEnv, inheritUserScope });
+  // Issue a notify token for primary (non-subagent) spawns only. Subagents
+  // cannot notify — by design the binding lives on the primary agent.
+  let notifyToken: string | null = null;
+  let notify: NotifyEnvContext | undefined;
+  if (!isSubagent) {
+    const parsed = parseSessionKey(key);
+    if (parsed) {
+      notifyToken = issueToken(parsed.channel, parsed.target);
+      notify = {
+        sessionKey: key,
+        channel: parsed.channel,
+        target: parsed.target,
+        token: notifyToken,
+      };
+    }
+  }
+
+  const { args, env } = buildSpawnArgs({ model, tools, effort, streaming: true, fullAccess, agentEnv, inheritUserScope, isSubagent, notify });
 
   const proc = spawn(resolveCliPath(), args, {
     cwd: workspace,
@@ -292,6 +366,8 @@ function spawnPersistentProcess(
     needsContext: true,
     inactivityTimer: null,
     lifetimeTimer: null,
+    notifyToken,
+    isSubagent: !!isSubagent,
   };
 
   // Handle NDJSON lines from stdout
@@ -420,6 +496,10 @@ function cleanupTimers(pp: PersistentProcess): void {
 function killProcess(pp: PersistentProcess): void {
   pp.alive = false;
   cleanupTimers(pp);
+  if (pp.notifyToken) {
+    revokeToken(pp.notifyToken);
+    pp.notifyToken = null;
+  }
   try { pp.readline.close(); } catch {}
   try { pp.proc.kill("SIGTERM"); } catch {}
   // Force kill after 3s
@@ -441,6 +521,7 @@ function getOrCreateProcess(
   fullAccess?: boolean,
   agentEnv?: Record<string, string>,
   inheritUserScope?: boolean,
+  isSubagent?: boolean,
 ): PersistentProcess {
   const existing = processes.get(key);
   if (existing && existing.alive) {
@@ -451,8 +532,8 @@ function getOrCreateProcess(
     processes.delete(key);
   }
   const mcpCount = tools.filter(t => t.startsWith("mcp:")).length;
-  log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false }, "Spawning new persistent process");
-  const pp = spawnPersistentProcess(model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope);
+  log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false, isSubagent: !!isSubagent }, "Spawning new persistent process");
+  const pp = spawnPersistentProcess(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent);
   processes.set(key, pp);
   return pp;
 }
@@ -541,6 +622,7 @@ export async function askClaude(
   message: string,
   key: string,
   images?: ImageBlock[],
+  opts?: { isSubagent?: boolean },
 ): Promise<ClaudeResponse> {
   const prev = queues.get(key) ?? Promise.resolve();
   let resolveQueue: () => void;
@@ -549,7 +631,7 @@ export async function askClaude(
   await prev;
 
   try {
-    return await askClaudeInternal(agent, message, key, images);
+    return await askClaudeInternal(agent, message, key, images, opts);
   } finally {
     resolveQueue!();
   }
@@ -560,6 +642,7 @@ async function askClaudeInternal(
   message: string,
   key: string,
   images?: ImageBlock[],
+  opts?: { isSubagent?: boolean },
 ): Promise<ClaudeResponse> {
   const models = [agent.model, ...(agent.fallbacks ?? [])].filter(Boolean) as string[];
   if (models.length === 0) models.push("opus");
@@ -572,13 +655,13 @@ async function askClaudeInternal(
     const model = resolveModel(models[i]);
     try {
       const tools = agent.tools ?? [];
-      const pp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope);
+      const pp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
 
       // If model changed (fallback), need new process
       if (pp.model !== model) {
         killProcess(pp);
         processes.delete(key);
-        const newPp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope);
+        const newPp = getOrCreateProcess(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
         return await doSendWithTimeout(newPp, key, fullMessage, model, message.length, startTime, images);
       }
 
@@ -705,10 +788,10 @@ export async function askClaudeFresh(
   prompt: string,
   model?: string,
   timeoutMs: number = MESSAGE_TIMEOUT_MS,
-  opts?: { fullAccess?: boolean; tools?: string[]; agentEnv?: Record<string, string>; inheritUserScope?: boolean },
+  opts?: { fullAccess?: boolean; tools?: string[]; agentEnv?: Record<string, string>; inheritUserScope?: boolean; isSubagent?: boolean },
 ): Promise<FreshClaudeResult> {
   const resolvedModel = resolveModel(model);
-  log.info({ workspace, model: resolvedModel, fullAccess: !!opts?.fullAccess }, "Fresh Claude call (cron)");
+  log.info({ workspace, model: resolvedModel, fullAccess: !!opts?.fullAccess, isSubagent: !!opts?.isSubagent }, "Fresh Claude call (cron)");
 
   const { args, env } = buildSpawnArgs({
     model: resolvedModel,
@@ -717,6 +800,7 @@ export async function askClaudeFresh(
     fullAccess: opts?.fullAccess,
     agentEnv: opts?.agentEnv,
     inheritUserScope: opts?.inheritUserScope,
+    isSubagent: opts?.isSubagent,
   });
 
   return new Promise((resolve) => {
