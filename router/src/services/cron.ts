@@ -56,6 +56,12 @@ export function setDeliveryFn(fn: (channel: string, target: string, text: string
   deliverFn = fn;
 }
 
+/** Expose the current delivery function — consumed by the notify endpoint so
+ *  proactive notifications go through the same connector routing as cron. */
+export function getDeliveryFn(): ((channel: string, target: string, text: string) => Promise<void>) | null {
+  return deliverFn;
+}
+
 // ---- Paths ----
 const CRON_RUNS_DIR = `${homedir()}/.claude/jarvis/router/cron/runs`;
 
@@ -239,6 +245,8 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
     tools: agent?.tools,
     agentEnv: agent?.env,
     inheritUserScope: agent?.inheritUserScope,
+    // Cron runs are subagents — no identity of their own, no notify binding.
+    isSubagent: true,
   });
   const durationMs = Date.now() - startMs;
 
