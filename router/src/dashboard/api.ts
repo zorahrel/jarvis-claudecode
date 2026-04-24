@@ -9,7 +9,8 @@ import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRoute
 import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns, getDeliveryFn } from "../services/cron";
 import { resolveToken } from "../services/notify-tokens";
 import {
-  checkNotifyBudget,
+  hasNotifyBudget,
+  consumeNotifyBudget,
   checkNotifyRate,
   checkNotifyDedup,
   notifyBudgetRemaining,
@@ -224,8 +225,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     const sessionKey = `${binding.channel}:${binding.target}`;
     const BUDGET_LIMIT = 100;
 
-    // S4 guard 1 — cumulative per-session budget (resets on router restart / session end).
-    if (!checkNotifyBudget(sessionKey, BUDGET_LIMIT)) {
+    // S4 guard 1 — budget headroom (non-mutating; consume only after delivery).
+    if (!hasNotifyBudget(sessionKey, BUDGET_LIMIT)) {
       json(req, res, { error: "budget_exceeded", remaining: { budget: 0 } }, 429);
       return;
     }
@@ -258,6 +259,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       return;
     }
 
+    // Only pay budget for messages that made it out — failures/drops above don't count.
+    consumeNotifyBudget(sessionKey);
     const messageId = randomUUID();
     log.info({ channel: binding.channel, target: binding.target, textLen: text.length, messageId }, "Proactive notify delivered");
 

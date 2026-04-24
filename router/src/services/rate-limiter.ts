@@ -91,18 +91,38 @@ export function checkNotifyRate(
 const notifyBudgetCounters = new Map<string, number>();
 
 /**
- * Per-session cumulative budget for notify calls.
- * sessionKey format: "channel:target" or "channel:target:group" (matches token binding).
- * Default budget: 100 messages per session lifetime (router restart = reset).
- * Returns true if allowed, false if budget exhausted.
+ * Non-mutating check: is there budget headroom for one more notify call?
+ * Use this for the gate; consume only after successful delivery via
+ * `consumeNotifyBudget`. Splitting the two halves of "check + consume"
+ * prevents the budget from being drained by rate-limit / dedup / delivery
+ * failures — callers only pay for messages that actually made it out.
  */
-export function checkNotifyBudget(sessionKey: string, limit = 100): boolean {
+export function hasNotifyBudget(sessionKey: string, limit = 100): boolean {
   const used = notifyBudgetCounters.get(sessionKey) ?? 0;
   if (used >= limit) {
     log.warn({ sessionKey, used, limit }, "Notify session budget exhausted");
     return false;
   }
-  notifyBudgetCounters.set(sessionKey, used + 1);
+  return true;
+}
+
+/**
+ * Increment the session budget counter. Call after successful delivery.
+ * Returns the new used count.
+ */
+export function consumeNotifyBudget(sessionKey: string): number {
+  const used = (notifyBudgetCounters.get(sessionKey) ?? 0) + 1;
+  notifyBudgetCounters.set(sessionKey, used);
+  return used;
+}
+
+/**
+ * @deprecated Kept for backward-compat with earlier S4 scaffolding —
+ * mutates the counter on check. Prefer `hasNotifyBudget` + `consumeNotifyBudget`.
+ */
+export function checkNotifyBudget(sessionKey: string, limit = 100): boolean {
+  if (!hasNotifyBudget(sessionKey, limit)) return false;
+  consumeNotifyBudget(sessionKey);
   return true;
 }
 

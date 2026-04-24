@@ -105,10 +105,12 @@ function persist(): void {
   try {
     ensureDir();
     const entries = [...persistedHashes.values()];
-    writeFileSync(FILE, JSON.stringify(entries), "utf-8");
-    // Explicit 0600 — registry contains hashes, which are not secrets by
-    // themselves, but the associated channel/target metadata is sensitive
-    // enough to deserve owner-only access.
+    // 0600 at creation — no umask race between writeFileSync and chmodSync.
+    // Registry stores hashes only, but associated channel/target metadata is
+    // sensitive enough to warrant owner-only access from the first byte.
+    writeFileSync(FILE, JSON.stringify(entries), { encoding: "utf-8", mode: 0o600 });
+    // Defensive re-chmod in case the file already existed with looser perms
+    // (writeFileSync preserves existing mode when the file exists).
     try { chmodSync(FILE, 0o600); } catch { /* best effort */ }
   } catch (err) {
     log.warn({ err }, "Failed to persist notify tokens");

@@ -262,7 +262,7 @@ export class TelegramConnector implements Connector {
     }
     const menu = pickMenuCommands(this.slashCatalog);
     const payload = menu.map(c => ({ command: c.tgName, description: c.description }));
-    const trySync = async (): Promise<boolean> => {
+    const trySync = async (): Promise<true | { err: unknown; menuSize: number }> => {
       try {
         await this.bot!.api.setMyCommands(payload);
         log.info(
@@ -271,15 +271,19 @@ export class TelegramConnector implements Connector {
         );
         return true;
       } catch (err) {
-        log.warn({ err, menuSize: payload.length }, "setMyCommands failed — will retry once in 60s");
-        return false;
+        return { err, menuSize: payload.length };
       }
     };
-    if (!(await trySync())) {
+    const first = await trySync();
+    if (first !== true) {
+      log.warn({ ...first }, "setMyCommands failed — retrying once in 60s");
       // Single retry after 60 s — covers the common case where DNS comes up
       // a few seconds after the bot long-poll already succeeded.
       await new Promise((r) => setTimeout(r, 60_000));
-      await trySync();
+      const second = await trySync();
+      if (second !== true) {
+        log.warn({ ...second }, "setMyCommands failed on retry — giving up (menu will stay out of date until next boot)");
+      }
     }
   }
 
