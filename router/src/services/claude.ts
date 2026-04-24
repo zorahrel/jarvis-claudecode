@@ -8,6 +8,7 @@ import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
 import { issueToken, revokeToken } from "./notify-tokens";
+import { resetNotifyBudget } from "./rate-limiter";
 import { shouldCompact, contextWindowFor } from "./context";
 import { broadcast, clientCount } from "../dashboard/ws";
 
@@ -194,6 +195,8 @@ function trackUsage(key: string, charsIn: number, charsOut: number, timeMs: numb
 // --- Persistent process management ---
 
 interface PersistentProcess {
+  /** Session key (channel:target[:group]) — invariant for this process's lifetime. */
+  sessionKey: string;
   proc: ChildProcess;
   readline: Interface;
   model: string;
@@ -379,6 +382,7 @@ function spawnPersistentProcess(
   const rl = createInterface({ input: proc.stdout! });
 
   const pp: PersistentProcess = {
+    sessionKey: key,
     proc,
     readline: rl,
     model,
@@ -537,6 +541,8 @@ function killProcess(pp: PersistentProcess): void {
     revokeToken(pp.notifyToken);
     pp.notifyToken = null;
   }
+  // Clear the notify session budget so the next spawn of this session starts fresh.
+  resetNotifyBudget(pp.sessionKey);
   try { pp.readline.close(); } catch {}
   try { pp.proc.kill("SIGTERM"); } catch {}
   // Force kill after 3s

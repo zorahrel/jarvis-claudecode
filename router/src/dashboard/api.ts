@@ -8,6 +8,12 @@ import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocument
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
 import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns, getDeliveryFn } from "../services/cron";
 import { resolveToken } from "../services/notify-tokens";
+import {
+  checkNotifyBudget,
+  checkNotifyRate,
+  checkNotifyDedup,
+  notifyBudgetRemaining,
+} from "../services/rate-limiter";
 import { formatForChannel } from "../services/formatting";
 import { broadcast } from "./ws";
 import { randomUUID } from "crypto";
@@ -214,8 +220,28 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     if (text.length > 10000) { json(req, res, { error: "text too long (max 10000)" }, 400); return; }
     const silent = body.silent === true;
 
-    // TODO(S4): plug rate-limit, per-session token budget, and identical-text
-    // dedup here. Stream S4 owns the security/observability layer.
+    // Session key is the binding itself — notify tokens are 1:1 with session.
+    const sessionKey = `${binding.channel}:${binding.target}`;
+    const BUDGET_LIMIT = 100;
+
+    // S4 guard 1 — cumulative per-session budget (resets on router restart / session end).
+    if (!checkNotifyBudget(sessionKey, BUDGET_LIMIT)) {
+      json(req, res, { error: "budget_exceeded", remaining: { budget: 0 } }, 429);
+      return;
+    }
+    // S4 guard 2 — sliding-window rate per (channel, target).
+    if (!checkNotifyRate(binding.channel, binding.target)) {
+      json(req, res, {
+        error: "rate_limited",
+        remaining: { budget: notifyBudgetRemaining(sessionKey, BUDGET_LIMIT) },
+      }, 429);
+      return;
+    }
+    // S4 guard 3 — identical text to same target within 5s is a silent drop.
+    if (!checkNotifyDedup(binding.target, text)) {
+      json(req, res, { ok: true, deduped: true, messageId: null });
+      return;
+    }
 
     const deliver = getDeliveryFn();
     if (!deliver) {
@@ -241,13 +267,18 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         data: {
           channel: binding.channel,
           target: binding.target,
-          textPreview: text.slice(0, 200),
+          preview: text.slice(0, 120),
+          messageId,
           ts: Date.now(),
         },
       });
     }
 
-    json(req, res, { ok: true, messageId });
+    json(req, res, {
+      ok: true,
+      messageId,
+      remaining: { budget: notifyBudgetRemaining(sessionKey, BUDGET_LIMIT) },
+    });
 
   // --- READ APIs ---
   } else if (path === "/api/processes") {

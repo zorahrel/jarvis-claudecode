@@ -31,7 +31,9 @@ export type RouterEvent =
 export interface NotifyOutboundEventData {
   channel: string;
   target: string;
-  textPreview: string;
+  /** First 120 chars of the delivered text (server truncates for privacy). */
+  preview: string;
+  messageId?: string | null;
   ts: number;
 }
 
