@@ -360,6 +360,25 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
                       {p.fullAccess && <Badge tone="accent" size="xs" title="fullAccess">FULL</Badge>}
                       {!p.inheritUserScope && <Badge tone="warn" size="xs" title="isolated from user scope">ISO</Badge>}
                       {p.pending && <Badge tone="ok" size="xs">processing</Badge>}
+                      {p.compactionCount && p.compactionCount > 0 ? (
+                        <Tooltip
+                          placement="top"
+                          content={
+                            p.lastSummaryPreview
+                              ? `Compacted ${p.compactionCount}× — last summary preview:\n${p.lastSummaryPreview}`
+                              : `Compacted ${p.compactionCount}× (no summary captured)`
+                          }
+                        >
+                          <Badge tone="accent" size="xs">
+                            compacted ×{p.compactionCount}
+                          </Badge>
+                        </Tooltip>
+                      ) : null}
+                      {p.nearContextLimit && (
+                        <Badge tone="warn" size="xs" title="Over 80% of context window — compaction imminent">
+                          ctx-near
+                        </Badge>
+                      )}
                     </div>
                   </Td>
                   <Td>

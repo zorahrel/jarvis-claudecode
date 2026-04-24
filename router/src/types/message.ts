@@ -15,6 +15,8 @@ export interface QuotedMessage {
   text?: string;
   from?: string;
   media?: MediaAttachment[];
+  /** Unix epoch seconds of the quoted message (populated where easily available per-connector) */
+  timestampEpoch?: number;
 }
 
 /** Per-message pipeline timings (all Unix ms) */

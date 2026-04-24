@@ -1,4 +1,5 @@
 import { Client, GatewayIntentBits, Events, Partials } from "discord.js";
+import type { Message } from "discord.js";
 import type { Connector } from "./base";
 import type { IncomingMessage, MediaAttachment, QuotedMessage, Config } from "../types";
 import type { MessageTimings } from "../types/message";
@@ -12,6 +13,38 @@ import { logger } from "../services/logger";
 import { processMedia, downloadMedia } from "../services/media";
 
 const log = logger.child({ module: "discord" });
+
+/**
+ * Resolve Discord mention snowflakes to human-readable names.
+ * Applied at the ingestion boundary so the rest of the system only sees clean text.
+ *
+ * Order matters: resolve user mentions before role mentions before channel mentions.
+ *   <@ID> / <@!ID>  → @username   (fallback: @unknown)
+ *   <@&ROLE_ID>     → @rolename   (fallback: @role)
+ *   <#CHANNEL_ID>   → #channelname (fallback: #channel)
+ */
+function resolveDiscordMentions(text: string, msg: Message): string {
+  // User mentions: <@123> or <@!123>
+  let resolved = text.replace(/<@!?(\d+)>/g, (_, id: string) => {
+    const username = msg.mentions.users.get(id)?.username;
+    return `@${username ?? "unknown"}`;
+  });
+
+  // Role mentions: <@&123>
+  resolved = resolved.replace(/<@&(\d+)>/g, (_, id: string) => {
+    const roleName = msg.mentions.roles.get(id)?.name;
+    return `@${roleName ?? "role"}`;
+  });
+
+  // Channel mentions: <#123>
+  resolved = resolved.replace(/<#(\d+)>/g, (_, id: string) => {
+    const ch = msg.mentions.channels.get(id);
+    const channelName = ch && "name" in ch ? (ch as { name: string }).name : undefined;
+    return `#${channelName ?? "channel"}`;
+  });
+
+  return resolved;
+}
 
 export class DiscordConnector implements Connector {
   readonly channel = "discord" as const;
@@ -100,10 +133,11 @@ export class DiscordConnector implements Connector {
         if (!isMentioned && !isReplyToBot) return;
       }
 
-      // Strip bot mention from text
-      const cleanText = botId
+      // Strip bot mention from text, then resolve remaining mention snowflakes
+      const strippedText = botId
         ? discordMsg.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim()
         : discordMsg.content;
+      const cleanText = resolveDiscordMentions(strippedText, discordMsg);
 
       // Start pipeline timings
       const timings: MessageTimings = { received: Date.now() };
@@ -153,20 +187,33 @@ export class DiscordConnector implements Connector {
         try {
           const refMsg = await discordMsg.channel.messages.fetch(discordMsg.reference.messageId);
           if (refMsg) {
+            const rawQuotedText = refMsg.content || undefined;
             quotedMessage = {
-              text: refMsg.content || undefined,
+              text: rawQuotedText ? resolveDiscordMentions(rawQuotedText, refMsg) : undefined,
               from: refMsg.author.username,
+              timestampEpoch: Math.floor(refMsg.createdTimestamp / 1000),
             };
           }
         } catch { /* ignore */ }
       }
+
+      // In guild contexts, prefix the speaker identity so multi-user threads are unambiguous.
+      // DMs are single-speaker; no prefix needed there.
+      // If cleanText came out empty (e.g. message was only the bot mention),
+      // fall back to the ORIGINAL content with mentions resolved — never leak
+      // raw `<@ID>` / `<@&ID>` snowflakes into the prompt by using the unresolved
+      // discordMsg.content directly.
+      const baseText = cleanText || resolveDiscordMentions(discordMsg.content, discordMsg);
+      const finalText = discordMsg.guildId
+        ? `[@${discordMsg.author.username}]: ${baseText}`
+        : baseText;
 
       const msg: IncomingMessage = {
         channel: "discord",
         from: discordMsg.author.id,
         group: discordMsg.guildId ?? undefined,
         replyTarget: discordMsg.channelId,
-        text: cleanText || discordMsg.content,
+        text: finalText,
         timestamp: Math.floor(discordMsg.createdTimestamp / 1000),
         messageId: discordMsg.id,
         media: media.length > 0 ? media : undefined,

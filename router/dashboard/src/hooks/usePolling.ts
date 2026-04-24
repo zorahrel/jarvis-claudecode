@@ -92,16 +92,38 @@ export interface ResponseTimingData {
   model: string
 }
 
+export interface CompactionEventData {
+  ts: number
+  key: string
+  tokensBefore: number
+  threshold: number
+  compactionCount: number
+  summaryPreview?: string
+  hardReset?: boolean
+}
+
+/** Emitted by POST /api/notify after a message is successfully delivered. */
+export interface NotifyOutboundData {
+  ts: number
+  channel: string
+  target: string
+  /** First 120 chars of the delivered text (server truncates for privacy). */
+  preview: string
+  messageId?: string | null
+}
+
 export type RouterEvent =
   | { type: 'hello'; data: { serverTime: number; protocolVersion: number } }
   | { type: 'ping'; data: { ts: number } }
   | { type: 'session.created'; data: SessionEventData }
   | { type: 'session.updated'; data: SessionEventData }
   | { type: 'session.killed'; data: SessionEventData }
+  | { type: 'session.compacted'; data: CompactionEventData }
   | { type: 'log'; data: LogEventData }
   | { type: 'stats'; data: Record<string, unknown> }
   | { type: 'exchange.new'; data: ExchangeEventData }
   | { type: 'response.timing'; data: ResponseTimingData }
+  | { type: 'notify.outbound'; data: NotifyOutboundData }
 
 type Listener = (event: RouterEvent) => void
 
