@@ -250,7 +250,9 @@ export class TelegramConnector implements Connector {
     );
   }
 
-  /** Register the user's Claude Code slash commands with Telegram's /-menu. */
+  /** Register the user's Claude Code slash commands with Telegram's /-menu.
+   *  Retries once after 60 s if the first attempt fails (handles DNS-not-ready
+   *  at boot: bot.start() works via long-poll but setMyCommands hits the API). */
   private async syncSlashCommands(): Promise<void> {
     if (!this.bot) return;
     this.slashCatalog = loadSlashCommands();
@@ -260,14 +262,24 @@ export class TelegramConnector implements Connector {
     }
     const menu = pickMenuCommands(this.slashCatalog);
     const payload = menu.map(c => ({ command: c.tgName, description: c.description }));
-    try {
-      await this.bot.api.setMyCommands(payload);
-      log.info(
-        { menu: payload.length, catalog: this.slashCatalog.length },
-        "Registered Telegram slash commands",
-      );
-    } catch (err) {
-      log.warn({ err, menuSize: payload.length }, "setMyCommands failed — menu not updated (rewrite + /help still work)");
+    const trySync = async (): Promise<boolean> => {
+      try {
+        await this.bot!.api.setMyCommands(payload);
+        log.info(
+          { menu: payload.length, catalog: this.slashCatalog.length },
+          "Registered Telegram slash commands",
+        );
+        return true;
+      } catch (err) {
+        log.warn({ err, menuSize: payload.length }, "setMyCommands failed — will retry once in 60s");
+        return false;
+      }
+    };
+    if (!(await trySync())) {
+      // Single retry after 60 s — covers the common case where DNS comes up
+      // a few seconds after the bot long-poll already succeeded.
+      await new Promise((r) => setTimeout(r, 60_000));
+      await trySync();
     }
   }
 

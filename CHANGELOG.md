@@ -5,6 +5,17 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Fixed
+- **Connector bootstrap resilience.** Telegram, Discord e WhatsApp non bloccano
+  più il router al boot se la rete / DNS non è ancora disponibile. Il helper
+  `startWithRetry` (in `router/src/index.ts`) ritenta con back-off esponenziale
+  (5 s / 15 s / 45 s / 2 min / 5 min) fino a 6 tentativi totali; dopo l'ultimo
+  fallimento logga un errore e prosegue — il router rimane UP per gli altri
+  canali. `setDeliveryFn` e `initCrons` partono subito senza aspettare.
+- **Telegram slash commands al boot.** `syncSlashCommands` ora ritenta
+  `setMyCommands` una volta dopo 60 s se la prima chiamata fallisce (DNS non
+  ancora pronto quando il long-poll del bot è già attivo).
+
 ### Added
 - **Context-window auto-compaction.** Long Claude CLI sessions no longer
   saturate their context and silently truncate. The router now tracks
