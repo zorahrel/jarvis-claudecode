@@ -6,7 +6,11 @@ import { getProcesses, killProcessByKey, resolveCliPath } from "../services/clau
 import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
-import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns } from "../services/cron";
+import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns, getDeliveryFn } from "../services/cron";
+import { resolveToken } from "../services/notify-tokens";
+import { formatForChannel } from "../services/formatting";
+import { broadcast } from "./ws";
+import { randomUUID } from "crypto";
 import { queryCosts, aggregateCosts, getTotalCost } from "../services/cost-tracker";
 import { logger } from "../services/logger";
 import { clearLogEntries } from "./state";
@@ -188,6 +192,62 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     const thread = loadSessionThread(key, limit);
     if (!thread) { json(req, res, { error: "session not found" }, 404); return; }
     json(req, res, thread);
+
+  // --- PROACTIVE NOTIFY (agent → origin channel) ---
+  // Auth: bearer token issued at CLI spawn, bound to (channel, target).
+  // NEVER accept channel/target from body — spoofing-proof by construction.
+  } else if (path === "/api/notify" && req.method === "POST") {
+    const authHeader = req.headers["authorization"];
+    const token = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : "";
+    if (!token) { json(req, res, { error: "missing bearer token" }, 401); return; }
+
+    const binding = resolveToken(token);
+    if (!binding) { json(req, res, { error: "invalid or expired token" }, 401); return; }
+
+    let body: { text?: unknown; silent?: unknown };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+
+    const text = typeof body.text === "string" ? body.text : "";
+    if (!text || text.length === 0) { json(req, res, { error: "missing text" }, 400); return; }
+    if (text.length > 10000) { json(req, res, { error: "text too long (max 10000)" }, 400); return; }
+    const silent = body.silent === true;
+
+    // TODO(S4): plug rate-limit, per-session token budget, and identical-text
+    // dedup here. Stream S4 owns the security/observability layer.
+
+    const deliver = getDeliveryFn();
+    if (!deliver) {
+      json(req, res, { error: "delivery not available" }, 503);
+      return;
+    }
+
+    const formatted = formatForChannel(text, binding.channel);
+    try {
+      await deliver(binding.channel, binding.target, formatted);
+    } catch (err: any) {
+      log.error({ err: err?.message, channel: binding.channel, target: binding.target }, "Proactive notify delivery failed");
+      json(req, res, { error: "delivery failed" }, 502);
+      return;
+    }
+
+    const messageId = randomUUID();
+    log.info({ channel: binding.channel, target: binding.target, textLen: text.length, messageId }, "Proactive notify delivered");
+
+    if (!silent) {
+      broadcast({
+        type: "notify.outbound",
+        data: {
+          channel: binding.channel,
+          target: binding.target,
+          textPreview: text.slice(0, 200),
+          ts: Date.now(),
+        },
+      });
+    }
+
+    json(req, res, { ok: true, messageId });
 
   // --- READ APIs ---
   } else if (path === "/api/processes") {

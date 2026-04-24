@@ -24,7 +24,15 @@ export type RouterEvent =
   | { type: "log"; data: LogEntry }
   | { type: "stats"; data: Record<string, unknown> }
   | { type: "exchange.new"; data: ExchangeEventData }
-  | { type: "response.timing"; data: ResponseTime };
+  | { type: "response.timing"; data: ResponseTime }
+  | { type: "notify.outbound"; data: NotifyOutboundEventData };
+
+export interface NotifyOutboundEventData {
+  channel: string;
+  target: string;
+  textPreview: string;
+  ts: number;
+}
 
 export interface SessionEventData {
   key: string;
