@@ -102,6 +102,16 @@ export interface CompactionEventData {
   hardReset?: boolean
 }
 
+/** Emitted by POST /api/notify after a message is successfully delivered. */
+export interface NotifyOutboundData {
+  ts: number
+  channel: string
+  target: string
+  /** First 120 chars of the delivered text (server truncates for privacy). */
+  preview: string
+  messageId?: string | null
+}
+
 export type RouterEvent =
   | { type: 'hello'; data: { serverTime: number; protocolVersion: number } }
   | { type: 'ping'; data: { ts: number } }
@@ -113,6 +123,7 @@ export type RouterEvent =
   | { type: 'stats'; data: Record<string, unknown> }
   | { type: 'exchange.new'; data: ExchangeEventData }
   | { type: 'response.timing'; data: ResponseTimingData }
+  | { type: 'notify.outbound'; data: NotifyOutboundData }
 
 type Listener = (event: RouterEvent) => void
 
