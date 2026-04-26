@@ -98,24 +98,41 @@ export function extractTaskNotificationFromEvent(event: unknown): TaskNotificati
   if (!event || typeof event !== "object") return null;
   const e = event as Record<string, any>;
 
-  // Shape 1 — system event with explicit subtype
+  // Shape 1 — system event with explicit subtype.
+  // Empirically the live stream-json emits this BEFORE the synthetic
+  // user-message and it carries ONLY the bare fields (task_id, tool_use_id,
+  // status, summary, output_file) — no `<task-notification>` text, so no
+  // `<result>` / `<usage>`. If we processed it we'd fire a sparse notify
+  // and the dedup would block the rich user-event that follows. Two paths
+  // to handle this correctly:
+  //
+  //  - In LIVE mode: skip system events entirely; the user-event always
+  //    follows with the full payload.
+  //  - In HISTORY-REPLAY mode (router restart between bg start and
+  //    notification): we'd lose this signal. Acceptable trade-off — that
+  //    code path is rare and would still surface via the next user turn.
+  //
+  // If a future CLI version emits the full envelope text on the system
+  // event (`e.content`), we fall through and parse normally.
   if (e.type === "system" && e.subtype === "task_notification") {
     const text = typeof e.content === "string" ? e.content : "";
-    const fromText = text ? parseTaskNotificationFromText(text) : null;
+    if (!text) return null; // sparse system event — defer to upcoming user-event
+    const fromText = parseTaskNotificationFromText(text);
+    if (!fromText) return null;
     return {
-      taskId: (typeof e.task_id === "string" && e.task_id.trim()) || fromText?.taskId || null,
+      taskId: (typeof e.task_id === "string" && e.task_id.trim()) || fromText.taskId,
       toolUseId:
-        (typeof e.tool_use_id === "string" && e.tool_use_id.trim()) || fromText?.toolUseId || null,
+        (typeof e.tool_use_id === "string" && e.tool_use_id.trim()) || fromText.toolUseId,
       status: normalizeStatus(
-        (typeof e.status === "string" && e.status) || fromText?.status || "completed",
+        (typeof e.status === "string" && e.status) || fromText.status,
       ),
-      summary: (typeof e.summary === "string" && e.summary.trim()) || fromText?.summary || null,
+      summary: (typeof e.summary === "string" && e.summary.trim()) || fromText.summary,
       outputFile:
-        (typeof e.output_file === "string" && e.output_file.trim()) || fromText?.outputFile || null,
-      result: fromText?.result ?? null,
-      totalTokens: fromText?.totalTokens ?? null,
-      toolUsesCount: fromText?.toolUsesCount ?? null,
-      cliDurationMs: fromText?.cliDurationMs ?? null,
+        (typeof e.output_file === "string" && e.output_file.trim()) || fromText.outputFile,
+      result: fromText.result,
+      totalTokens: fromText.totalTokens,
+      toolUsesCount: fromText.toolUsesCount,
+      cliDurationMs: fromText.cliDurationMs,
     };
   }
 
