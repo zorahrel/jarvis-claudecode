@@ -171,15 +171,18 @@ export interface ChildFooterContext {
 }
 
 /**
- * ASCII-only footer aligned with `services/timings.ts` `formatTimingFooter`
- * (`[t X | tok N>M | agent/model]`) so a child notification visually matches
- * the regular agent footer. Sections are omitted when data is unavailable,
- * the same way `formatTimingFooter` drops empty parts.
+ * ASCII-only footer aligned with `services/timings.ts` `formatTimingFooter`.
+ * Each segment renders independently and is dropped when its data is empty
+ * or zero — no `exit:0` / `out 0B` / `cache 0+0` clutter on the happy path.
+ *
+ * Status is conveyed by the `child` / `child:failed` / `child:canceled`
+ * marker; the body of the message already echoes the CLI's own
+ * "(exit code N)" summary, so we don't repeat it in the footer.
  *
  * Examples:
- *   [t 8.4s | bash exit:0 out 11B | jarvis/claude-opus-4-7 | child]
- *   [t 12.3s | task | tok 42k>1.2k cache 0+20k | jarvis/claude-opus-4-7 | child]
- *   [t 5s | bash exit:1 | jarvis/claude-opus-4-7 | child:failed]
+ *   [t 8.4s | bash | out 11B | jarvis/claude-opus-4-7 | child]
+ *   [t 5s | bash | out 80B | jarvis/claude-opus-4-7 | child:failed]
+ *   [t 12.3s | task | tok 42k>1.2k | cache 20k | jarvis/claude-opus-4-7 | child]
  *   [child]   // last-resort: nothing was captured
  */
 export function formatChildNotificationFooter(
@@ -194,23 +197,31 @@ export function formatChildNotificationFooter(
     parts.push(`t ${fmtMs(ctx.durationMs)}`);
   }
 
-  // Tool-kind segment, optionally enriched with bash-specific exit:N + out NB.
-  if (ctx.kind) {
-    const kindParts: string[] = [ctx.kind];
-    if (typeof ctx.exitCode === "number") kindParts.push(`exit:${ctx.exitCode}`);
-    if (typeof ctx.outputBytes === "number" && ctx.outputBytes >= 0) {
-      kindParts.push(`out ${fmtBytes(ctx.outputBytes)}`);
-    }
-    parts.push(kindParts.join(" "));
+  if (ctx.kind) parts.push(ctx.kind);
+
+  if (typeof ctx.outputBytes === "number" && ctx.outputBytes > 0) {
+    parts.push(`out ${fmtBytes(ctx.outputBytes)}`);
   }
 
   // Token segment for Task/Agent subagent runs (Bash bg has none).
-  if (typeof ctx.tokensIn === "number" && typeof ctx.tokensOut === "number") {
-    const tokParts = [`tok ${fmtTokens(ctx.tokensIn)}>${fmtTokens(ctx.tokensOut)}`];
-    if (typeof ctx.cacheRead === "number" || typeof ctx.cacheCreate === "number") {
-      tokParts.push(`cache ${fmtTokens(ctx.cacheRead ?? 0)}+${fmtTokens(ctx.cacheCreate ?? 0)}`);
+  if (
+    (typeof ctx.tokensIn === "number" && ctx.tokensIn > 0) ||
+    (typeof ctx.tokensOut === "number" && ctx.tokensOut > 0)
+  ) {
+    parts.push(`tok ${fmtTokens(ctx.tokensIn ?? 0)}>${fmtTokens(ctx.tokensOut ?? 0)}`);
+  }
+  // Cache as its own segment (read+create combined to a single number when
+  // one side is zero, kept split as `R+C` when both contributed). Visible
+  // even on an otherwise zero-token run — heavy cache creation alone can
+  // surprise the bill, which is the whole point of tracking it.
+  const cacheR = ctx.cacheRead ?? 0;
+  const cacheC = ctx.cacheCreate ?? 0;
+  if (cacheR > 0 || cacheC > 0) {
+    if (cacheR > 0 && cacheC > 0) {
+      parts.push(`cache ${fmtTokens(cacheR)}+${fmtTokens(cacheC)}`);
+    } else {
+      parts.push(`cache ${fmtTokens(cacheR + cacheC)}`);
     }
-    parts.push(tokParts.join(" "));
   }
 
   if (agent && model) parts.push(`${agent}/${model}`);
