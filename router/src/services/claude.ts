@@ -252,6 +252,15 @@ interface PersistentProcess {
    * task completion.
    */
   notifiedTaskIds?: Set<string>;
+  /**
+   * tool_use_id → start timestamp for background tool calls
+   * (Bash with run_in_background:true, Task/Agent with run_in_background:true).
+   * Used to compute elapsed time when the matching task-notification arrives,
+   * AND to filter sync subagent calls — Claude Code emits task-notifications
+   * for EVERY Task/Agent subagent completion (not just bg ones), so we treat
+   * a notification with no recorded start as "sync turn, ignore".
+   */
+  bgToolUseStarts?: Map<string, number>;
 }
 
 const processes = new Map<string, PersistentProcess>();
@@ -382,9 +391,26 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
   // Tasks without an ID can't be deduped reliably; skip rather than risk doubles.
   if (!env.taskId) return;
 
+  // Filter: only fire for genuinely BACKGROUND tasks. Claude Code emits
+  // task-notification for every Task/Agent subagent completion, including
+  // synchronous ones the parent's turn already wraps into its own response.
+  // We track tool_use_ids of bg starts in `bgToolUseStarts`; if the
+  // notification's tool-use-id isn't there, this was a sync subagent — skip.
+  const startedAt =
+    env.toolUseId && pp.bgToolUseStarts ? pp.bgToolUseStarts.get(env.toolUseId) : undefined;
+  if (startedAt === undefined) {
+    log.debug(
+      { sessionKey: pp.sessionKey, taskId: env.taskId, toolUseId: env.toolUseId },
+      "Task notification ignored — not a tracked background task",
+    );
+    return;
+  }
+
   if (!pp.notifiedTaskIds) pp.notifiedTaskIds = new Set<string>();
   if (pp.notifiedTaskIds.has(env.taskId)) return;
   pp.notifiedTaskIds.add(env.taskId);
+  // Drop the start record so the map doesn't grow unbounded across long sessions.
+  pp.bgToolUseStarts?.delete(env.toolUseId!);
 
   const parsed = parseSessionKey(pp.sessionKey);
   if (!parsed) return;
@@ -412,9 +438,10 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
   const agentsIdx = workspaceParts.lastIndexOf("agents");
   const agentName = agentsIdx >= 0 && workspaceParts[agentsIdx + 1] ? workspaceParts[agentsIdx + 1] : undefined;
   const modelName = pp.resolvedModel ?? pp.model;
+  const durationMs = Math.max(0, Date.now() - startedAt);
 
   const body = formatTaskNotificationMessage(env);
-  const footer = formatChildNotificationFooter(env, agentName, modelName);
+  const footer = formatChildNotificationFooter(env, agentName, modelName, durationMs);
   const text = `${body}\n\n${footer}`;
   const formatted = formatForChannel(text, parsed.channel);
 
@@ -523,10 +550,23 @@ function spawnPersistentProcess(
       }
 
       // Track files created/written by Claude (tool_use events)
+      // AND record start times for backgrounded tool calls so we can later
+      // (a) compute elapsed time when the task-notification arrives, and
+      // (b) filter sync subagent/Task calls (which also emit task-notifications)
+      // from genuinely backgrounded ones.
       if (event.type === "assistant" && Array.isArray(event.content)) {
         for (const block of event.content) {
-          if (block.type === "tool_use" && (block.name === "Write" || block.name === "Edit") && block.input?.file_path) {
+          if (block.type !== "tool_use") continue;
+          if ((block.name === "Write" || block.name === "Edit") && block.input?.file_path) {
             pp.pendingFiles.push(block.input.file_path);
+          }
+          // Bash, Task, Agent are the tool names that support run_in_background
+          // (Agent is the legacy alias for Task in some CLI versions).
+          const isBgCapable =
+            block.name === "Bash" || block.name === "Task" || block.name === "Agent";
+          if (isBgCapable && block.input?.run_in_background === true && typeof block.id === "string") {
+            if (!pp.bgToolUseStarts) pp.bgToolUseStarts = new Map<string, number>();
+            pp.bgToolUseStarts.set(block.id, Date.now());
           }
         }
       }
