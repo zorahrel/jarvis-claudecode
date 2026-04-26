@@ -14,6 +14,7 @@ import { broadcast, clientCount } from "../dashboard/ws";
 import {
   extractTaskNotificationFromEvent,
   formatTaskNotificationMessage,
+  formatChildNotificationFooter,
   type TaskNotificationEnvelope,
 } from "./task-notification";
 import { getDeliveryFn } from "./cron";
@@ -405,7 +406,16 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
     return;
   }
 
-  const text = formatTaskNotificationMessage(env);
+  // Derive agent name from workspace path (".../agents/<name>") for the footer.
+  // Falls back to undefined if the workspace doesn't follow that convention.
+  const workspaceParts = pp.workspace.split("/");
+  const agentsIdx = workspaceParts.lastIndexOf("agents");
+  const agentName = agentsIdx >= 0 && workspaceParts[agentsIdx + 1] ? workspaceParts[agentsIdx + 1] : undefined;
+  const modelName = pp.resolvedModel ?? pp.model;
+
+  const body = formatTaskNotificationMessage(env);
+  const footer = formatChildNotificationFooter(env, agentName, modelName);
+  const text = `${body}\n\n${footer}`;
   const formatted = formatForChannel(text, parsed.channel);
 
   deliver(parsed.channel, parsed.target, formatted)
@@ -421,7 +431,7 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
           data: {
             channel: parsed.channel,
             target: parsed.target,
-            preview: text.slice(0, 120),
+            preview: body.slice(0, 120),
             messageId: null,
             ts: Date.now(),
           },
