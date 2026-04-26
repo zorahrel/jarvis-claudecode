@@ -8,9 +8,16 @@ import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
 import { issueToken, revokeToken } from "./notify-tokens";
-import { resetNotifyBudget } from "./rate-limiter";
+import { resetNotifyBudget, hasNotifyBudget, consumeNotifyBudget } from "./rate-limiter";
 import { shouldCompact, contextWindowFor } from "./context";
 import { broadcast, clientCount } from "../dashboard/ws";
+import {
+  extractTaskNotificationFromEvent,
+  formatTaskNotificationMessage,
+  type TaskNotificationEnvelope,
+} from "./task-notification";
+import { getDeliveryFn } from "./cron";
+import { formatForChannel } from "./formatting";
 
 const log = logger.child({ module: "claude" });
 
@@ -237,6 +244,13 @@ interface PersistentProcess {
    * see CLAUDE.md "two layers only" rule).
    */
   lastSummary?: string;
+  /**
+   * Task IDs we have already auto-notified for. Background task notifications
+   * arrive both as a synthetic user-message (live) AND as a system record
+   * (history replay) — without dedup we'd ping the user twice for the same
+   * task completion.
+   */
+  notifiedTaskIds?: Set<string>;
 }
 
 const processes = new Map<string, PersistentProcess>();
@@ -345,6 +359,81 @@ function parseSessionKey(key: string): { channel: string; target: string } | nul
   return { channel, target };
 }
 
+/**
+ * Auto-deliver a background-task completion notification to the origin channel.
+ *
+ * Called from the stream-json parser when we see a <task-notification> marker.
+ * Two arrival paths are deduped by taskId:
+ *   - synthetic user-message (live, mid-stream)
+ *   - system record (history replay on reconnect)
+ *
+ * Subagents skip — they have no notify token by design (only the primary agent
+ * delivers to the user's channel).
+ *
+ * Reuses the per-session notify budget so a runaway prompt that spawns N
+ * background tasks can't flood the channel beyond the existing 100/session cap.
+ */
+function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnvelope): void {
+  // Subagents don't notify the user — only primary agents do.
+  if (pp.isSubagent) return;
+  // Tasks without an ID can't be deduped reliably; skip rather than risk doubles.
+  if (!env.taskId) return;
+
+  if (!pp.notifiedTaskIds) pp.notifiedTaskIds = new Set<string>();
+  if (pp.notifiedTaskIds.has(env.taskId)) return;
+  pp.notifiedTaskIds.add(env.taskId);
+
+  const parsed = parseSessionKey(pp.sessionKey);
+  if (!parsed) return;
+
+  const deliver = getDeliveryFn();
+  if (!deliver) {
+    log.warn({ sessionKey: pp.sessionKey, taskId: env.taskId }, "Task notification ready but no delivery fn");
+    return;
+  }
+
+  // Reuse the existing per-session notify budget — same lever the
+  // POST /api/notify endpoint uses, so the user has a single guarantee
+  // ("max 100 outbound messages per session").
+  if (!hasNotifyBudget(pp.sessionKey, 100)) {
+    log.warn(
+      { sessionKey: pp.sessionKey, taskId: env.taskId },
+      "Task notification dropped — session budget exhausted",
+    );
+    return;
+  }
+
+  const text = formatTaskNotificationMessage(env);
+  const formatted = formatForChannel(text, parsed.channel);
+
+  deliver(parsed.channel, parsed.target, formatted)
+    .then(() => {
+      consumeNotifyBudget(pp.sessionKey);
+      log.info(
+        { sessionKey: pp.sessionKey, taskId: env.taskId, status: env.status },
+        "Background task notification delivered",
+      );
+      if (clientCount() > 0) {
+        broadcast({
+          type: "notify.outbound",
+          data: {
+            channel: parsed.channel,
+            target: parsed.target,
+            preview: text.slice(0, 120),
+            messageId: null,
+            ts: Date.now(),
+          },
+        });
+      }
+    })
+    .catch((err: any) => {
+      log.error(
+        { err: err?.message, sessionKey: pp.sessionKey, taskId: env.taskId },
+        "Task notification delivery failed",
+      );
+    });
+}
+
 function spawnPersistentProcess(
   key: string,
   model: string, workspace: string, tools: string[] = [],
@@ -428,6 +517,16 @@ function spawnPersistentProcess(
             pp.pendingFiles.push(block.input.file_path);
           }
         }
+      }
+
+      // Background task completion (Bash run_in_background, Task subagent run_in_background).
+      // The CLI injects a synthetic user-message with a <task-notification> marker
+      // when the task ends — see services/task-notification.ts for the format.
+      // We auto-deliver to the origin channel so the user sees a second message
+      // without having to "wake up" the agent with a fresh prompt.
+      const tn = extractTaskNotificationFromEvent(event);
+      if (tn) {
+        handleTaskNotification(pp, tn);
       }
 
       if (event.type === "result" && pp.pendingResolve) {
