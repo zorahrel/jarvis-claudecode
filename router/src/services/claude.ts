@@ -523,6 +523,21 @@ function spawnSession(
           if (typeof m === "string" && m.startsWith("claude-")) s.resolvedModel = m;
         }
 
+        // Typed SDK error on the assistant message — surface it as the
+        // canonical RATE_LIMIT/etc. so askClaudeInternal's fallback chain
+        // triggers instead of waiting for the iterator to throw with a
+        // string that may or may not match the substring checks.
+        if (e.type === "assistant" && typeof e.error === "string") {
+          if (s.pendingReject) {
+            const reject = s.pendingReject;
+            s.pendingResolve = null;
+            s.pendingReject = null;
+            const errName = e.error === "rate_limit" ? "RATE_LIMIT" : `SDK_ERROR_${e.error}`;
+            reject(new Error(errName));
+          }
+          continue;
+        }
+
         // Assistant message: collect text + track tool_use (Write/Edit + bg starts)
         if (e.type === "assistant" && Array.isArray(e.message?.content)) {
           for (const block of e.message.content) {
@@ -548,7 +563,19 @@ function spawnSession(
         const tn = extractTaskNotificationFromEvent(e);
         if (tn) handleTaskNotification(s, tn);
 
-        // Result event = end of turn
+        // Result event = end of turn. Subtypes other than 'success' are
+        // SDKResultError shapes (error_during_execution / error_max_turns /
+        // error_max_budget_usd / error_max_structured_output_retries) — reject
+        // so callers can surface or recover instead of resolving with empty
+        // text.
+        if (e.type === "result" && e.subtype && e.subtype !== "success" && s.pendingReject) {
+          const reject = s.pendingReject;
+          s.pendingResolve = null;
+          s.pendingReject = null;
+          const errs = Array.isArray(e.errors) ? e.errors.join("; ") : "";
+          reject(new Error(`SDK_RESULT_${e.subtype}${errs ? ": " + errs.slice(0, 200) : ""}`));
+          continue;
+        }
         if (e.type === "result" && s.pendingResolve) {
           const u = e.usage ?? {};
           const cacheCreation = u.cache_creation_input_tokens ?? 0;
@@ -609,6 +636,15 @@ function cleanupTimers(s: SdkSession): void {
 function killSession(s: SdkSession): void {
   s.alive = false;
   cleanupTimers(s);
+  // Reject a pending caller now — otherwise an external kill (lifetime timer,
+  // killProcessByKey, killAllProcesses) leaves askClaude waiting up to
+  // MESSAGE_TIMEOUT_MS for a result that will never arrive.
+  if (s.pendingReject) {
+    const reject = s.pendingReject;
+    s.pendingResolve = null;
+    s.pendingReject = null;
+    reject(new Error("PROCESS_DIED"));
+  }
   if (s.notifyToken) { revokeToken(s.notifyToken); s.notifyToken = null; }
   resetNotifyBudget(s.sessionKey);
   try {
@@ -656,6 +692,17 @@ function sendMessage(
   return new Promise((resolve, reject) => {
     if (!s.alive) {
       reject(new Error("PROCESS_DEAD"));
+      return;
+    }
+    // Refuse to overlap turns. The per-session serial queue prevents this for
+    // user-driven askClaude calls, but compaction issues two sendMessages
+    // sequentially with a Promise.race timeout in between — if the timeout
+    // fires while the SDK is still mid-turn, the next sendMessage would
+    // overwrite pendingResolve and the late `result` event would resolve the
+    // wrong promise. Failing fast here surfaces the bug instead of corrupting
+    // state.
+    if (s.pendingResolve) {
+      reject(new Error("TURN_IN_FLIGHT"));
       return;
     }
     s.pendingResolve = resolve;
