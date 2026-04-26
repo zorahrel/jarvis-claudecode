@@ -121,31 +121,31 @@ export function formatTaskNotificationMessage(env: TaskNotificationEnvelope): st
 }
 
 /**
- * ASCII-only footer for child notifications, mirroring the style of
- * `services/timings.ts` `formatTimingFooter` so the user can tell at a
- * glance which messages came from the agent's own turn vs. an
- * automatic background-task delivery.
+ * ASCII-only footer aligned with `services/timings.ts` `formatTimingFooter`
+ * (`[t X | tok N>M | agent/model]`) so a child notification visually matches
+ * the regular agent footer — the user just sees an extra `child` token at
+ * the end (and `child:failed` / `child:canceled` for non-completed paths).
  *
- * Example:
- *   [child task | id: bi4sa6k52 | completed | jarvis/opus]
+ * Background tasks are fire-and-forget so we have no `t` (no captured
+ * MessageTimings for the subagent's own turn) and no `tok` (the CLI doesn't
+ * expose subagent token usage in the task-notification envelope). Those
+ * sections are omitted, matching how `formatTimingFooter` already drops
+ * sections without data.
  *
- * Lives in this module (not timings.ts) because it has no MessageTimings
- * to thread through — the bg task ran fire-and-forget, no per-turn
- * latency context exists.
+ * Examples:
+ *   [jarvis/opus | child]
+ *   [jarvis/opus | child:failed]
+ *   [child]            // fallback when neither agent nor model are known
  */
 export function formatChildNotificationFooter(
   env: TaskNotificationEnvelope,
   agent?: string,
   model?: string,
 ): string {
-  const parts: string[] = ["child task"];
-  if (env.taskId) parts.push(`id: ${env.taskId.slice(0, 16)}`);
-  parts.push(env.status);
-  if (env.outputFile) parts.push(`file: ${env.outputFile.split("/").pop()}`);
-  if (agent || model) {
-    if (agent && model) parts.push(`${agent}/${model}`);
-    else if (agent) parts.push(agent);
-    else if (model) parts.push(model);
-  }
+  const parts: string[] = [];
+  if (agent && model) parts.push(`${agent}/${model}`);
+  else if (agent) parts.push(agent);
+  else if (model) parts.push(model);
+  parts.push(env.status === "completed" ? "child" : `child:${env.status}`);
   return `[${parts.join(" | ")}]`;
 }
