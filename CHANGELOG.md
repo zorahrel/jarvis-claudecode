@@ -6,6 +6,18 @@ Dates are ISO (YYYY-MM-DD).
 ## [Unreleased]
 
 ### Added
+- **Automatic background-task completion notifications.** When an agent
+  spawns a background task (`Bash(run_in_background:true)` or a `Task`
+  subagent with `run_in_background:true`), the router now intercepts the
+  CLI's synthetic `<task-notification>` marker in the stream-json output
+  and auto-delivers a "Task completato/fallito/annullato" message to the
+  originating channel — without the user having to send a follow-up
+  message to "wake up" the agent. Pattern verified against Paseo's
+  open-source implementation (getpaseo/paseo). Deduped by task-id so the
+  same completion isn't announced twice (live event vs. history replay).
+  Subagents (cron, internal Task tools) skip — only primary agents
+  notify. Reuses the per-session 100-msg notify budget. New module
+  `router/src/services/task-notification.ts` (pure parser + formatter).
 - **Proactive notify endpoint (`POST /api/notify`).** Agents can now send
   messages to the originating channel from background jobs, `Bash(run_in_background)`
   tasks, or subprocess hooks — not only from the live CLI turn. At spawn time
