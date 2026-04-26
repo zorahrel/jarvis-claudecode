@@ -554,19 +554,39 @@ function spawnPersistentProcess(
       // (a) compute elapsed time when the task-notification arrives, and
       // (b) filter sync subagent/Task calls (which also emit task-notifications)
       // from genuinely backgrounded ones.
-      if (event.type === "assistant" && Array.isArray(event.content)) {
-        for (const block of event.content) {
-          if (block.type !== "tool_use") continue;
-          if ((block.name === "Write" || block.name === "Edit") && block.input?.file_path) {
-            pp.pendingFiles.push(block.input.file_path);
-          }
-          // Bash, Task, Agent are the tool names that support run_in_background
-          // (Agent is the legacy alias for Task in some CLI versions).
-          const isBgCapable =
-            block.name === "Bash" || block.name === "Task" || block.name === "Agent";
-          if (isBgCapable && block.input?.run_in_background === true && typeof block.id === "string") {
-            if (!pp.bgToolUseStarts) pp.bgToolUseStarts = new Map<string, number>();
-            pp.bgToolUseStarts.set(block.id, Date.now());
+      // Stream-json wraps assistant content under `event.message.content`
+      // (older / partial-message shapes have it directly on `event.content`).
+      // Try both — empirically observed in real session JSONLs the tool_use
+      // blocks live under `message.content`, which is why bg-task tracking
+      // (and the pre-existing Write/Edit file tracker) silently no-op'd.
+      if (event.type === "assistant") {
+        const content = Array.isArray(event.content)
+          ? event.content
+          : Array.isArray(event.message?.content)
+            ? event.message.content
+            : null;
+        if (content) {
+          for (const block of content) {
+            if (!block || block.type !== "tool_use") continue;
+            if ((block.name === "Write" || block.name === "Edit") && block.input?.file_path) {
+              pp.pendingFiles.push(block.input.file_path);
+            }
+            // Bash, Task, Agent are the tool names that support run_in_background
+            // (Agent is the legacy alias for Task in some CLI versions).
+            const isBgCapable =
+              block.name === "Bash" || block.name === "Task" || block.name === "Agent";
+            if (
+              isBgCapable &&
+              block.input?.run_in_background === true &&
+              typeof block.id === "string"
+            ) {
+              if (!pp.bgToolUseStarts) pp.bgToolUseStarts = new Map<string, number>();
+              pp.bgToolUseStarts.set(block.id, Date.now());
+              log.debug(
+                { sessionKey: pp.sessionKey, toolUseId: block.id, name: block.name },
+                "Recorded background tool_use start",
+              );
+            }
           }
         }
       }
