@@ -5,6 +5,21 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Changed
+- **Claude integration migrated from CLI spawn to `@anthropic-ai/claude-agent-sdk`.**
+  `router/src/services/claude.ts` was reimplemented on top of the official SDK
+  (`query()` + persistent async-iterable producer per session, "pattern (b)"),
+  replacing the previous `spawn("claude", ["--print", "--input-format",
+  "stream-json", ...])` approach. Same Pro/Max subscription auth (the SDK
+  inherits the local OAuth token), same cost model. Net effect: typed event
+  stream replaces NDJSON parsing (-700 LOC), unlocks future use of the SDK's
+  hooks API, `agentProgressSummaries`, `maxBudgetUsd`, `outputFormat:
+  json_schema`, and file checkpointing without further refactor. Public API
+  of `services/claude` is unchanged — connectors/cron/dashboard imports keep
+  working as-is. Audit + spike + benchmark in `.planning/audit/sdk-*.md`. The
+  `@anthropic-ai/claude-code` package is no longer a direct dependency (the
+  SDK ships the bundled CLI runtime).
+
 ### Added
 - **Automatic background-task completion notifications.** When an agent
   spawns a background task (`Bash(run_in_background:true)` or a `Task`
