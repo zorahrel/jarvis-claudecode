@@ -28,6 +28,15 @@ export interface TaskNotificationEnvelope {
   status: TaskNotificationStatus;
   summary: string | null;
   outputFile: string | null;
+  /** Subagent's final response text, when present in the envelope's
+   *  `<result>` tag. Richer than `summary` — preferred for the body. */
+  result: string | null;
+  /** Subagent token usage as reported by the CLI's `<usage>` block. The
+   *  CLI exposes only the total, plus tool-use count and a duration in
+   *  ms. Bash bg envelopes typically have zero tokens (no LLM activity). */
+  totalTokens: number | null;
+  toolUsesCount: number | null;
+  cliDurationMs: number | null;
 }
 
 function readTag(text: string, tagName: string): string | null {
@@ -45,15 +54,29 @@ function normalizeStatus(raw: string | null | undefined): TaskNotificationStatus
   return "completed";
 }
 
+function parseIntTag(text: string, tagName: string): number | null {
+  const raw = readTag(text, tagName);
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Extract a task-notification envelope from a free-text blob. */
 export function parseTaskNotificationFromText(text: string): TaskNotificationEnvelope | null {
   if (!text || !text.includes(TASK_NOTIFICATION_MARKER)) return null;
+  // The `<usage>` block has nested tags `<total_tokens>`, `<tool_uses>`,
+  // `<duration_ms>`. We can read them directly from the full envelope text
+  // because each tag name is unique and our `readTag` is non-greedy.
   return {
     taskId: readTag(text, "task-id") ?? readTag(text, "task_id"),
     toolUseId: readTag(text, "tool-use-id") ?? readTag(text, "tool_use_id"),
     status: normalizeStatus(readTag(text, "status")),
     summary: readTag(text, "summary"),
     outputFile: readTag(text, "output-file") ?? readTag(text, "output_file"),
+    result: readTag(text, "result"),
+    totalTokens: parseIntTag(text, "total_tokens") ?? parseIntTag(text, "total-tokens"),
+    toolUsesCount: parseIntTag(text, "tool_uses") ?? parseIntTag(text, "tool-uses"),
+    cliDurationMs: parseIntTag(text, "duration_ms") ?? parseIntTag(text, "duration-ms"),
   };
 }
 
@@ -89,6 +112,10 @@ export function extractTaskNotificationFromEvent(event: unknown): TaskNotificati
       summary: (typeof e.summary === "string" && e.summary.trim()) || fromText?.summary || null,
       outputFile:
         (typeof e.output_file === "string" && e.output_file.trim()) || fromText?.outputFile || null,
+      result: fromText?.result ?? null,
+      totalTokens: fromText?.totalTokens ?? null,
+      toolUsesCount: fromText?.toolUsesCount ?? null,
+      cliDurationMs: fromText?.cliDurationMs ?? null,
     };
   }
 
@@ -115,7 +142,16 @@ export function extractTaskNotificationFromEvent(event: unknown): TaskNotificati
   return null;
 }
 
-/** Build a short user-facing body from an envelope. No emojis. */
+const MAX_RESULT_BODY_CHARS = 2000;
+
+/** Build a short user-facing body from an envelope. No emojis.
+ *
+ *  Preference order:
+ *   1. `<result>` tag — the subagent's own final response, richest signal
+ *   2. `<summary>` — CLI-generated description (e.g. "Background command X
+ *      completed (exit code 0)")
+ *   3. fallback prefix + task id
+ */
 export function formatTaskNotificationMessage(env: TaskNotificationEnvelope): string {
   const prefix =
     env.status === "failed"
@@ -123,6 +159,12 @@ export function formatTaskNotificationMessage(env: TaskNotificationEnvelope): st
       : env.status === "canceled"
         ? "Task annullato"
         : "Task completato";
+  if (env.result) {
+    const trimmed = env.result.length > MAX_RESULT_BODY_CHARS
+      ? env.result.slice(0, MAX_RESULT_BODY_CHARS) + "…"
+      : env.result;
+    return `${prefix}: ${trimmed}`;
+  }
   if (env.summary) return `${prefix}: ${env.summary}`;
   if (env.taskId) return `${prefix} (id: ${env.taskId.slice(0, 12)})`;
   return prefix;
@@ -149,25 +191,19 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)}MB`;
 }
 
-/** Optional structured metadata captured by the stream parser. Each field is
- *  rendered only when present, mirroring `formatTimingFooter`'s drop-empty
- *  behaviour. */
+/** Optional structured metadata for the footer. Each field renders only when
+ *  present, mirroring `formatTimingFooter`'s drop-empty behaviour. */
 export interface ChildFooterContext {
   /** Wall time the bg task spent running, ms. */
   durationMs?: number;
   /** Tool kind that started the task: 'bash' | 'task' | 'agent'. */
   kind?: string;
-  /** Exit code parsed from the envelope's summary (`exit code N`). */
-  exitCode?: number;
   /** Size of the output_file in bytes (Bash bg). */
   outputBytes?: number;
-  /** Aggregate token usage of the subagent during this bg task.
-   *  Bash bg always has 0 / undefined — shell, no LLM.
-   *  Task/Agent bg accumulates from `isSidechain:true` assistant events. */
-  tokensIn?: number;
-  tokensOut?: number;
-  cacheRead?: number;
-  cacheCreate?: number;
+  /** Subagent total tokens reported by the CLI's `<usage>` block. */
+  totalTokens?: number;
+  /** Subagent tool-use count reported by the CLI's `<usage>` block. */
+  toolUsesCount?: number;
 }
 
 /**
@@ -203,25 +239,14 @@ export function formatChildNotificationFooter(
     parts.push(`out ${fmtBytes(ctx.outputBytes)}`);
   }
 
-  // Token segment for Task/Agent subagent runs (Bash bg has none).
-  if (
-    (typeof ctx.tokensIn === "number" && ctx.tokensIn > 0) ||
-    (typeof ctx.tokensOut === "number" && ctx.tokensOut > 0)
-  ) {
-    parts.push(`tok ${fmtTokens(ctx.tokensIn ?? 0)}>${fmtTokens(ctx.tokensOut ?? 0)}`);
+  // Token segment — total reported by the CLI's <usage> block. Bash bg
+  // envelopes report 0 (no LLM), so this drops out cleanly.
+  if (typeof ctx.totalTokens === "number" && ctx.totalTokens > 0) {
+    parts.push(`tok ${fmtTokens(ctx.totalTokens)}`);
   }
-  // Cache as its own segment (read+create combined to a single number when
-  // one side is zero, kept split as `R+C` when both contributed). Visible
-  // even on an otherwise zero-token run — heavy cache creation alone can
-  // surprise the bill, which is the whole point of tracking it.
-  const cacheR = ctx.cacheRead ?? 0;
-  const cacheC = ctx.cacheCreate ?? 0;
-  if (cacheR > 0 || cacheC > 0) {
-    if (cacheR > 0 && cacheC > 0) {
-      parts.push(`cache ${fmtTokens(cacheR)}+${fmtTokens(cacheC)}`);
-    } else {
-      parts.push(`cache ${fmtTokens(cacheR + cacheC)}`);
-    }
+  // Tool-uses count from the subagent — useful to spot a runaway loop.
+  if (typeof ctx.toolUsesCount === "number" && ctx.toolUsesCount > 0) {
+    parts.push(`tools ${ctx.toolUsesCount}`);
   }
 
   if (agent && model) parts.push(`${agent}/${model}`);
@@ -232,11 +257,3 @@ export function formatChildNotificationFooter(
   return `[${parts.join(" | ")}]`;
 }
 
-/** Parse `exit code N` from a Bash task-notification summary string. */
-export function parseExitCodeFromSummary(summary: string | null | undefined): number | undefined {
-  if (!summary) return undefined;
-  const m = summary.match(/exit code\s+(-?\d+)/i);
-  if (!m) return undefined;
-  const n = parseInt(m[1], 10);
-  return Number.isFinite(n) ? n : undefined;
-}
