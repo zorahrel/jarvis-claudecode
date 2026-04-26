@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import { join } from "path";
 import { createInterface, Interface } from "readline";
-import { readdirSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { readdirSync, existsSync, readFileSync, writeFileSync, statSync } from "fs";
 import { homedir } from "os";
 import type { AgentConfig } from "../types";
 import { logger } from "./logger";
@@ -15,7 +15,9 @@ import {
   extractTaskNotificationFromEvent,
   formatTaskNotificationMessage,
   formatChildNotificationFooter,
+  parseExitCodeFromSummary,
   type TaskNotificationEnvelope,
+  type ChildFooterContext,
 } from "./task-notification";
 import { getDeliveryFn } from "./cron";
 import { formatForChannel } from "./formatting";
@@ -253,14 +255,43 @@ interface PersistentProcess {
    */
   notifiedTaskIds?: Set<string>;
   /**
-   * tool_use_id → start timestamp for background tool calls
-   * (Bash with run_in_background:true, Task/Agent with run_in_background:true).
-   * Used to compute elapsed time when the matching task-notification arrives,
-   * AND to filter sync subagent calls — Claude Code emits task-notifications
-   * for EVERY Task/Agent subagent completion (not just bg ones), so we treat
-   * a notification with no recorded start as "sync turn, ignore".
+   * tool_use_id → metadata captured when a background tool call started
+   * (Bash, Task or Agent with `input.run_in_background:true`). Used to:
+   *   - filter sync Task/Agent calls — Claude Code emits task-notifications
+   *     for every subagent completion, not just bg ones; a notification with
+   *     no recorded start is treated as "sync turn, ignore";
+   *   - compute elapsed time when the matching task-notification arrives;
+   *   - render `kind` (bash/task/agent) in the child footer;
+   *   - compute per-task token deltas for Task/Agent bg by snapshotting the
+   *     session-wide sidechain accumulator at start-time.
    */
-  bgToolUseStarts?: Map<string, number>;
+  bgToolUseStarts?: Map<
+    string,
+    {
+      startedAt: number;
+      kind: string;
+      sidechainSnapshot: SidechainCumulative;
+    }
+  >;
+  /**
+   * Cumulative subagent (`isSidechain:true`) token usage for the lifetime of
+   * this CLI process. Each isSidechain:true assistant event contributes its
+   * `usage` totals here; a bg Task/Agent tool_use snapshots this on start
+   * and computes the delta on completion. Bash bg tasks consume zero LLM
+   * (shell only), so they always observe a zero delta — correct.
+   */
+  sidechainCumulative?: SidechainCumulative;
+}
+
+interface SidechainCumulative {
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheCreate: number;
+}
+
+function emptySidechainCumulative(): SidechainCumulative {
+  return { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
 }
 
 const processes = new Map<string, PersistentProcess>();
@@ -396,9 +427,9 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
   // synchronous ones the parent's turn already wraps into its own response.
   // We track tool_use_ids of bg starts in `bgToolUseStarts`; if the
   // notification's tool-use-id isn't there, this was a sync subagent — skip.
-  const startedAt =
+  const startInfo =
     env.toolUseId && pp.bgToolUseStarts ? pp.bgToolUseStarts.get(env.toolUseId) : undefined;
-  if (startedAt === undefined) {
+  if (!startInfo) {
     log.debug(
       { sessionKey: pp.sessionKey, taskId: env.taskId, toolUseId: env.toolUseId },
       "Task notification ignored — not a tracked background task",
@@ -438,10 +469,49 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
   const agentsIdx = workspaceParts.lastIndexOf("agents");
   const agentName = agentsIdx >= 0 && workspaceParts[agentsIdx + 1] ? workspaceParts[agentsIdx + 1] : undefined;
   const modelName = pp.resolvedModel ?? pp.model;
-  const durationMs = Math.max(0, Date.now() - startedAt);
+  const durationMs = Math.max(0, Date.now() - startInfo.startedAt);
+
+  // Build the rich footer context: kind from the recorded tool_use, exit
+  // code parsed from the envelope summary, output file size for Bash bg,
+  // and per-task token deltas for Task/Agent bg (Bash will observe zero —
+  // shell, no LLM).
+  const ctx: ChildFooterContext = {
+    durationMs,
+    kind: startInfo.kind,
+    exitCode: parseExitCodeFromSummary(env.summary),
+  };
+
+  // Output file size — Bash bg writes stdout/stderr there; Task bg may
+  // produce a transcript too. Best-effort, never block delivery on stat fail.
+  if (env.outputFile) {
+    try {
+      const st = statSync(env.outputFile);
+      if (st.isFile()) ctx.outputBytes = st.size;
+    } catch {
+      // file gone / not yet flushed / unreadable — drop the field, don't fail.
+    }
+  }
+
+  // Per-task token delta from the cumulative sidechain accumulator. Only
+  // populate when the kind is Task/Agent — Bash bg has no LLM activity, so
+  // an empty delta would render an uninformative `tok 0>0` segment.
+  if (startInfo.kind === "task" || startInfo.kind === "agent") {
+    const cur = pp.sidechainCumulative ?? emptySidechainCumulative();
+    const snap = startInfo.sidechainSnapshot;
+    const deltaIn = Math.max(0, cur.inputTokens - snap.inputTokens);
+    const deltaOut = Math.max(0, cur.outputTokens - snap.outputTokens);
+    const deltaCacheR = Math.max(0, cur.cacheRead - snap.cacheRead);
+    const deltaCacheC = Math.max(0, cur.cacheCreate - snap.cacheCreate);
+    if (deltaIn > 0 || deltaOut > 0 || deltaCacheR > 0 || deltaCacheC > 0) {
+      ctx.tokensIn = deltaIn;
+      ctx.tokensOut = deltaOut;
+      ctx.cacheRead = deltaCacheR;
+      ctx.cacheCreate = deltaCacheC;
+    }
+  }
 
   const body = formatTaskNotificationMessage(env);
-  const footer = formatChildNotificationFooter(env, agentName, modelName, durationMs);
+  const footer = formatChildNotificationFooter(env, agentName, modelName, ctx);
   const text = `${body}\n\n${footer}`;
   const formatted = formatForChannel(text, parsed.channel);
 
@@ -565,6 +635,20 @@ function spawnPersistentProcess(
           : Array.isArray(event.message?.content)
             ? event.message.content
             : null;
+
+        // Subagent (isSidechain:true) assistant events carry the subagent's
+        // own usage. Aggregate into the session-wide cumulative so per-task
+        // bg deltas can be derived in handleTaskNotification.
+        const isSidechain = event.isSidechain === true || event.message?.isSidechain === true;
+        const usage = event.message?.usage ?? event.usage;
+        if (isSidechain && usage && typeof usage === "object") {
+          if (!pp.sidechainCumulative) pp.sidechainCumulative = emptySidechainCumulative();
+          pp.sidechainCumulative.inputTokens += Number(usage.input_tokens) || 0;
+          pp.sidechainCumulative.outputTokens += Number(usage.output_tokens) || 0;
+          pp.sidechainCumulative.cacheRead += Number(usage.cache_read_input_tokens) || 0;
+          pp.sidechainCumulative.cacheCreate += Number(usage.cache_creation_input_tokens) || 0;
+        }
+
         if (content) {
           for (const block of content) {
             if (!block || block.type !== "tool_use") continue;
@@ -580,8 +664,16 @@ function spawnPersistentProcess(
               block.input?.run_in_background === true &&
               typeof block.id === "string"
             ) {
-              if (!pp.bgToolUseStarts) pp.bgToolUseStarts = new Map<string, number>();
-              pp.bgToolUseStarts.set(block.id, Date.now());
+              if (!pp.bgToolUseStarts) pp.bgToolUseStarts = new Map();
+              if (!pp.sidechainCumulative) pp.sidechainCumulative = emptySidechainCumulative();
+              pp.bgToolUseStarts.set(block.id, {
+                startedAt: Date.now(),
+                kind: block.name.toLowerCase(),
+                // Snapshot the cumulative sidechain counter — at notification
+                // time we'll compute (current - snapshot) to attribute tokens
+                // to this specific bg run.
+                sidechainSnapshot: { ...pp.sidechainCumulative },
+              });
               log.debug(
                 { sessionKey: pp.sessionKey, toolUseId: block.id, name: block.name },
                 "Recorded background tool_use start",

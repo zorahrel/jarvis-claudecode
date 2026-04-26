@@ -133,35 +133,99 @@ function fmtMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`;
+  }
+  const m = n / 1_000_000;
+  return m >= 10 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`;
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/** Optional structured metadata captured by the stream parser. Each field is
+ *  rendered only when present, mirroring `formatTimingFooter`'s drop-empty
+ *  behaviour. */
+export interface ChildFooterContext {
+  /** Wall time the bg task spent running, ms. */
+  durationMs?: number;
+  /** Tool kind that started the task: 'bash' | 'task' | 'agent'. */
+  kind?: string;
+  /** Exit code parsed from the envelope's summary (`exit code N`). */
+  exitCode?: number;
+  /** Size of the output_file in bytes (Bash bg). */
+  outputBytes?: number;
+  /** Aggregate token usage of the subagent during this bg task.
+   *  Bash bg always has 0 / undefined — shell, no LLM.
+   *  Task/Agent bg accumulates from `isSidechain:true` assistant events. */
+  tokensIn?: number;
+  tokensOut?: number;
+  cacheRead?: number;
+  cacheCreate?: number;
+}
+
 /**
  * ASCII-only footer aligned with `services/timings.ts` `formatTimingFooter`
  * (`[t X | tok N>M | agent/model]`) so a child notification visually matches
- * the regular agent footer with a `child` marker appended (and
- * `child:failed` / `child:canceled` for non-completed paths).
- *
- * Sections are omitted when data isn't available, matching how
- * `formatTimingFooter` already drops empty sections. `tok` is currently
- * always omitted — the CLI's task-notification envelope doesn't carry
- * subagent token usage, so we'd be making numbers up.
+ * the regular agent footer. Sections are omitted when data is unavailable,
+ * the same way `formatTimingFooter` drops empty parts.
  *
  * Examples:
- *   [t 8.4s | jarvis/opus | child]
- *   [jarvis/opus | child:failed]      // start time wasn't captured
- *   [child]                            // last-resort fallback
+ *   [t 8.4s | bash exit:0 out 11B | jarvis/claude-opus-4-7 | child]
+ *   [t 12.3s | task | tok 42k>1.2k cache 0+20k | jarvis/claude-opus-4-7 | child]
+ *   [t 5s | bash exit:1 | jarvis/claude-opus-4-7 | child:failed]
+ *   [child]   // last-resort: nothing was captured
  */
 export function formatChildNotificationFooter(
   env: TaskNotificationEnvelope,
   agent?: string,
   model?: string,
-  durationMs?: number,
+  ctx: ChildFooterContext = {},
 ): string {
   const parts: string[] = [];
-  if (typeof durationMs === "number" && durationMs >= 0) {
-    parts.push(`t ${fmtMs(durationMs)}`);
+
+  if (typeof ctx.durationMs === "number" && ctx.durationMs >= 0) {
+    parts.push(`t ${fmtMs(ctx.durationMs)}`);
   }
+
+  // Tool-kind segment, optionally enriched with bash-specific exit:N + out NB.
+  if (ctx.kind) {
+    const kindParts: string[] = [ctx.kind];
+    if (typeof ctx.exitCode === "number") kindParts.push(`exit:${ctx.exitCode}`);
+    if (typeof ctx.outputBytes === "number" && ctx.outputBytes >= 0) {
+      kindParts.push(`out ${fmtBytes(ctx.outputBytes)}`);
+    }
+    parts.push(kindParts.join(" "));
+  }
+
+  // Token segment for Task/Agent subagent runs (Bash bg has none).
+  if (typeof ctx.tokensIn === "number" && typeof ctx.tokensOut === "number") {
+    const tokParts = [`tok ${fmtTokens(ctx.tokensIn)}>${fmtTokens(ctx.tokensOut)}`];
+    if (typeof ctx.cacheRead === "number" || typeof ctx.cacheCreate === "number") {
+      tokParts.push(`cache ${fmtTokens(ctx.cacheRead ?? 0)}+${fmtTokens(ctx.cacheCreate ?? 0)}`);
+    }
+    parts.push(tokParts.join(" "));
+  }
+
   if (agent && model) parts.push(`${agent}/${model}`);
   else if (agent) parts.push(agent);
   else if (model) parts.push(model);
+
   parts.push(env.status === "completed" ? "child" : `child:${env.status}`);
   return `[${parts.join(" | ")}]`;
+}
+
+/** Parse `exit code N` from a Bash task-notification summary string. */
+export function parseExitCodeFromSummary(summary: string | null | undefined): number | undefined {
+  if (!summary) return undefined;
+  const m = summary.match(/exit code\s+(-?\d+)/i);
+  if (!m) return undefined;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : undefined;
 }
