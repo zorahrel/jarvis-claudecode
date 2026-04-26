@@ -15,7 +15,6 @@ import {
   extractTaskNotificationFromEvent,
   formatTaskNotificationMessage,
   formatChildNotificationFooter,
-  parseExitCodeFromSummary,
   type TaskNotificationEnvelope,
   type ChildFooterContext,
 } from "./task-notification";
@@ -261,37 +260,14 @@ interface PersistentProcess {
    *     for every subagent completion, not just bg ones; a notification with
    *     no recorded start is treated as "sync turn, ignore";
    *   - compute elapsed time when the matching task-notification arrives;
-   *   - render `kind` (bash/task/agent) in the child footer;
-   *   - compute per-task token deltas for Task/Agent bg by snapshotting the
-   *     session-wide sidechain accumulator at start-time.
+   *   - render `kind` (bash/task/agent) in the child footer.
+   *
+   * Token totals come from the `<usage>` block inside the task-notification
+   * envelope itself — no parallel accumulator needed (and crucially: the
+   * current CLI version does NOT emit `isSidechain:true` markers in the
+   * live stream, so any side-channel accumulator would silently no-op).
    */
-  bgToolUseStarts?: Map<
-    string,
-    {
-      startedAt: number;
-      kind: string;
-      sidechainSnapshot: SidechainCumulative;
-    }
-  >;
-  /**
-   * Cumulative subagent (`isSidechain:true`) token usage for the lifetime of
-   * this CLI process. Each isSidechain:true assistant event contributes its
-   * `usage` totals here; a bg Task/Agent tool_use snapshots this on start
-   * and computes the delta on completion. Bash bg tasks consume zero LLM
-   * (shell only), so they always observe a zero delta — correct.
-   */
-  sidechainCumulative?: SidechainCumulative;
-}
-
-interface SidechainCumulative {
-  inputTokens: number;
-  outputTokens: number;
-  cacheRead: number;
-  cacheCreate: number;
-}
-
-function emptySidechainCumulative(): SidechainCumulative {
-  return { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0 };
+  bgToolUseStarts?: Map<string, { startedAt: number; kind: string }>;
 }
 
 const processes = new Map<string, PersistentProcess>();
@@ -471,14 +447,12 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
   const modelName = pp.resolvedModel ?? pp.model;
   const durationMs = Math.max(0, Date.now() - startInfo.startedAt);
 
-  // Build the rich footer context: kind from the recorded tool_use, exit
-  // code parsed from the envelope summary, output file size for Bash bg,
-  // and per-task token deltas for Task/Agent bg (Bash will observe zero —
-  // shell, no LLM).
+  // Build the rich footer context: kind from the recorded tool_use, output
+  // file size for Bash bg, and (for Task/Agent bg) total tokens + tool-uses
+  // count from the envelope's <usage> block.
   const ctx: ChildFooterContext = {
     durationMs,
     kind: startInfo.kind,
-    exitCode: parseExitCodeFromSummary(env.summary),
   };
 
   // Output file size — Bash bg writes stdout/stderr there; Task bg may
@@ -492,22 +466,14 @@ function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnve
     }
   }
 
-  // Per-task token delta from the cumulative sidechain accumulator. Only
-  // populate when the kind is Task/Agent — Bash bg has no LLM activity, so
-  // an empty delta would render an uninformative `tok 0>0` segment.
-  if (startInfo.kind === "task" || startInfo.kind === "agent") {
-    const cur = pp.sidechainCumulative ?? emptySidechainCumulative();
-    const snap = startInfo.sidechainSnapshot;
-    const deltaIn = Math.max(0, cur.inputTokens - snap.inputTokens);
-    const deltaOut = Math.max(0, cur.outputTokens - snap.outputTokens);
-    const deltaCacheR = Math.max(0, cur.cacheRead - snap.cacheRead);
-    const deltaCacheC = Math.max(0, cur.cacheCreate - snap.cacheCreate);
-    if (deltaIn > 0 || deltaOut > 0 || deltaCacheR > 0 || deltaCacheC > 0) {
-      ctx.tokensIn = deltaIn;
-      ctx.tokensOut = deltaOut;
-      ctx.cacheRead = deltaCacheR;
-      ctx.cacheCreate = deltaCacheC;
-    }
+  // Token usage and tool-use count come straight from the CLI's <usage>
+  // block inside the task-notification envelope. Bash bg envelopes report
+  // 0 tokens (no LLM activity), which the formatter drops cleanly.
+  if (typeof env.totalTokens === "number" && env.totalTokens > 0) {
+    ctx.totalTokens = env.totalTokens;
+  }
+  if (typeof env.toolUsesCount === "number" && env.toolUsesCount > 0) {
+    ctx.toolUsesCount = env.toolUsesCount;
   }
 
   const body = formatTaskNotificationMessage(env);
@@ -636,19 +602,6 @@ function spawnPersistentProcess(
             ? event.message.content
             : null;
 
-        // Subagent (isSidechain:true) assistant events carry the subagent's
-        // own usage. Aggregate into the session-wide cumulative so per-task
-        // bg deltas can be derived in handleTaskNotification.
-        const isSidechain = event.isSidechain === true || event.message?.isSidechain === true;
-        const usage = event.message?.usage ?? event.usage;
-        if (isSidechain && usage && typeof usage === "object") {
-          if (!pp.sidechainCumulative) pp.sidechainCumulative = emptySidechainCumulative();
-          pp.sidechainCumulative.inputTokens += Number(usage.input_tokens) || 0;
-          pp.sidechainCumulative.outputTokens += Number(usage.output_tokens) || 0;
-          pp.sidechainCumulative.cacheRead += Number(usage.cache_read_input_tokens) || 0;
-          pp.sidechainCumulative.cacheCreate += Number(usage.cache_creation_input_tokens) || 0;
-        }
-
         if (content) {
           for (const block of content) {
             if (!block || block.type !== "tool_use") continue;
@@ -665,14 +618,9 @@ function spawnPersistentProcess(
               typeof block.id === "string"
             ) {
               if (!pp.bgToolUseStarts) pp.bgToolUseStarts = new Map();
-              if (!pp.sidechainCumulative) pp.sidechainCumulative = emptySidechainCumulative();
               pp.bgToolUseStarts.set(block.id, {
                 startedAt: Date.now(),
                 kind: block.name.toLowerCase(),
-                // Snapshot the cumulative sidechain counter — at notification
-                // time we'll compute (current - snapshot) to attribute tokens
-                // to this specific bg run.
-                sidechainSnapshot: { ...pp.sidechainCumulative },
               });
               log.debug(
                 { sessionKey: pp.sessionKey, toolUseId: block.id, name: block.name },
