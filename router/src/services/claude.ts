@@ -374,6 +374,8 @@ function parseSessionKey(key: string): { channel: string; target: string } | nul
  * background tasks can't flood the channel beyond the existing 100/session cap.
  */
 function handleTaskNotification(pp: PersistentProcess, env: TaskNotificationEnvelope): void {
+  // Process killed before we got around to delivering — drop the event.
+  if (!pp.alive) return;
   // Subagents don't notify the user — only primary agents do.
   if (pp.isSubagent) return;
   // Tasks without an ID can't be deduped reliably; skip rather than risk doubles.
