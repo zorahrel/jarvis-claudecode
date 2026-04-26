@@ -107,7 +107,7 @@ export function extractTaskNotificationFromEvent(event: unknown): TaskNotificati
   return null;
 }
 
-/** Build a short user-facing message from an envelope. No emojis. */
+/** Build a short user-facing body from an envelope. No emojis. */
 export function formatTaskNotificationMessage(env: TaskNotificationEnvelope): string {
   const prefix =
     env.status === "failed"
@@ -118,4 +118,34 @@ export function formatTaskNotificationMessage(env: TaskNotificationEnvelope): st
   if (env.summary) return `${prefix}: ${env.summary}`;
   if (env.taskId) return `${prefix} (id: ${env.taskId.slice(0, 12)})`;
   return prefix;
+}
+
+/**
+ * ASCII-only footer for child notifications, mirroring the style of
+ * `services/timings.ts` `formatTimingFooter` so the user can tell at a
+ * glance which messages came from the agent's own turn vs. an
+ * automatic background-task delivery.
+ *
+ * Example:
+ *   [child task | id: bi4sa6k52 | completed | jarvis/opus]
+ *
+ * Lives in this module (not timings.ts) because it has no MessageTimings
+ * to thread through — the bg task ran fire-and-forget, no per-turn
+ * latency context exists.
+ */
+export function formatChildNotificationFooter(
+  env: TaskNotificationEnvelope,
+  agent?: string,
+  model?: string,
+): string {
+  const parts: string[] = ["child task"];
+  if (env.taskId) parts.push(`id: ${env.taskId.slice(0, 16)}`);
+  parts.push(env.status);
+  if (env.outputFile) parts.push(`file: ${env.outputFile.split("/").pop()}`);
+  if (agent || model) {
+    if (agent && model) parts.push(`${agent}/${model}`);
+    else if (agent) parts.push(agent);
+    else if (model) parts.push(model);
+  }
+  return `[${parts.join(" | ")}]`;
 }
