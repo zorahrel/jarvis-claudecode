@@ -20,6 +20,11 @@ export type TaskNotificationStatus = "completed" | "failed" | "canceled";
 
 export interface TaskNotificationEnvelope {
   taskId: string | null;
+  /** tool_use id of the assistant turn that started this task — used to
+   *  correlate with the recorded start time for elapsed reporting and to
+   *  filter sync subagent calls (which also emit task-notifications) from
+   *  genuinely backgrounded ones. */
+  toolUseId: string | null;
   status: TaskNotificationStatus;
   summary: string | null;
   outputFile: string | null;
@@ -45,6 +50,7 @@ export function parseTaskNotificationFromText(text: string): TaskNotificationEnv
   if (!text || !text.includes(TASK_NOTIFICATION_MARKER)) return null;
   return {
     taskId: readTag(text, "task-id") ?? readTag(text, "task_id"),
+    toolUseId: readTag(text, "tool-use-id") ?? readTag(text, "tool_use_id"),
     status: normalizeStatus(readTag(text, "status")),
     summary: readTag(text, "summary"),
     outputFile: readTag(text, "output-file") ?? readTag(text, "output_file"),
@@ -75,6 +81,8 @@ export function extractTaskNotificationFromEvent(event: unknown): TaskNotificati
     const fromText = text ? parseTaskNotificationFromText(text) : null;
     return {
       taskId: (typeof e.task_id === "string" && e.task_id.trim()) || fromText?.taskId || null,
+      toolUseId:
+        (typeof e.tool_use_id === "string" && e.tool_use_id.trim()) || fromText?.toolUseId || null,
       status: normalizeStatus(
         (typeof e.status === "string" && e.status) || fromText?.status || "completed",
       ),
@@ -120,29 +128,37 @@ export function formatTaskNotificationMessage(env: TaskNotificationEnvelope): st
   return prefix;
 }
 
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 /**
  * ASCII-only footer aligned with `services/timings.ts` `formatTimingFooter`
  * (`[t X | tok N>M | agent/model]`) so a child notification visually matches
- * the regular agent footer — the user just sees an extra `child` token at
- * the end (and `child:failed` / `child:canceled` for non-completed paths).
+ * the regular agent footer with a `child` marker appended (and
+ * `child:failed` / `child:canceled` for non-completed paths).
  *
- * Background tasks are fire-and-forget so we have no `t` (no captured
- * MessageTimings for the subagent's own turn) and no `tok` (the CLI doesn't
- * expose subagent token usage in the task-notification envelope). Those
- * sections are omitted, matching how `formatTimingFooter` already drops
- * sections without data.
+ * Sections are omitted when data isn't available, matching how
+ * `formatTimingFooter` already drops empty sections. `tok` is currently
+ * always omitted — the CLI's task-notification envelope doesn't carry
+ * subagent token usage, so we'd be making numbers up.
  *
  * Examples:
- *   [jarvis/opus | child]
- *   [jarvis/opus | child:failed]
- *   [child]            // fallback when neither agent nor model are known
+ *   [t 8.4s | jarvis/opus | child]
+ *   [jarvis/opus | child:failed]      // start time wasn't captured
+ *   [child]                            // last-resort fallback
  */
 export function formatChildNotificationFooter(
   env: TaskNotificationEnvelope,
   agent?: string,
   model?: string,
+  durationMs?: number,
 ): string {
   const parts: string[] = [];
+  if (typeof durationMs === "number" && durationMs >= 0) {
+    parts.push(`t ${fmtMs(durationMs)}`);
+  }
   if (agent && model) parts.push(`${agent}/${model}`);
   else if (agent) parts.push(agent);
   else if (model) parts.push(model);
