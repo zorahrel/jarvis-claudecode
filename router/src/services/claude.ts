@@ -318,53 +318,85 @@ const pendingSummaries = new Map<string, { summary: string; compactionCount: num
 // `~/Library/Application Support/Claude/fcache` is the encrypted OAuth/MCP
 // token cache the bundled `claude` binary writes after `/mcp` auth completes.
 // When it changes, live SDK sessions still hold stale MCP connections (started
-// before auth → unauthorized). The SDK exposes `reconnectMcpServer(name)` on
-// the Query control channel — reconnects the MCP without killing the
-// subprocess, so the prompt cache is preserved.
-const FCACHE_PATH = join(homedir(), "Library", "Application Support", "Claude", "fcache");
+// before auth → unauthorized / failed). The SDK exposes
+// `reconnectMcpServer(name)` on the Query control channel — reconnects the MCP
+// without killing the subprocess, so the prompt cache and conversation
+// history are preserved.
+//
+// Implementation notes:
+//  - Watch the *parent directory*, not the file itself. fcache is rewritten
+//    via tmp+rename (atomic replace), and `fs.watch` on a path holds the
+//    inode — after the first replace the file-level watch goes silent.
+//  - Only reconnect servers whose status is `failed` or `needs-auth`. Healthy
+//    `connected` servers don't benefit from a reconnect and would needlessly
+//    drop their tool-side state.
+//  - Skip sessions that are mid-turn (pendingResolve != null). Reconnecting
+//    underneath an in-flight MCP tool call risks transport errors. The next
+//    sweep (or the user's next conversation) will pick them up.
+//  - Single in-flight sweep guard with rerun bit, so rapid-fire fcache
+//    changes coalesce into at most one trailing sweep.
+const FCACHE_DIR = join(homedir(), "Library", "Application Support", "Claude");
+const FCACHE_NAME = "fcache";
 let fcacheReloadTimer: NodeJS.Timeout | null = null;
+let fcacheSweeping = false;
+let fcacheRerun = false;
 
-async function reconnectAllMcpForLiveSessions(): Promise<void> {
-  for (const s of sessions.values()) {
-    if (!s.alive) continue;
-    let names: string[] = [];
-    try {
-      const status = await s.q.mcpServerStatus();
-      names = status.filter((m) => m.status !== "disabled").map((m) => m.name);
-    } catch (e) {
-      log.debug({ sessionKey: s.sessionKey, err: String(e) }, "mcpServerStatus failed; skipping reconnect for session");
-      continue;
-    }
-    for (const name of names) {
-      try {
-        await s.q.reconnectMcpServer(name);
-        log.info({ sessionKey: s.sessionKey, mcp: name }, "MCP reconnected after fcache change");
-      } catch (e) {
-        log.warn({ sessionKey: s.sessionKey, mcp: name, err: String(e) }, "MCP reconnect failed");
+async function reconnectStaleMcpForLiveSessions(): Promise<void> {
+  if (fcacheSweeping) { fcacheRerun = true; return; }
+  fcacheSweeping = true;
+  try {
+    do {
+      fcacheRerun = false;
+      const live = [...sessions.values()].filter((s) => s.alive && s.pendingResolve === null);
+      for (const s of live) {
+        if (!s.alive) continue; // raced with killSession
+        let stale: string[] = [];
+        try {
+          const status = await s.q.mcpServerStatus();
+          stale = status.filter((m) => m.status === "failed" || m.status === "needs-auth").map((m) => m.name);
+        } catch (e) {
+          log.debug({ sessionKey: s.sessionKey, err: String(e) }, "mcpServerStatus failed; skipping reconnect for session");
+          continue;
+        }
+        for (const name of stale) {
+          try {
+            await s.q.reconnectMcpServer(name);
+            log.info({ sessionKey: s.sessionKey, mcp: name }, "MCP reconnected after fcache change");
+          } catch (e) {
+            log.warn({ sessionKey: s.sessionKey, mcp: name, err: String(e) }, "MCP reconnect failed");
+          }
+        }
       }
-    }
+    } while (fcacheRerun);
+  } finally {
+    fcacheSweeping = false;
   }
 }
 
 function startFcacheWatcher(): void {
-  try {
-    statSync(FCACHE_PATH);
-  } catch {
-    log.debug({ path: FCACHE_PATH }, "fcache not present; MCP token watcher disabled");
+  if (process.platform !== "darwin") {
+    log.debug({ platform: process.platform }, "MCP token watcher only supports darwin (fcache path); skipping");
     return;
   }
   try {
-    fsWatch(FCACHE_PATH, { persistent: false }, () => {
-      // Debounce — fcache often gets multiple writes per auth flow.
+    statSync(FCACHE_DIR);
+  } catch {
+    log.debug({ path: FCACHE_DIR }, "fcache directory not present; MCP token watcher disabled");
+    return;
+  }
+  try {
+    fsWatch(FCACHE_DIR, { persistent: false }, (_event, filename) => {
+      if (filename !== FCACHE_NAME) return;
       if (fcacheReloadTimer) clearTimeout(fcacheReloadTimer);
+      // Debounce — auth flow emits multiple events (rename + close + chmod).
       fcacheReloadTimer = setTimeout(() => {
         fcacheReloadTimer = null;
-        reconnectAllMcpForLiveSessions().catch((e) =>
+        reconnectStaleMcpForLiveSessions().catch((e) =>
           log.warn({ err: String(e) }, "fcache-driven MCP reconnect sweep failed"),
         );
       }, 800);
     });
-    log.info({ path: FCACHE_PATH }, "Watching fcache for MCP OAuth token changes");
+    log.info({ dir: FCACHE_DIR, file: FCACHE_NAME }, "Watching fcache for MCP OAuth token changes");
   } catch (e) {
     log.warn({ err: String(e) }, "Failed to start fcache watcher");
   }
