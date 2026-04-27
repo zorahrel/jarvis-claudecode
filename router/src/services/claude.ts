@@ -13,7 +13,7 @@
  * `.planning/audit/sdk-migration.md`.
  */
 import { join } from "path";
-import { readFileSync, writeFileSync, statSync } from "fs";
+import { readFileSync, writeFileSync, statSync, watch as fsWatch } from "fs";
 import { homedir } from "os";
 import {
   query,
@@ -313,6 +313,64 @@ interface SdkSession {
 
 const sessions = new Map<string, SdkSession>();
 const pendingSummaries = new Map<string, { summary: string; compactionCount: number }>();
+
+// --- MCP OAuth token hot-reload ---
+// `~/Library/Application Support/Claude/fcache` is the encrypted OAuth/MCP
+// token cache the bundled `claude` binary writes after `/mcp` auth completes.
+// When it changes, live SDK sessions still hold stale MCP connections (started
+// before auth → unauthorized). The SDK exposes `reconnectMcpServer(name)` on
+// the Query control channel — reconnects the MCP without killing the
+// subprocess, so the prompt cache is preserved.
+const FCACHE_PATH = join(homedir(), "Library", "Application Support", "Claude", "fcache");
+let fcacheReloadTimer: NodeJS.Timeout | null = null;
+
+async function reconnectAllMcpForLiveSessions(): Promise<void> {
+  for (const s of sessions.values()) {
+    if (!s.alive) continue;
+    let names: string[] = [];
+    try {
+      const status = await s.q.mcpServerStatus();
+      names = status.filter((m) => m.status !== "disabled").map((m) => m.name);
+    } catch (e) {
+      log.debug({ sessionKey: s.sessionKey, err: String(e) }, "mcpServerStatus failed; skipping reconnect for session");
+      continue;
+    }
+    for (const name of names) {
+      try {
+        await s.q.reconnectMcpServer(name);
+        log.info({ sessionKey: s.sessionKey, mcp: name }, "MCP reconnected after fcache change");
+      } catch (e) {
+        log.warn({ sessionKey: s.sessionKey, mcp: name, err: String(e) }, "MCP reconnect failed");
+      }
+    }
+  }
+}
+
+function startFcacheWatcher(): void {
+  try {
+    statSync(FCACHE_PATH);
+  } catch {
+    log.debug({ path: FCACHE_PATH }, "fcache not present; MCP token watcher disabled");
+    return;
+  }
+  try {
+    fsWatch(FCACHE_PATH, { persistent: false }, () => {
+      // Debounce — fcache often gets multiple writes per auth flow.
+      if (fcacheReloadTimer) clearTimeout(fcacheReloadTimer);
+      fcacheReloadTimer = setTimeout(() => {
+        fcacheReloadTimer = null;
+        reconnectAllMcpForLiveSessions().catch((e) =>
+          log.warn({ err: String(e) }, "fcache-driven MCP reconnect sweep failed"),
+        );
+      }, 800);
+    });
+    log.info({ path: FCACHE_PATH }, "Watching fcache for MCP OAuth token changes");
+  } catch (e) {
+    log.warn({ err: String(e) }, "Failed to start fcache watcher");
+  }
+}
+
+startFcacheWatcher();
 
 // --- Build SDK Options from agent config ---
 function buildSdkOptions(opts: {
