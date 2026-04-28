@@ -2,8 +2,8 @@ import { readdirSync, readFileSync, existsSync, type Dirent } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { logger } from "./logger";
-import { clearHistory, getProcesses, sessionKey } from "./claude";
-import { clearSessionCache } from "./session-cache";
+import { clearHistoryByPrefix, getProcesses } from "./claude";
+import { clearSessionCacheByPrefix } from "./session-cache";
 import { queryCosts } from "./cost-tracker";
 
 const log = logger.child({ module: "slash-commands" });
@@ -294,9 +294,12 @@ function formatHelp(catalog: SlashCommand[], pageArg: string): string {
 }
 
 function formatClear(ctx: RouterCommandContext): string {
-  const key = sessionKey(ctx.channel, ctx.from, ctx.group);
-  clearHistory(key);
-  clearSessionCache(key);
+  const target = ctx.group ?? ctx.from;
+  // Slash runs before route resolution → wipe every agent-suffixed variant
+  // for this channel:target so the user gets a clean slate regardless of which
+  // agent the next message routes to.
+  clearHistoryByPrefix(ctx.channel, target);
+  clearSessionCacheByPrefix(ctx.channel, target);
   return "✅ Conversazione resettata. Ricomincio da capo al prossimo messaggio.";
 }
 
@@ -328,8 +331,13 @@ function formatCost(): string {
 
 function formatStatus(ctx: RouterCommandContext): string {
   const procs = getProcesses();
-  const key = sessionKey(ctx.channel, ctx.from, ctx.group);
-  const mine = procs.find(p => p.key === key);
+  const target = ctx.group ?? ctx.from;
+  const exact = `${ctx.channel}:${target}`;
+  const withAgent = `${exact}:`;
+  // Pick the most recently active session matching this chat across any agent.
+  const mine = procs
+    .filter(p => p.key === exact || p.key.startsWith(withAgent))
+    .sort((a, b) => b.lastMessageAt - a.lastMessageAt)[0];
   const uptime = process.uptime();
   const uptimeStr = uptime > 3600
     ? `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`

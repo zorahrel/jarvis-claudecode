@@ -147,8 +147,8 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   // Preserve a route-shaped object downstream so existing code referencing `route.agent` still works
   const route = { agent } as { agent: typeof agent; action?: undefined };
 
-  const key = sessionKey(msg.channel, msg.from, msg.group);
   const agentName = basename(route.agent.workspace);
+  const key = sessionKey(msg.channel, msg.from, msg.group, agentName);
 
   // Initialize timings (media phase already populated by connector if present)
   const timings: MessageTimings = msg.timings ?? { received: Date.now() };
