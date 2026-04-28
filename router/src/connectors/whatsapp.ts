@@ -363,6 +363,53 @@ export class WhatsAppConnector implements Connector {
     } catch (err) {
       log.error({ err }, "Error processing WhatsApp media");
     }
+
+    // Quoted media — when the user replies to an audio/image/document with
+    // something like "@jarvis trascrivi", we need the quoted attachment to be
+    // processed too. Without this the agent only sees the reply text and has
+    // no idea what to transcribe / look at.
+    const quotedWm = ctxInfo?.quotedMessage;
+    if (quotedWm && quotedMessage) {
+      const qHasVoice = !!(quotedWm.audioMessage || quotedWm.pttMessage);
+      const qHasImage = !!quotedWm.imageMessage;
+      const qHasDoc = !!quotedWm.documentMessage;
+      if (qHasVoice || qHasImage || qHasDoc) {
+        const fakeMsg: any = {
+          key: {
+            remoteJid: jid,
+            id: ctxInfo!.stanzaId ?? undefined,
+            fromMe: ctxInfo!.participant === this.selfJid,
+            participant: ctxInfo!.participant ?? undefined,
+          },
+          message: quotedWm,
+        };
+        const quotedMedia: MediaAttachment[] = [];
+        try {
+          if (qHasVoice && hasVoice) {
+            const buffer = await downloadMediaMessage(fakeMsg, "buffer", {});
+            const path = saveMedia(buffer as Buffer, "quoted-voice.ogg");
+            const processed = await processMedia("voice", path);
+            quotedMedia.push({ type: "voice", processedText: processed });
+          }
+          if (qHasImage && hasVision) {
+            const buffer = await downloadMediaMessage(fakeMsg, "buffer", {});
+            const path = saveMedia(buffer as Buffer, "quoted-image.jpg");
+            const processed = await processMedia("image", path);
+            quotedMedia.push({ type: "image", processedText: processed, localPath: path });
+          }
+          if (qHasDoc) {
+            const buffer = await downloadMediaMessage(fakeMsg, "buffer", {});
+            const fname = quotedWm.documentMessage!.fileName || "quoted-document";
+            const path = saveMedia(buffer as Buffer, fname);
+            const processed = await processMedia("document", path, quotedWm.documentMessage!.mimetype || undefined);
+            quotedMedia.push({ type: "document", processedText: processed, fileName: fname });
+          }
+        } catch (err) {
+          log.warn({ err }, "Failed to download/process quoted media");
+        }
+        if (quotedMedia.length > 0) quotedMessage.media = quotedMedia;
+      }
+    }
     if (willProcess) timings.mediaEnd = Date.now();
 
     // Attach timings to waMsg so dispatch can propagate them
