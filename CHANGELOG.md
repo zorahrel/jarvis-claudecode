@@ -5,6 +5,34 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Security
+- **Per-agent session isolation.** `sessionKey()` now embeds the resolved agent
+  name (`channel:target:agent` instead of `channel:target`) so chats that match
+  multiple routes — for example a guild where owner messages route to one
+  agent (with `fullAccess`) and other members route to a more scoped agent —
+  get separate sessions. Previously the first sender to spawn a session bound
+  the guild's session-key to their agent, and any subsequent member messaging
+  in the same guild reused that session, inheriting the previous agent's
+  identity, MCP servers, and OAuth credentials. `getOrCreateSession()` also
+  gained a defense-in-depth guard that kills+respawns when the cached
+  session's workspace / fullAccess / inheritUserScope drifts from what the
+  current route requested. `/clear` and `/status` now match by
+  `channel:target` prefix across all agent variants.
+
+### Added
+- **Read access to the shared media directory** for agents holding `vision`,
+  `voice`, or `documents` tools (and any `fullAccess` agent). Connectors save
+  user attachments to `~/.claude/jarvis/media/{ts}-...` and append the absolute
+  path to the prompt; without `additionalDirectories`, the SDK's Read tool
+  refused paths outside cwd and agents replied with permission errors. Now
+  wired via the SDK's `additionalDirectories` option.
+- **Quoted media download on WhatsApp.** Replying to an audio/image/document
+  with e.g. "@jarvis trascrivi" now downloads and processes the *quoted*
+  attachment too — previously only the reply text reached the agent so it had
+  no idea what to act on. Implemented by reconstructing a Baileys `WAMessage`
+  shape from `contextInfo.stanzaId` + `participant` and feeding it to
+  `downloadMediaMessage()` plus the existing `processMedia()` pipeline.
+
 ### Changed
 - **Claude integration migrated from CLI spawn to `@anthropic-ai/claude-agent-sdk`.**
   `router/src/services/claude.ts` was reimplemented on top of the official SDK
