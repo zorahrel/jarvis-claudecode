@@ -280,6 +280,7 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
           job.delivery.channel,
           job.delivery.target,
           isGroup ? job.delivery.target : undefined,
+          agentName,
         );
         recordExchange(key, `[cron:${job.name}]`, res.result);
       } catch (err: any) {

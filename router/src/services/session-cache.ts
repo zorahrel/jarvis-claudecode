@@ -4,7 +4,7 @@
  * the last N exchanges are injected as context into the new process.
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { logger } from "./logger";
 
@@ -150,6 +150,25 @@ export function clearSessionCache(key: string): void {
     const file = keyToFile(key);
     if (existsSync(file)) {
       unlinkSync(file);
+    }
+  } catch {}
+}
+
+/** Clear all session caches whose key starts with `${channel}:${target}` —
+ *  matches both legacy `channel:target.json` files and new agent-suffixed
+ *  `channel:target:agent.json` variants. Used by `/clear`. */
+export function clearSessionCacheByPrefix(channel: string, target: string): void {
+  try {
+    const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_:-]/g, "_");
+    const exact = `${sanitize(channel)}:${sanitize(target)}`;
+    const withAgent = `${exact}:`;
+    if (!existsSync(CACHE_DIR)) return;
+    for (const name of readdirSync(CACHE_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      const stem = name.slice(0, -5);
+      if (stem === exact || stem.startsWith(withAgent)) {
+        try { unlinkSync(join(CACHE_DIR, name)); } catch {}
+      }
     }
   } catch {}
 }

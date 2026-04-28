@@ -27,6 +27,7 @@ import type { AgentConfig } from "../types";
 import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
+import { MEDIA_DIR } from "./media";
 import { issueToken, revokeToken } from "./notify-tokens";
 import { resetNotifyBudget, hasNotifyBudget, consumeNotifyBudget } from "./rate-limiter";
 import { shouldCompact } from "./context";
@@ -303,6 +304,9 @@ interface SdkSession {
   lifetimeTimer: NodeJS.Timeout | null;
   notifyToken: string | null;
   isSubagent: boolean;
+  /** Captured at spawn time so we can detect agent-config drift on reuse. */
+  fullAccess: boolean;
+  inheritUserScope: boolean;
   totalInputTokens: number;
   compactionCount: number;
   lastSummary?: string;
@@ -451,6 +455,16 @@ function buildSdkOptions(opts: {
     ...(opts.isSubagent ? { append: SUBAGENT_SYSTEM_PROMPT } : {}),
   };
 
+  // Grant Read access to the shared media drop for agents that handle user
+  // attachments. Connectors save images/voice/docs to MEDIA_DIR and append the
+  // absolute paths to the prompt; without this, the Read tool refuses paths
+  // outside cwd and the agent ends up apologising for missing access.
+  const hasMediaTool = opts.fullAccess
+    || opts.tools.includes("vision")
+    || opts.tools.includes("voice")
+    || opts.tools.includes("documents");
+  const additionalDirectories = hasMediaTool ? [MEDIA_DIR] : undefined;
+
   const sdkOpts: SdkOptions = {
     cwd: opts.workspace,
     permissionMode,
@@ -463,15 +477,25 @@ function buildSdkOptions(opts: {
     ...(opts.effort ? { effort: opts.effort } : {}),
     ...(mcpServers ? { mcpServers } : {}),
     ...(disallowedTools ? { disallowedTools } : {}),
+    ...(additionalDirectories ? { additionalDirectories } : {}),
   };
   return sdkOpts;
 }
 
 // --- Session key parser (mirror of cli adapter) ---
-function parseSessionKey(key: string): { channel: string; target: string } | null {
-  const idx = key.indexOf(":");
-  if (idx <= 0 || idx === key.length - 1) return null;
-  return { channel: key.slice(0, idx), target: key.slice(idx + 1) };
+function parseSessionKey(key: string): { channel: string; target: string; agent?: string } | null {
+  const parts = key.split(":");
+  if (parts.length < 2) return null;
+  const channel = parts[0];
+  if (!channel) return null;
+  if (parts.length === 2) {
+    return parts[1] ? { channel, target: parts[1] } : null;
+  }
+  // 3+ parts: agent is the trailing segment, target is everything between.
+  const agent = parts[parts.length - 1];
+  const target = parts.slice(1, -1).join(":");
+  if (!target || !agent) return null;
+  return { channel, target, agent };
 }
 
 // --- Task-notification handler (same body as CLI adapter) ---
@@ -598,6 +622,8 @@ function spawnSession(
     lifetimeTimer: null,
     notifyToken,
     isSubagent: !!isSubagent,
+    fullAccess: !!fullAccess,
+    inheritUserScope: inheritUserScope !== false,
     totalInputTokens: 0,
     compactionCount: 0,
     pid: null,
@@ -761,8 +787,32 @@ function getOrCreateSession(
   inheritUserScope?: boolean, isSubagent?: boolean,
 ): SdkSession {
   const existing = sessions.get(key);
-  if (existing && existing.alive) return existing;
-  if (existing) { killSession(existing); sessions.delete(key); }
+  if (existing && existing.alive) {
+    // Agent-config drift detection: if the same key was spawned earlier with a
+    // different agent (workspace/fullAccess/inheritUserScope), kill+respawn so
+    // we don't leak the previous agent's identity / MCP credentials. With the
+    // agent-suffixed sessionKey this should already be impossible, but keep the
+    // guard as defense-in-depth in case a caller forgets the suffix.
+    const wantInherit = inheritUserScope !== false;
+    if (
+      existing.workspace !== workspace ||
+      existing.fullAccess !== !!fullAccess ||
+      existing.inheritUserScope !== wantInherit
+    ) {
+      log.warn({
+        key,
+        existing: { workspace: existing.workspace, fullAccess: existing.fullAccess, inheritUserScope: existing.inheritUserScope },
+        requested: { workspace, fullAccess: !!fullAccess, inheritUserScope: wantInherit },
+      }, "Session agent-config mismatch — respawning to avoid identity leak");
+      killSession(existing);
+      sessions.delete(key);
+    } else {
+      return existing;
+    }
+  } else if (existing) {
+    killSession(existing);
+    sessions.delete(key);
+  }
 
   const mcpCount = tools.filter(t => t.startsWith("mcp:")).length;
   log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false, isSubagent: !!isSubagent }, "Spawning new SDK session");
@@ -899,8 +949,20 @@ const queues = new Map<string, Promise<void>>();
 
 // --- Public API ---
 
-export function sessionKey(channel: string, from: string, group?: string): string {
-  return group ? `${channel}:${group}` : `${channel}:${from}`;
+/**
+ * Session key shape: `${channel}:${target}:${agent}` (3 parts) when an agent
+ * is known, falling back to `${channel}:${target}` for legacy callers (slash
+ * commands resolve before route matching, dashboard notify-budget etc).
+ *
+ * Including `agent` is a security boundary: two routes that share the same
+ * channel:target (e.g. owner messages in a guild routed to a privileged
+ * agent, other members in the same guild routed to a scoped agent) MUST
+ * get separate sessions, otherwise the first to spawn leaks its identity
+ * and MCP credentials to subsequent senders.
+ */
+export function sessionKey(channel: string, from: string, group?: string, agent?: string): string {
+  const target = group ?? from;
+  return agent ? `${channel}:${target}:${agent}` : `${channel}:${target}`;
 }
 
 export async function askClaude(
@@ -1144,6 +1206,28 @@ export async function askClaudeFresh(
 export function clearHistory(key: string): void {
   const s = sessions.get(key);
   if (s) { killSession(s); sessions.delete(key); }
+}
+
+/**
+ * Clear every session whose key starts with `${channel}:${target}` — used by
+ * `/clear` since slash commands run before route resolution and don't know
+ * which agent suffix is on the live session.
+ *
+ * Returns the keys that were cleared so callers can also wipe their own
+ * sidecar caches (session-cache disk files).
+ */
+export function clearHistoryByPrefix(channel: string, target: string): string[] {
+  const prefixExact = `${channel}:${target}`;
+  const prefixWithAgent = `${prefixExact}:`;
+  const cleared: string[] = [];
+  for (const key of Array.from(sessions.keys())) {
+    if (key === prefixExact || key.startsWith(prefixWithAgent)) {
+      const s = sessions.get(key);
+      if (s) { killSession(s); sessions.delete(key); }
+      cleared.push(key);
+    }
+  }
+  return cleared;
 }
 
 export function killAllProcesses(): void {
