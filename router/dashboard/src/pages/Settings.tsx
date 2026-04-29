@@ -8,6 +8,7 @@ import { Badge } from '../components/ui/Badge'
 import { Card } from '../components/ui/Card'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Textarea } from '../components/ui/Field'
+import { AllowedCallers } from '../components/AllowedCallers'
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -84,11 +85,14 @@ export function Settings({ onToast }: { onToast: (msg: string, type: 'success' |
       />
 
       <InfoBox title="Where to find things">
-        WhatsApp callers & reply groups in <a href="#channels" style={linkStyle}>Channels</a>.
+        Always-reply groups in <a href="#routes" style={linkStyle}>Routes</a>.
+        WhatsApp pairing in <a href="#channels" style={linkStyle}>Channels</a> → ⚙️.
         Email accounts in <a href="#tools" style={linkStyle}>Tools</a>. Memory scopes in{' '}
         <a href="#memory" style={linkStyle}>Memory</a>. Global CLAUDE.md in{' '}
         <a href="#agents" style={linkStyle}>Agents</a>. Costs in <a href="#analytics" style={linkStyle}>Analytics</a>.
       </InfoBox>
+
+      <AllowedCallers onToast={onToast} />
 
       {/* Hooks */}
       <Card padding={16}>

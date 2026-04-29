@@ -12,6 +12,7 @@ import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
 import { AgentName } from '../components/ui/AgentName'
 import { Field, Input, Select } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
+import { AlwaysReplyGroups } from '../components/AlwaysReplyGroups'
 import type { FullRoute, ProcessSession } from '../api/client'
 import { ChannelIcon } from '../icons'
 import { parseHashFilter } from '../lib/hashFilter'
@@ -297,6 +298,8 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
         A route is a thin matcher: <code style={codeInline}>(channel, from/group/jid) → agent</code>. Everything else
         (model, tools, MCP, fullAccess) lives in the agent's <code style={codeInline}>agent.yaml</code> — click the agent to jump to its config.
       </InfoBox>
+
+      <AlwaysReplyGroups onToast={onToast} />
 
       {/* Route list */}
       <div

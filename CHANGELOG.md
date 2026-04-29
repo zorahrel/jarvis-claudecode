@@ -20,6 +20,17 @@ Dates are ISO (YYYY-MM-DD).
   `channel:target` prefix across all agent variants.
 
 ### Added
+- **WhatsApp re-pairing from the dashboard.** Channels → ⚙️ on the WhatsApp
+  card opens a settings modal with the pairing flow: QR (rendered inline) or
+  8-char pairing code (enter your phone, then type the code on the phone).
+  Live status via SSE on `/api/whatsapp/events`; relink wipes `wa-auth/` and
+  reconnects without restarting the router (Telegram/Discord stay up). New
+  endpoints: `GET /api/whatsapp/status`, `POST /api/whatsapp/relink`,
+  `GET /api/whatsapp/events`.
+- **Always-reply groups** moved to the **Routes** page (it's a routing rule,
+  not a channel config). **Allowed callers** moved to **Settings** (it's
+  channel-agnostic — `@jarvis` invocations apply to any channel that adds
+  it later).
 - **Read access to the shared media directory** for agents holding `vision`,
   `voice`, or `documents` tools (and any `fullAccess` agent). Connectors save
   user attachments to `~/.claude/jarvis/media/{ts}-...` and append the absolute

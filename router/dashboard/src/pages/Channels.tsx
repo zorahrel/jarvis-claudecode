@@ -1,33 +1,24 @@
 import { useState, useCallback, useEffect } from 'react'
-import { ChevronDown, ChevronUp, X, RefreshCw } from 'lucide-react'
+import { ChevronDown, ChevronUp, RefreshCw, Settings } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
 import type { Channel, DashboardState, Route } from '../api/client'
 import { ChannelIcon } from '../icons'
-import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
+import { PageHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { IconButton } from '../components/ui/IconButton'
 import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { EmptyState } from '../components/ui/EmptyState'
-import { Input } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
+import { WhatsAppSettingsModal } from '../components/WhatsAppSettingsModal'
 import { Tooltip } from '../components/ui/Tooltip'
 import { parseHashFocus } from '../lib/hashFilter'
 
 interface ChannelCostAgg {
   key: string
   totalCost: number
-}
-
-async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json()
 }
 
 export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' | 'error' | 'info') => void }) {
@@ -71,82 +62,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
-  // WhatsApp-specific config (allowed callers + always-reply groups)
-  const [callers, setCallers] = useState<string[]>([])
-  const [alwaysReplyGroups, setAlwaysReplyGroups] = useState<string[]>([])
-  const [newCaller, setNewCaller] = useState('')
-  const [newAlwaysReply, setNewAlwaysReply] = useState('')
-  const [addingCaller, setAddingCaller] = useState(false)
-  const [addingReply, setAddingReply] = useState(false)
-
-  useEffect(() => {
-    apiFetch<Record<string, unknown>>('/api/dashboard-state')
-      .then((d) => {
-        setCallers((d.callers as string[]) || [])
-        setAlwaysReplyGroups((d.alwaysReplyGroups as string[]) || [])
-      })
-      .catch(() => {})
-  }, [])
-
-  const addCaller = async () => {
-    const phone = newCaller.trim()
-    if (!phone) return
-    setAddingCaller(true)
-    try {
-      const r = await apiFetch<{ callers: string[] }>('/api/config/callers', {
-        method: 'POST',
-        body: JSON.stringify({ phone }),
-      })
-      setCallers(r.callers)
-      setNewCaller('')
-      onToast?.('Caller added: ' + phone, 'success')
-    } catch (e: unknown) {
-      onToast?.(e instanceof Error ? e.message : String(e), 'error')
-    }
-    setAddingCaller(false)
-  }
-
-  const removeCaller = async (phone: string) => {
-    try {
-      const r = await apiFetch<{ callers: string[] }>('/api/config/callers/' + encodeURIComponent(phone), {
-        method: 'DELETE',
-      })
-      setCallers(r.callers)
-      onToast?.('Caller removed', 'success')
-    } catch (e: unknown) {
-      onToast?.(e instanceof Error ? e.message : String(e), 'error')
-    }
-  }
-
-  const addAlwaysReply = async () => {
-    const group = newAlwaysReply.trim()
-    if (!group) return
-    setAddingReply(true)
-    try {
-      const r = await apiFetch<{ groups: string[] }>('/api/config/always-reply', {
-        method: 'POST',
-        body: JSON.stringify({ group }),
-      })
-      setAlwaysReplyGroups(r.groups)
-      setNewAlwaysReply('')
-      onToast?.('Always-reply group added', 'success')
-    } catch (e: unknown) {
-      onToast?.(e instanceof Error ? e.message : String(e), 'error')
-    }
-    setAddingReply(false)
-  }
-
-  const removeAlwaysReply = async (group: string) => {
-    try {
-      const r = await apiFetch<{ groups: string[] }>('/api/config/always-reply/' + encodeURIComponent(group), {
-        method: 'DELETE',
-      })
-      setAlwaysReplyGroups(r.groups)
-      onToast?.('Group removed', 'success')
-    } catch (e: unknown) {
-      onToast?.(e instanceof Error ? e.message : String(e), 'error')
-    }
-  }
+  const [waSettingsOpen, setWaSettingsOpen] = useState(false)
 
   if (loading) return <div style={{ color: 'var(--text-4)' }}>Loading…</div>
 
@@ -273,9 +189,31 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                     />
                   )}
                 </div>
+                {ch.name === 'whatsapp' && (
+                  <Tooltip content="WhatsApp settings (pairing, callers, groups)" placement="top">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setWaSettingsOpen(true) }}
+                      aria-label="WhatsApp settings"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        background: 'transparent',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        color: 'var(--text-3)',
+                        cursor: 'pointer',
+                        padding: 4,
+                        marginLeft: 6,
+                      }}
+                    >
+                      <Settings size={13} />
+                    </button>
+                  </Tooltip>
+                )}
                 <span
                   aria-hidden
-                  style={{ display: 'inline-flex', color: 'var(--text-4)', marginLeft: sessions.length > 0 ? 6 : 0 }}
+                  style={{ display: 'inline-flex', color: 'var(--text-4)', marginLeft: sessions.length > 0 ? 6 : 4 }}
                 >
                   {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                 </span>
@@ -416,96 +354,6 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                     </a>.
                   </div>
 
-                  {/* WhatsApp-specific: callers + always-reply groups */}
-                  {ch.name === 'whatsapp' && (
-                    <>
-                      <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-                        <SectionHeader title="Allowed callers" count={callers.length} />
-                        <div style={{ fontSize: 11, color: 'var(--text-4)', marginBottom: 8, lineHeight: 1.5 }}>
-                          Phone numbers authorized for voice calls.
-                        </div>
-                        {callers.length > 0 && (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
-                            {callers.map((c) => (
-                              <div
-                                key={c}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 8,
-                                  padding: '5px 10px',
-                                  fontSize: 12,
-                                  background: 'var(--bg-0)',
-                                  border: '1px solid var(--border)',
-                                  borderRadius: 'var(--radius-sm)',
-                                }}
-                              >
-                                <span style={{ fontFamily: 'var(--mono)', color: 'var(--text-2)', flex: 1 }}>{c}</span>
-                                <Button size="xs" variant="danger-ghost" onClick={(e) => { e.stopPropagation(); removeCaller(c) }}><X size={12} /></Button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        <div style={{ display: 'flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                          <Input
-                            type="text"
-                            value={newCaller}
-                            onChange={(e) => setNewCaller(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && addCaller()}
-                            placeholder="+1234567890"
-                            style={{ flex: 1, padding: '5px 10px', fontSize: 11 }}
-                          />
-                          <Button size="xs" variant="primary" onClick={(e) => { e.stopPropagation(); addCaller() }} loading={addingCaller}>
-                            Add
-                          </Button>
-                        </div>
-                      </div>
-
-                      <div style={{ marginTop: 14 }}>
-                        <SectionHeader title="Always-reply groups" count={alwaysReplyGroups.length} />
-                        <div style={{ fontSize: 11, color: 'var(--text-4)', marginBottom: 8, lineHeight: 1.5 }}>
-                          Groups where Jarvis replies to every message.
-                        </div>
-                        {alwaysReplyGroups.length > 0 && (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
-                            {alwaysReplyGroups.map((g) => (
-                              <div
-                                key={g}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 8,
-                                  padding: '5px 10px',
-                                  fontSize: 12,
-                                  background: 'var(--bg-0)',
-                                  border: '1px solid var(--border)',
-                                  borderRadius: 'var(--radius-sm)',
-                                }}
-                              >
-                                <span style={{ fontFamily: 'var(--mono)', color: 'var(--text-2)', fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }} title={g}>
-                                  {g}
-                                </span>
-                                <Button size="xs" variant="danger-ghost" onClick={(e) => { e.stopPropagation(); removeAlwaysReply(g) }}><X size={12} /></Button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        <div style={{ display: 'flex', gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                          <Input
-                            type="text"
-                            value={newAlwaysReply}
-                            onChange={(e) => setNewAlwaysReply(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && addAlwaysReply()}
-                            placeholder="120363xxx@g.us"
-                            style={{ flex: 1, padding: '5px 10px', fontSize: 11 }}
-                          />
-                          <Button size="xs" variant="primary" onClick={(e) => { e.stopPropagation(); addAlwaysReply() }} loading={addingReply}>
-                            Add
-                          </Button>
-                        </div>
-                      </div>
-                    </>
-                  )}
                 </div>
               )}
             </Card>
@@ -516,6 +364,12 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
       {channelList.length === 0 && (
         <EmptyState title="No channels configured" hint="Add a Telegram, WhatsApp, or Discord token in config.yaml." />
       )}
+
+      <WhatsAppSettingsModal
+        open={waSettingsOpen}
+        onClose={() => setWaSettingsOpen(false)}
+        onToast={onToast}
+      />
     </div>
   )
 }
