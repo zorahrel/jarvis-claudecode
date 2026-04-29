@@ -6,13 +6,13 @@ loadDotEnv({ path: join(import.meta.dirname ?? __dirname, "..", ".env") });
 
 import { loadConfig, watchConfig, onConfigChange, expandHome } from "./services/config-loader";
 import { startDashboard } from "./dashboard/server";
-import { WhatsAppConnector, TelegramConnector, DiscordConnector } from "./connectors";
+import { WhatsAppConnector, TelegramConnector, DiscordConnector, NotchConnector } from "./connectors";
 import type { Connector } from "./connectors";
 import { initCrons, stopCrons, setDeliveryFn } from "./services/cron";
 import { acquirePid, releasePid } from "./services/pid";
 import { logger } from "./services/logger";
 import { activeCount, activeJobs, loadPersistedJobs, clearPersistedJobs, type PendingJob } from "./services/pending-jobs";
-import { killAllProcesses } from "./services/claude";
+import { killAllProcesses, getDiagnostics } from "./services/claude";
 import { ensureHooksInstalled } from "./services/localSessions";
 
 const log = logger.child({ module: "main" });
@@ -101,6 +101,18 @@ async function main() {
     );
   }
 
+  // Notch (Noce) is always-on unless explicitly disabled. No external client
+  // to fail, so it's cheap to keep running even when the Notch UI isn't open.
+  if (config.channels.notch?.enabled !== false) {
+    const n = new NotchConnector(config);
+    connectors.push(n);
+    try {
+      await n.start();
+    } catch (err) {
+      log.error({ err }, "Failed to start Notch connector");
+    }
+  }
+
   // Set up cron delivery function
   setDeliveryFn(async (channel: string, target: string, text: string) => {
     for (const c of connectors) {
@@ -164,6 +176,70 @@ async function main() {
   process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
 
   log.info("Jarvis Router ready — %d connectors active", connectors.length);
+
+  // Memory guard + leak forensics.
+  //
+  // Background: V8 default heap (~4GB) caused OOM crashes after long uptime.
+  // We boot with --max-old-space-size=8192 and proactively act on three thresholds:
+  //
+  //   ≥10 ticks (~10 min) or RSS > 2GB → log heap + diagnostics (sessions/queues/etc)
+  //   RSS > 3GB (one-shot per process) → dump heap snapshot to disk for forensics
+  //   RSS > 6GB                        → SIGTERM → graceful shutdown → launchd restart
+  //
+  // The 3GB snapshot is a one-shot because writeHeapSnapshot blocks the event loop
+  // for several seconds and writes ~RSS bytes to disk. Open it in Chrome DevTools
+  // (Memory tab → Load) to identify retainers.
+  const MEMORY_GUARD_RSS_BYTES = 6 * 1024 * 1024 * 1024; // 6GB
+  const MEMORY_SNAPSHOT_RSS_BYTES = 3 * 1024 * 1024 * 1024; // 3GB
+  const MEMORY_LOG_RSS_BYTES = 2 * 1024 * 1024 * 1024;   // 2GB
+  let memTickCount = 0;
+  let snapshotTaken = false;
+  const memTimer = setInterval(() => {
+    const m = process.memoryUsage();
+    memTickCount++;
+    const shouldLog = memTickCount % 10 === 0 || m.rss > MEMORY_LOG_RSS_BYTES;
+    if (shouldLog) {
+      let diag: ReturnType<typeof getDiagnostics> | { error: string };
+      try { diag = getDiagnostics(); } catch (err) { diag = { error: String(err) }; }
+      log.info(
+        {
+          rssMB: Math.round(m.rss / 1024 / 1024),
+          heapUsedMB: Math.round(m.heapUsed / 1024 / 1024),
+          heapTotalMB: Math.round(m.heapTotal / 1024 / 1024),
+          externalMB: Math.round(m.external / 1024 / 1024),
+          arrayBuffersMB: Math.round(m.arrayBuffers / 1024 / 1024),
+          diag,
+          uptimeSec: Math.round(process.uptime()),
+        },
+        "memory snapshot",
+      );
+    }
+    if (!snapshotTaken && m.rss > MEMORY_SNAPSHOT_RSS_BYTES) {
+      snapshotTaken = true;
+      // Async-import v8 + write off the timer tick; writeHeapSnapshot blocks ~5-15s
+      // but better to grab it now than miss the chance before the 6GB SIGTERM.
+      void (async () => {
+        try {
+          const v8 = await import("v8");
+          const ts = new Date().toISOString().replace(/[:.]/g, "-");
+          const path = `/Users/zorahrel/.claude/jarvis/logs/heap-${ts}.heapsnapshot`;
+          log.warn({ rssMB: Math.round(m.rss / 1024 / 1024), path }, "Writing heap snapshot for leak forensics — event loop will pause briefly");
+          v8.writeHeapSnapshot(path);
+          log.warn({ path }, "Heap snapshot written — open in Chrome DevTools (Memory → Load)");
+        } catch (err) {
+          log.error({ err }, "Failed to write heap snapshot");
+        }
+      })();
+    }
+    if (m.rss > MEMORY_GUARD_RSS_BYTES && !shuttingDown) {
+      log.error(
+        { rssMB: Math.round(m.rss / 1024 / 1024), thresholdMB: Math.round(MEMORY_GUARD_RSS_BYTES / 1024 / 1024) },
+        "Memory guard tripped — triggering graceful restart via SIGTERM",
+      );
+      process.kill(process.pid, "SIGTERM");
+    }
+  }, 60_000);
+  memTimer.unref();
 
   // Install jarvis-control status hooks for local session discovery.
   // Best-effort — failure just means the dashboard falls back to heuristic status.
