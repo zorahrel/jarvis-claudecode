@@ -79,7 +79,7 @@ export function WhatsAppPairing({ onToast }: { onToast?: (msg: string, type: 'su
       }
       const r = await fetch('/api/whatsapp/relink', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Confirm': 'true' },
         body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)

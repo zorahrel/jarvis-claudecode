@@ -1687,6 +1687,9 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     json(req, res, wa.getStatus());
 
   } else if (path === "/api/whatsapp/relink" && req.method === "POST") {
+    // Destructive: wipes wa-auth/ on disk. Gate behind X-Confirm: true header,
+    // matching the convention used by every other destructive endpoint here.
+    if (!requireConfirm(req, res)) return;
     const wa = WhatsAppConnector.getInstance();
     if (!wa) { json(req, res, { error: "whatsapp connector not running" }, 503); return; }
     let body: { phoneNumber?: string } = {};
