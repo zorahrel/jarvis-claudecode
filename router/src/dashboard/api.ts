@@ -26,6 +26,12 @@ import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, 
 import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
 import { getAllServices, generatePlist } from "../services/services";
 import { discoverLocalSessions, dispatchOpenTarget, availableTargets, type OpenTargetId } from "../services/localSessions";
+import { subscribe as subscribeNotch, emitNotch } from "../notch/events";
+import { NotchConnector } from "../connectors/notch";
+import { WhatsAppConnector } from "../connectors/whatsapp";
+import { readHistory, clearHistory } from "../notch/history";
+import { getPrefs, setPrefs } from "../notch/prefs";
+import { speakToFile } from "../services/tts";
 
 const log = logger.child({ module: "dashboard" });
 const HOME = process.env.HOME!;
@@ -1674,6 +1680,302 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
   } else if (path === "/api/logs" && req.method === "DELETE") {
     clearLogEntries();
     json(req, res, { ok: true });
+
+  } else if (path === "/api/whatsapp/status" && req.method === "GET") {
+    const wa = WhatsAppConnector.getInstance();
+    if (!wa) { json(req, res, { status: "idle", error: "whatsapp connector not running", updatedAt: Date.now() }); return; }
+    json(req, res, wa.getStatus());
+
+  } else if (path === "/api/whatsapp/relink" && req.method === "POST") {
+    const wa = WhatsAppConnector.getInstance();
+    if (!wa) { json(req, res, { error: "whatsapp connector not running" }, 503); return; }
+    let body: { phoneNumber?: string } = {};
+    try { body = await parseBody(req); } catch {}
+    const phone = body.phoneNumber?.toString().trim();
+    // Fire-and-forget — the dashboard subscribes to /api/whatsapp/events for the
+    // QR/code/connected transitions, so the HTTP call returns instantly.
+    wa.relink({ phoneNumber: phone || undefined }).catch((err) => {
+      log.error({ err }, "whatsapp relink failed");
+    });
+    json(req, res, { ok: true });
+
+  } else if (path === "/api/whatsapp/events" && req.method === "GET") {
+    const wa = WhatsAppConnector.getInstance();
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": corsOrigin(req),
+    });
+    res.write(`: whatsapp stream open\n\n`);
+    if (wa) {
+      try { res.write(`data: ${JSON.stringify(wa.getStatus())}\n\n`); } catch {}
+    } else {
+      try { res.write(`data: ${JSON.stringify({ status: "idle", error: "connector not running", updatedAt: Date.now() })}\n\n`); } catch {}
+    }
+    const onStatus = (snap: unknown) => {
+      try { res.write(`data: ${JSON.stringify(snap)}\n\n`); } catch {}
+    };
+    wa?.events.on("status", onStatus);
+    const ping = setInterval(() => { try { res.write(`: ping\n\n`); } catch {} }, 25_000);
+    req.on("close", () => { clearInterval(ping); wa?.events.off("status", onStatus); });
+
+  } else if (path === "/api/notch/stream" && req.method === "GET") {
+    // SSE feed consumed by the notch.js orb (native WKWebView + dashboard
+    // iframe mirror). Writes each NotchEvent as JSON on a single `data:` line,
+    // per the EventSource protocol. Heartbeats every 25 s keep intermediate
+    // proxies from killing the connection; the client re-subscribes on error
+    // with a backoff so a dropped stream is self-healing.
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": corsOrigin(req),
+    });
+    res.write(`: notch stream open\n\n`);
+    const unsub = subscribeNotch((event) => {
+      try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {}
+    });
+    const ping = setInterval(() => { try { res.write(`: ping\n\n`); } catch {} }, 25_000);
+    req.on("close", () => { clearInterval(ping); unsub(); });
+
+  } else if (path === "/api/notch/send" && req.method === "POST") {
+    let body: { text?: string; from?: string };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const text = (body.text ?? "").toString().trim();
+    if (!text) { json(req, res, { error: "missing text" }, 400); return; }
+    const connector = NotchConnector.getInstance();
+    if (!connector) { json(req, res, { error: "notch connector not running" }, 503); return; }
+    // Fire-and-forget: the assistant reply flows back through `emitNotch`
+    // (message.in), so we don't block the HTTP response on it.
+    connector.inject(text, body.from ?? "notch").catch(() => {});
+    json(req, res, { ok: true });
+
+  } else if (path === "/api/notch/history" && req.method === "GET") {
+    // Persistent chat log — tail of the notch-history JSONL. The default 100
+    // records is enough to rehydrate both the native WKWebView and the
+    // dashboard iframe on reload without an explicit pagination cursor.
+    const qs = new URLSearchParams(req.url?.split("?")[1] ?? "");
+    const limitRaw = parseInt(qs.get("limit") ?? "100", 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 1000) : 100;
+    try {
+      const items = await readHistory(limit);
+      json(req, res, { items });
+    } catch (err: unknown) {
+      log.warn({ err }, "[notch] history read failed");
+      json(req, res, { items: [] });
+    }
+
+  } else if (path === "/api/notch/history/clear" && req.method === "POST") {
+    try {
+      await clearHistory();
+      json(req, res, { ok: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(req, res, { ok: false, error: msg }, 500);
+    }
+
+  } else if (path === "/api/notch/voice" && req.method === "POST") {
+    // Streaming voice bridge — the tray app (or any WAV producer) POSTs raw
+    // audio/wav bytes, we run whisper-cli on the tempfile, then inject the
+    // transcript through the notch connector (which in turn emits message.out
+    // and appends to history, exactly as if the user typed it).
+    const ct = (req.headers["content-type"] ?? "").toString();
+    if (!ct.includes("audio/wav") && !ct.includes("audio/x-wav") && !ct.includes("application/octet-stream")) {
+      json(req, res, { ok: false, error: "expected Content-Type: audio/wav" }, 415);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const MAX_BYTES = 16 * 1024 * 1024; // 16 MB — ~100s of 16kHz mono WAV
+    let overflowed = false;
+    await new Promise<void>((resolve) => {
+      req.on("data", (c: Buffer) => {
+        if (overflowed) return;
+        size += c.length;
+        if (size > MAX_BYTES) { overflowed = true; req.destroy(); resolve(); return; }
+        chunks.push(c);
+      });
+      req.on("end", resolve);
+      req.on("error", () => resolve());
+    });
+    if (overflowed) { json(req, res, { ok: false, error: "audio too large" }, 413); return; }
+    if (size === 0) { json(req, res, { ok: false, error: "empty audio body" }, 400); return; }
+
+    const { spawn } = await import("child_process");
+    const { tmpdir } = await import("os");
+    const { writeFile, unlink } = await import("fs/promises");
+    const tmpPath = join(tmpdir(), `jarvis-notch-voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
+    try {
+      await writeFile(tmpPath, Buffer.concat(chunks));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(req, res, { ok: false, error: `tempfile write failed: ${msg}` }, 500);
+      return;
+    }
+
+    const runWhisper = () => new Promise<{ text: string }>((resolve, reject) => {
+      // whisper-cli default loads `models/ggml-base.en.bin` relative to
+      // cwd and only transcribes English. We point at the Italian-capable
+      // large-v3 model we ship under ~/whisper-models, enable auto
+      // language detection, and suppress timestamps so stdout is already
+      // clean plaintext.
+      const homeDir = process.env.HOME ?? "";
+      const model = join(homeDir, "whisper-models/ggml-large-v3.bin");
+      const proc = spawn("/opt/homebrew/bin/whisper-cli", [
+        "-m", model,
+        "-l", "it",
+        "-nt",
+        tmpPath,
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (c: Buffer) => { stdout += c.toString("utf-8"); });
+      proc.stderr.on("data", (c: Buffer) => { stderr += c.toString("utf-8"); });
+      proc.on("error", (err) => reject(err));
+      proc.on("close", (code) => {
+        if (code !== 0) { reject(new Error(`whisper-cli exit ${code}: ${stderr.trim().slice(0, 500)}`)); return; }
+        // Strip "[hh:mm:ss.xxx --> hh:mm:ss.xxx]" prefixes if present.
+        const cleaned = stdout
+          .split(/\r?\n/)
+          .map((l) => l.replace(/^\s*\[[^\]]+\]\s*/, "").trim())
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+        resolve({ text: cleaned });
+      });
+    });
+
+    try {
+      const { text } = await runWhisper();
+      await unlink(tmpPath).catch(() => {});
+      if (!text) { json(req, res, { ok: false, error: "empty transcript" }, 422); return; }
+      const connector = NotchConnector.getInstance();
+      if (connector) connector.inject(text, "voice").catch(() => {});
+      json(req, res, { ok: true, text });
+    } catch (err: unknown) {
+      await unlink(tmpPath).catch(() => {});
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ err }, "[notch] voice transcription failed");
+      json(req, res, { ok: false, error: msg }, 500);
+    }
+
+  } else if (path === "/api/notch/prefs" && req.method === "GET") {
+    json(req, res, await getPrefs());
+
+  } else if (path === "/api/notch/prefs" && req.method === "POST") {
+    // Patch-style update — any key not present in the body is left untouched.
+    // Unknown keys are silently ignored (forward-compatible with older apps).
+    let body: Record<string, unknown>;
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const patch: Record<string, unknown> = {};
+    for (const key of ["tts", "hoverRecord", "mute"] as const) {
+      if (typeof body[key] === "boolean") patch[key] = body[key] as boolean;
+    }
+    if ("model" in body) {
+      const m = body.model;
+      if (m === null || m === "opus" || m === "sonnet" || m === "haiku") {
+        patch.model = m;
+      }
+    }
+    json(req, res, await setPrefs(patch as Partial<import("../notch/prefs").NotchPrefs>));
+
+  } else if (path === "/api/notch/speak" && req.method === "POST") {
+    // Synchronous synthesis — used by the dashboard "test voice" button and
+    // any external caller that wants TTS without running the agent reply
+    // pipeline. Returns audio bytes directly; no SSE needed.
+    let body: { text?: string; voice?: string };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const text = (body.text ?? "").toString().trim();
+    if (!text) { json(req, res, { error: "missing text" }, 400); return; }
+    const { tmpdir } = await import("os");
+    const { readFile, unlink: unlinkFile } = await import("fs/promises");
+    const out = join(tmpdir(), `jarvis-tts-speak-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.mp3`);
+    try {
+      const r = await speakToFile(text, out, { voice: body.voice });
+      if (r.bytes === 0) { json(req, res, { error: "synthesis failed" }, 500); return; }
+      const buf = await readFile(out);
+      res.writeHead(200, {
+        "Content-Type": r.mime,
+        "Content-Length": buf.length.toString(),
+        "X-TTS-Engine": r.engine,
+        "Access-Control-Allow-Origin": corsOrigin(req),
+      });
+      res.end(buf);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      json(req, res, { error: msg }, 500);
+    } finally {
+      unlinkFile(out).catch(() => {});
+    }
+
+  } else if (path.startsWith("/api/notch/tts-stream/") && req.method === "GET") {
+    // Live ElevenLabs proxy — pipes the streaming response straight to the
+    // player as chunked audio/mpeg, so playback can start while bytes are
+    // still arriving (~150-250 ms first byte vs ~3 s for the file path).
+    // Single-consumer: the registered body is removed from the map on take.
+    const id = path.slice("/api/notch/tts-stream/".length);
+    if (!/^[0-9a-fA-F-]{8,}$/.test(id)) {
+      json(req, res, { error: "not found" }, 404); return;
+    }
+    const { takeTtsStream } = await import("../services/tts.js");
+    const body = takeTtsStream(id);
+    if (!body) { json(req, res, { error: "expired" }, 404); return; }
+    const { Readable } = await import("stream");
+    res.writeHead(200, {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": corsOrigin(req),
+    });
+    const node = Readable.fromWeb(body as any);
+    node.on("error", () => { try { res.end(); } catch {} });
+    req.on("close", () => { try { node.destroy(); } catch {} });
+    node.pipe(res);
+
+  } else if (path.startsWith("/api/notch/tts-file/") && req.method === "GET") {
+    // Serve temp TTS files referenced from `audio.play` SSE events. Path
+    // traversal defence: allow ONLY basenames that match our generator
+    // pattern AND live in os.tmpdir(). Anything else → 404.
+    const name = path.slice("/api/notch/tts-file/".length);
+    if (!/^jarvis-tts-[A-Za-z0-9_.-]+\.(mp3|wav|m4a)$/.test(name)) {
+      json(req, res, { error: "not found" }, 404); return;
+    }
+    const { tmpdir } = await import("os");
+    const { readFile } = await import("fs/promises");
+    const filePath = join(tmpdir(), name);
+    try {
+      const buf = await readFile(filePath);
+      const mime = name.endsWith(".wav") ? "audio/wav"
+                 : name.endsWith(".m4a") ? "audio/mp4"
+                 : "audio/mpeg";
+      res.writeHead(200, {
+        "Content-Type": mime,
+        "Content-Length": buf.length.toString(),
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": corsOrigin(req),
+      });
+      res.end(buf);
+    } catch {
+      json(req, res, { error: "not found" }, 404);
+    }
+
+  } else if (path === "/api/notch/transcript" && req.method === "POST") {
+    // Wire the tray app's streaming recorder into the same pipeline the
+    // synchronous /voice endpoint uses. `final=true` injects through the
+    // connector (which emits message.out + appends to history); `final=false`
+    // just broadcasts a voice.partial so the UI can show live interim text.
+    let body: { text?: string; final?: boolean };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const text = (body.text ?? "").toString().trim();
+    if (!text) { json(req, res, { error: "missing text" }, 400); return; }
+    if (body.final === false) {
+      emitNotch({ type: "voice.partial", data: { text } });
+      json(req, res, { ok: true });
+    } else {
+      const connector = NotchConnector.getInstance();
+      if (connector) connector.inject(text, "voice").catch(() => {});
+      json(req, res, { ok: true });
+    }
 
   } else if (path === "/api/local-sessions" && req.method === "GET") {
     try {
