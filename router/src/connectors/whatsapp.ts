@@ -11,10 +11,34 @@ import { setContactName } from "../services/contact-names";
 import { getConfig } from "../services/config-loader";
 import { logger } from "../services/logger";
 import { processMedia, saveMedia, cleanupMedia } from "../services/media";
-import { readFileSync } from "fs";
+import { readFileSync, rmSync, existsSync } from "fs";
 import { basename, extname } from "path";
+import { EventEmitter } from "events";
 
 const log = logger.child({ module: "whatsapp" });
+
+// ============================================================
+// PAIRING STATE — exposed to dashboard via getInstance()
+// ============================================================
+
+export type WAStatus =
+  | "idle"
+  | "connecting"
+  | "qr"
+  | "pairing-code"
+  | "connected"
+  | "logged-out"
+  | "error";
+
+export interface WAStatusSnapshot {
+  status: WAStatus;
+  qr?: string;
+  pairingCode?: string;
+  pairingPhone?: string;
+  jid?: string;
+  error?: string;
+  updatedAt: number;
+}
 
 // ============================================================
 // CONFIG
@@ -68,6 +92,11 @@ function makeCache(): { get<T>(key: string): T | undefined; set<T>(key: string, 
 
 export class WhatsAppConnector implements Connector {
   readonly channel = "whatsapp" as const;
+  private static instance: WhatsAppConnector | null = null;
+  static getInstance(): WhatsAppConnector | null {
+    return WhatsAppConnector.instance;
+  }
+
   private sock: WASocket | null = null;
   private authDir: string;
   private selfJid: string = "";
@@ -77,8 +106,50 @@ export class WhatsAppConnector implements Connector {
   /** Track message IDs sent by us to avoid self-loop */
   private sentMsgIds = new Set<string>();
 
+  /** Phone number requested for next pairing-code start (E.164 digits, no +) */
+  private pendingPairingPhone: string | null = null;
+  private snapshot: WAStatusSnapshot = { status: "idle", updatedAt: Date.now() };
+  readonly events = new EventEmitter();
+
+  getStatus(): WAStatusSnapshot {
+    return this.snapshot;
+  }
+
+  private setStatus(patch: Partial<WAStatusSnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...patch, updatedAt: Date.now() };
+    this.events.emit("status", this.snapshot);
+  }
+
+  /**
+   * Force a fresh pairing flow from the dashboard. Stops the current socket,
+   * wipes the auth dir on disk, then re-runs `start()`. If `phoneNumber` is
+   * provided (E.164 with or without +), Baileys will surface an 8-char pairing
+   * code instead of a QR — easier to type into the WhatsApp mobile app.
+   */
+  async relink(opts?: { phoneNumber?: string }): Promise<void> {
+    log.warn({ pairing: !!opts?.phoneNumber }, "WhatsApp relink requested");
+    this.pendingPairingPhone = opts?.phoneNumber
+      ? opts.phoneNumber.replace(/[^0-9]/g, "")
+      : null;
+    try {
+      this.sock?.ev.removeAllListeners("connection.update");
+      this.sock?.ev.removeAllListeners("messages.upsert");
+      this.sock?.ev.removeAllListeners("creds.update");
+      this.sock?.end(undefined);
+    } catch {}
+    this.sock = null;
+    if (existsSync(this.authDir)) {
+      try { rmSync(this.authDir, { recursive: true, force: true }); } catch (err) {
+        log.error({ err }, "Failed to wipe wa-auth dir");
+      }
+    }
+    this.setStatus({ status: "connecting", qr: undefined, pairingCode: undefined, error: undefined, jid: undefined });
+    await this.start();
+  }
+
   constructor(private config: Config) {
     this.authDir = config.channels.whatsapp?.authDir ?? "./auth_info";
+    WhatsAppConnector.instance = this;
   }
 
   async start(): Promise<void> {
@@ -87,6 +158,7 @@ export class WhatsAppConnector implements Connector {
     const silentLogger = pino({ level: "silent" });
 
     log.info({ version: version.join(".") }, "WhatsApp connecting...");
+    this.setStatus({ status: "connecting", qr: undefined, pairingCode: undefined, error: undefined });
 
     const msgRetryCounterCache = makeCache();
     const userDevicesCache = makeCache();
@@ -111,24 +183,54 @@ export class WhatsAppConnector implements Connector {
 
     this.sock.ev.on("creds.update", saveCreds);
 
+    // If the dashboard requested pairing-code mode AND this is a fresh auth,
+    // ask Baileys for an 8-char code instead of relying on the QR. Must be
+    // called once after socket creation, before the first `connection.update`.
+    if (this.pendingPairingPhone && !state.creds.registered) {
+      const phone = this.pendingPairingPhone;
+      this.pendingPairingPhone = null;
+      // Baileys requires the request to fire after the socket is ready;
+      // setTimeout(0) is enough — internally it waits for the noise handshake.
+      setTimeout(async () => {
+        try {
+          const code = await this.sock!.requestPairingCode(phone);
+          log.info({ phone, code }, "WhatsApp pairing code issued");
+          this.setStatus({ status: "pairing-code", pairingCode: code, pairingPhone: phone });
+        } catch (err: any) {
+          log.error({ err: err?.message, phone }, "Failed to request pairing code");
+          this.setStatus({ status: "error", error: err?.message ?? "pairing code failed" });
+        }
+      }, 0);
+    }
+
     this.sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update as any;
       if (qr) {
         log.info("=== SCAN QR CODE WITH WHATSAPP ===");
         log.info({ qr }, "QR code (use any QR renderer or WhatsApp > Linked Devices)");
+        // Only flip to "qr" status if the user didn't request a pairing code.
+        if (this.snapshot.status !== "pairing-code") {
+          this.setStatus({ status: "qr", qr });
+        } else {
+          // Keep pairing-code status, but stash the QR as a fallback the UI can offer.
+          this.setStatus({ qr });
+        }
       }
       if (connection === "close") {
         const code = (lastDisconnect?.error as any)?.output?.statusCode;
         if (code !== DisconnectReason.loggedOut) {
           log.warn({ code }, "WhatsApp disconnected, reconnecting...");
+          this.setStatus({ status: "connecting", error: `disconnected (${code ?? "?"})` });
           this.start();
         } else {
           log.error("WhatsApp logged out — manual re-auth needed");
+          this.setStatus({ status: "logged-out", qr: undefined, pairingCode: undefined });
         }
       } else if (connection === "open") {
         this.selfJid = this.sock?.user?.id ?? "";
         this.myLidBase = (this.sock?.user as any)?.lid?.split(":")[0]?.split("@")[0] || "";
         log.info({ selfJid: this.selfJid, myLidBase: this.myLidBase }, "WhatsApp connected");
+        this.setStatus({ status: "connected", jid: this.selfJid, qr: undefined, pairingCode: undefined, error: undefined });
         // Fetch group names for all configured group routes
         this.cacheGroupNames();
       }
