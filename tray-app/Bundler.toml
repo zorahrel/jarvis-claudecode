@@ -1,0 +1,40 @@
+format_version = 2
+
+# Two-process Jarvis. JarvisTray.app is the always-on menubar; it spawns
+# and supervises JarvisNotch.app as a child process, so a notch crash
+# (DynamicNotchKit, WKWebView, mic pipeline) doesn't kill the tray. Each
+# bundle ships its own TCC descriptions and entitlements — the tray has
+# no need for mic/accessibility, the notch does.
+#
+# Build both at once: `./make-app.sh`.
+
+# ── Menubar app ────────────────────────────────────────────────────────
+[apps.JarvisTray]
+identifier = "io.armonia.jarvis.tray"
+product    = "JarvisTray"
+version    = "0.1.0"
+category   = "public.app-category.productivity"
+
+[apps.JarvisTray.plist]
+LSUIElement             = true
+LSMinimumSystemVersion  = "14.0"
+CFBundleName            = "Jarvis"
+CFBundleDisplayName     = "Jarvis"
+NSHumanReadableCopyright = "Copyright © 2026 Attilio Cianci."
+
+# ── Notch helper ───────────────────────────────────────────────────────
+[apps.JarvisNotch]
+identifier = "io.armonia.jarvis.notch"
+product    = "JarvisNotch"
+version    = "0.1.0"
+category   = "public.app-category.productivity"
+
+[apps.JarvisNotch.plist]
+LSUIElement                   = true
+LSMinimumSystemVersion        = "14.0"
+CFBundleName                  = "JarvisNotch"
+CFBundleDisplayName           = "JarvisNotch"
+NSHumanReadableCopyright      = "Copyright © 2026 Attilio Cianci."
+NSMicrophoneUsageDescription        = "JarvisNotch usa il microfono per trascrivere i comandi vocali che dai nel notch."
+NSSpeechRecognitionUsageDescription = "JarvisNotch trascrive in tempo reale ciò che dici al notch per inviarlo come messaggio."
+NSAppleEventsUsageDescription       = "JarvisNotch comunica con il router locale per gestire le sessioni Claude Code."

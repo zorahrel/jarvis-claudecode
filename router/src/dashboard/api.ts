@@ -1754,6 +1754,26 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     connector.inject(text, body.from ?? "notch").catch(() => {});
     json(req, res, { ok: true });
 
+  } else if (path === "/api/notch/abort" && req.method === "POST") {
+    // Hot-corner / dashboard "stop Jarvis". Cancels in-flight reply by
+    // bumping the connector's generation counter; the running
+    // handleMessage() finishes in the background but its reply() and
+    // TTS effects are dropped.
+    const connector = NotchConnector.getInstance();
+    if (!connector) { json(req, res, { error: "notch connector not running" }, 503); return; }
+    connector.abort();
+    json(req, res, { ok: true });
+
+  } else if (path === "/api/notch/barge" && req.method === "POST") {
+    // Hard barge-in: chiamato dal native (NotchController) quando il Silero
+    // VAD detecta voce dell'utente mentre il TTS sta playing. Stesso pattern
+    // di abort() ma il connector emette `audio.stop` + state→`recording` così
+    // l'UI non torna idle ma resta in posa "ti sto ascoltando".
+    const connector = NotchConnector.getInstance();
+    if (!connector) { json(req, res, { error: "notch connector not running" }, 503); return; }
+    connector.barge();
+    json(req, res, { ok: true });
+
   } else if (path === "/api/notch/history" && req.method === "GET") {
     // Persistent chat log — tail of the notch-history JSONL. The default 100
     // records is enough to rehydrate both the native WKWebView and the
@@ -1913,10 +1933,12 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     }
 
   } else if (path.startsWith("/api/notch/tts-stream/") && req.method === "GET") {
-    // Live ElevenLabs proxy — pipes the streaming response straight to the
-    // player as chunked audio/mpeg, so playback can start while bytes are
-    // still arriving (~150-250 ms first byte vs ~3 s for the file path).
-    // Single-consumer: the registered body is removed from the map on take.
+    // Live TTS proxy — pipes a streaming response (Cartesia SSE→MP3 via
+    // ffmpeg, or ElevenLabs streaming endpoint) straight to the WebView
+    // <audio> element as chunked audio/mpeg. Playback can start while
+    // bytes are still arriving — Cartesia: ~100-200ms TTFA; ElevenLabs:
+    // ~150-250ms TTFA. Single-consumer: the registered body is removed
+    // from the map on take.
     const id = path.slice("/api/notch/tts-stream/".length);
     if (!/^[0-9a-fA-F-]{8,}$/.test(id)) {
       json(req, res, { error: "not found" }, 404); return;
