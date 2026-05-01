@@ -140,8 +140,9 @@ function dispatchEvent(event: NotchEvent, _opts: UseSSEOptions): void {
       break;
     }
     case "audio.play":
-      // handled in main hook (sets audioPlayUrl). Also freeze WAIT here.
-      useNotchStore.getState().freezeWaitTimer(Date.now());
+      // handled in main hook (sets audioPlayUrl). Also note start so the
+      // live AUDIO chip can begin ticking against the latest assistant bubble.
+      useNotchStore.getState().noteAudioStart();
       break;
     case "audio.stop":
     case "tts.stop":

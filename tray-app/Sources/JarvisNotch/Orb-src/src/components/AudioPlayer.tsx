@@ -28,7 +28,7 @@ export function AudioPlayer({ url, onConsumed, stopRequested, onStopConsumed }: 
   const ref = useRef<HTMLAudioElement | null>(null);
   const startTsRef = useRef<number>(0);
   const startedRef = useRef(false);
-  const freezeAudio = useNotchStore((s) => s.freezeAudioTimer);
+  const noteAudioEnd = useNotchStore((s) => s.noteAudioEnd);
 
   // React on URL change → load + play.
   useEffect(() => {
@@ -75,13 +75,13 @@ export function AudioPlayer({ url, onConsumed, stopRequested, onStopConsumed }: 
     const onEnded = () => {
       if (!startedRef.current) return;
       startedRef.current = false;
-      const endTs = Date.now();
-      freezeAudio(endTs, startTsRef.current);
+      noteAudioEnd();
       postAudioLifecycle("end");
     };
     const onErrorOrPause = () => {
       if (!startedRef.current) return;
       startedRef.current = false;
+      noteAudioEnd();
       postAudioLifecycle("end");
     };
 
@@ -95,7 +95,7 @@ export function AudioPlayer({ url, onConsumed, stopRequested, onStopConsumed }: 
       el.removeEventListener("error", onErrorOrPause);
       el.removeEventListener("pause", onErrorOrPause);
     };
-  }, [freezeAudio]);
+  }, [noteAudioEnd]);
 
   return <audio ref={ref} preload="auto" style={{ display: "none" }} />;
 }

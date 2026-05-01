@@ -1,12 +1,15 @@
 /**
- * Bottom toolbar: voice toggle, mute, hover-record, model picker.
- * Each toggle persists immediately via PATCH /api/notch/prefs so the same
- * setting is visible in the dashboard mirror and survives notch reloads.
+ * Toolbar replicates the legacy DOM verbatim — same data-pref attributes
+ * and class names as before, so legacy CSS rules (e.g. `.toggle input`)
+ * apply directly. Functional behavior:
+ *   - tts/hoverRecord/mute checkboxes PATCH /api/notch/prefs on toggle
+ *   - model-cycle button rotates opus → sonnet → haiku
  */
 import { useEffect } from "react";
 import { useNotchStore } from "../store";
 
 const HOST = ((window as any).__notchHost ?? window.location.origin).replace(/\/+$/, "");
+const MODELS = ["opus", "sonnet", "haiku"];
 
 async function loadPrefs() {
   try {
@@ -14,7 +17,7 @@ async function loadPrefs() {
     if (!resp.ok) return;
     const prefs = await resp.json();
     useNotchStore.getState().setPrefs(prefs);
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
 async function patchPrefs(patch: Record<string, unknown>) {
@@ -24,36 +27,51 @@ async function patchPrefs(patch: Record<string, unknown>) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(patch),
     });
-  } catch (_) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
 export function Toolbar() {
   const prefs = useNotchStore((s) => s.prefs);
   const setPrefs = useNotchStore((s) => s.setPrefs);
 
-  useEffect(() => { loadPrefs(); }, []);
+  useEffect(() => { void loadPrefs(); }, []);
 
-  const toggle = (key: keyof typeof prefs) => {
+  const togglePref = (key: keyof typeof prefs) => {
     const next = !prefs[key];
     setPrefs({ [key]: next });
     void patchPrefs({ [key]: next });
   };
 
+  const cycleModel = () => {
+    const cur = prefs.model ?? "opus";
+    const idx = MODELS.indexOf(cur);
+    const next = MODELS[(idx + 1) % MODELS.length];
+    setPrefs({ model: next });
+    void patchPrefs({ model: next });
+  };
+
   return (
-    <div className="toolbar">
-      <label className="toggle" title="Risposte parlate con TTS Cartesia">
-        <input type="checkbox" checked={!!prefs.tts} onChange={() => toggle("tts")} />
+    <div className="toolbar" id="notch-toolbar">
+      <label className="toggle" title="Risposte parlate con TTS on-device">
+        <input type="checkbox" data-pref="tts" checked={!!prefs.tts} onChange={() => togglePref("tts")} />
         <span>Voce</span>
       </label>
-      <label className="toggle" title="Apri il microfono al passaggio del mouse">
-        <input type="checkbox" checked={!!prefs.hoverRecord} onChange={() => toggle("hoverRecord")} />
+      <label className="toggle" title="Modalità chiamata — apri il microfono al passaggio del mouse e parla con Jarvis">
+        <input type="checkbox" data-pref="hoverRecord" checked={!!prefs.hoverRecord} onChange={() => togglePref("hoverRecord")} />
         <span>Call on hover</span>
       </label>
-      <label className="toggle" title="Disattiva audio in uscita">
-        <input type="checkbox" checked={!!prefs.mute} onChange={() => toggle("mute")} />
+      <label className="toggle" title="Silenzia tutto l'audio del notch">
+        <input type="checkbox" data-pref="mute" checked={!!prefs.mute} onChange={() => togglePref("mute")} />
         <span>Muto</span>
       </label>
-      <span className="model-tag">{prefs.model ?? "auto"}</span>
+      <button
+        className="toggle model-cycle"
+        id="notch-model-cycle"
+        title="Modello LLM — clicca per ciclare opus / sonnet / haiku"
+        onClick={cycleModel}
+      >
+        <span id="model-label">{prefs.model ?? "opus"}</span>
+      </button>
     </div>
   );
 }

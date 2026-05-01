@@ -1,20 +1,23 @@
 /**
- * Root component. Composes the chat log, toolbar, input box, audio player,
- * and the orb visual. Hooks (useSSE, useSwiftBridge) wire up the side
- * effects exactly once.
+ * Notch React shell. Replicates the legacy notch.html DOM structure
+ * verbatim so all the original CSS works unchanged. The Three.js orb
+ * bundle (notch-BpndmdBM.js, opaque dist) is loaded in index.html and
+ * injects into #three-container — we just provide the empty container.
  *
- * Dashboard mirror detection: when embedded via `?embed=dashboard`, audio
- * playback is suppressed (the main notch process owns the speakers).
+ * State management (chat log, bubbles, timers, prefs, audio playback) is
+ * the only thing React owns. Hot-corner cancel, peek panels, three.js
+ * orb, audio-aura, VAD remain vanilla in their own files/bundles.
  */
 import { useEffect } from "react";
 import { useSSE } from "./hooks/useSSE";
 import { useSwiftBridge } from "./hooks/useSwiftBridge";
+import { useExternalAssets } from "./hooks/useExternalAssets";
 import { useNotchStore } from "./store";
 import { ChatLog } from "./components/ChatLog";
 import { Toolbar } from "./components/Toolbar";
-import { InputBox } from "./components/InputBox";
+import { InputRow } from "./components/InputRow";
 import { AudioPlayer } from "./components/AudioPlayer";
-import { Orb } from "./components/Orb";
+import { ActivityPane } from "./components/ActivityPane";
 
 const HOST = ((window as any).__notchHost ?? window.location.origin).replace(/\/+$/, "");
 const isDashboardMirror = /[?&]embed=dashboard\b/.test(window.location.search);
@@ -32,18 +35,32 @@ async function loadHistory() {
 
 export function App() {
   useSwiftBridge();
+  useExternalAssets();
   const { audioPlayUrl, consumeAudioUrl, audioStopRequested, consumeAudioStop } = useSSE({ isDashboardMirror });
 
   useEffect(() => { void loadHistory(); }, []);
 
   return (
-    <div className={`notch-app ${isDashboardMirror ? "mirror" : "standalone"}`}>
-      <Orb />
-      <div className="content">
-        <ChatLog />
-        <Toolbar />
-        <InputBox />
+    <>
+      {/* Three.js orb stage. The notch-BpndmdBM.js bundle (loaded in
+          index.html <head>) finds #three-container and injects its scene. */}
+      <div className="stage">
+        <div id="three-container"></div>
       </div>
+
+      <div className="content">
+        {/* Chat pane (default focus) */}
+        <div className="chat-pane">
+          <ChatLog />
+          <Toolbar />
+          <InputRow />
+        </div>
+
+        {/* Activity pane (toggled by hot-corner / right-icon) */}
+        <ActivityPane />
+      </div>
+
+      {/* Hidden audio element for TTS playback. */}
       {!isDashboardMirror && (
         <AudioPlayer
           url={audioPlayUrl}
@@ -52,6 +69,6 @@ export function App() {
           onStopConsumed={consumeAudioStop}
         />
       )}
-    </div>
+    </>
   );
 }

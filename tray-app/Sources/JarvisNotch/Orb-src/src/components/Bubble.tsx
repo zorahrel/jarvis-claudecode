@@ -1,32 +1,31 @@
 /**
- * Single chat bubble. Renders user OR assistant variant. Assistant variant
- * shows the timing strip below (trascr/llm/tok/audio/wait) once finalized.
+ * Bubble — same classes as legacy: `.bubble.user` / `.bubble.assistant`.
+ * Pending state uses 3 typing dots (legacy class `.typing-dot` + animation).
  *
- * Pending state: while the assistant turn is in flight, we show a typing-
- * dot placeholder. Chunks (if any) replace the dots with growing text.
+ * The timing strip is rendered as a SIBLING below the assistant bubble
+ * (not nested) so the flex layout matches legacy.
  */
 import type { Bubble as BubbleData } from "../types";
 import { TimingStrip } from "./TimingStrip";
 
 export function Bubble({ bubble }: { bubble: BubbleData }) {
-  const isAssistant = bubble.role === "assistant";
-  return (
-    <div className={`bubble-row ${bubble.role}`}>
-      <div
-        className={`bubble ${bubble.role} ${bubble.pending ? "pending" : ""}`}
-        data-bubble-id={bubble.id}
-      >
-        {bubble.pending && !bubble.text ? (
-          <span className="typing">
-            <span /><span /><span />
-          </span>
-        ) : (
-          bubble.text
-        )}
+  if (bubble.pending && !bubble.text) {
+    return (
+      <div className="bubble pending" data-bubble-id={bubble.id}>
+        <span className="typing-dot" />
+        <span className="typing-dot" />
+        <span className="typing-dot" />
       </div>
-      {isAssistant && bubble.footer && !bubble.pending && (
+    );
+  }
+  return (
+    <>
+      <div className={`bubble ${bubble.role}`} data-bubble-id={bubble.id}>
+        {bubble.text}
+      </div>
+      {bubble.role === "assistant" && bubble.footer && !bubble.pending && (
         <TimingStrip bubble={bubble} />
       )}
-    </div>
+    </>
   );
 }

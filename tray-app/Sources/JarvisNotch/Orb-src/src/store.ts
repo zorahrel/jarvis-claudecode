@@ -25,6 +25,11 @@ interface NotchStore {
   prefs: NotchPrefs;
   /** Anchor: when the user input arrived at the server. Used by WAIT chip. */
   lastUserInputAt: number;
+  /** Timestamp of last audio.play (for live AUDIO chip). 0 when idle. */
+  lastAudioStart: number;
+  /** Bubble id whose audio is currently playing. Used to bind the live
+   *  AUDIO chip to the correct bubble. */
+  lastAssistantBubbleId: string | null;
 
   // ── mutators ────────────────────────────────────────────────────────
   setState: (s: AgentState) => void;
@@ -50,6 +55,11 @@ interface NotchStore {
 
   setPrefs: (prefs: Partial<NotchPrefs>) => void;
   noteUserInput: (ts?: number) => void;
+  /** Called when audio.play SSE event arrives — mark the wait chip + start
+   *  the live AUDIO chip ticking against the matching bubble. */
+  noteAudioStart: () => void;
+  /** Called when <audio> ends — freeze the AUDIO chip with final duration. */
+  noteAudioEnd: () => void;
   freezeWaitTimer: (audioStartTs: number) => void;
   freezeAudioTimer: (audioEndTs: number, audioStartTs: number) => void;
 }
@@ -65,6 +75,8 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
   micLevel: 0,
   prefs: { tts: true, mute: false, hoverRecord: false, model: null },
   lastUserInputAt: 0,
+  lastAudioStart: 0,
+  lastAssistantBubbleId: null,
 
   setState: (s) => set({ state: s }),
 
@@ -163,10 +175,33 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
 
   noteUserInput: (ts) => set({ lastUserInputAt: ts ?? Date.now() }),
 
+  noteAudioStart: () => {
+    const cur = get();
+    // Bind to the most-recent assistant bubble (pending or finalized).
+    const lastAsst = [...cur.bubbles].reverse().find((b) => b.role === "assistant");
+    set({
+      lastAudioStart: Date.now(),
+      lastAssistantBubbleId: lastAsst?.id ?? null,
+    });
+    // Also freeze the WAIT chip on that bubble.
+    cur.freezeWaitTimer(Date.now());
+  },
+
+  noteAudioEnd: () => {
+    const cur = get();
+    if (!cur.lastAudioStart) return;
+    cur.freezeAudioTimer(Date.now(), cur.lastAudioStart);
+    set({ lastAudioStart: 0, lastAssistantBubbleId: null });
+  },
+
   freezeWaitTimer: (audioStartTs) => {
     const cur = get();
     if (!cur.lastUserInputAt) return;
-    const id = cur.pendingId;
+    // Target: the pending assistant bubble if one exists, otherwise the
+    // most recent assistant bubble (audio.play arrives after message.in
+    // when LLM streaming is enabled, so pending is already finalized).
+    const id = cur.pendingId
+      ?? [...cur.bubbles].reverse().find((b) => b.role === "assistant")?.id;
     if (!id) return;
     const waitMs = audioStartTs - cur.lastUserInputAt;
     if (waitMs < 0 || waitMs > 60_000) return; // sanity guard
