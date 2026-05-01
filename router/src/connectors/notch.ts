@@ -184,20 +184,45 @@ export class NotchConnector implements Connector {
       onChunk: (delta) => {
         // Drop deltas if the turn was aborted between LLM call and now.
         if (myGen !== this.activeGenId) return;
-        // NOTE: message.chunk SSE emission tentato e ritirato 2026-05-01.
-        // Causava duplicato visivo nel notch: bundle minified non riconosce
-        // il pattern "chunk-then-in" e accodava la final bubble a quella
-        // pending già creata dai chunks. Per un display in streaming token-
-        // per-token serve un refactor del bundle (modificare il listener
-        // SSE message.in del bundle perché sostituisca invece di appendere).
-        // Per ora il display resta no-stream lato testo; lo streaming TTS
-        // (Cartesia WS qui sotto) è quello che importa per latenza percepita.
 
-        // Push to Cartesia WS if streaming session is open. The session
-        // internally parses spoken tags + buffers to sentence boundaries.
+        // 1. TTS: push the FULL delta immediately to Cartesia WS — the
+        //    session buffers internally to sentence boundaries before
+        //    synthesis, so it benefits from getting all the text it can
+        //    as soon as possible.
         if (streamSession) {
           try { streamSession.pushChunk(delta); }
           catch (err) { log.warn({ err }, "stream pushChunk threw"); }
+        }
+
+        // 2. DISPLAY: stream the visible delta to the chat as message.chunk
+        //    SSE events so the React store appends to the pending bubble.
+        //    Strip <spoken> delimiters — they only matter for the TTS
+        //    extractor in stripSpokenTags / extractSpoken.
+        //
+        //    Models with extended thinking (effort: medium/high) deliver
+        //    text deltas in a single burst after the thinking phase. To
+        //    give a streaming visual effect anyway, split long deltas at
+        //    word boundaries and emit at ~25ms/word — this adds a small,
+        //    perceived "typing" cadence without changing the underlying
+        //    LLM behavior. Short deltas pass through verbatim.
+        const visibleDelta = delta.replace(/<\/?spoken>/gi, "");
+        if (visibleDelta) {
+          if (visibleDelta.length <= 25) {
+            emitNotch({ type: "message.chunk", data: { text: visibleDelta, from } });
+          } else {
+            // Word-boundary split. The match captures each non-whitespace
+            // run plus its trailing whitespace, so reconstruction is
+            // lossless when concatenated.
+            const words = visibleDelta.match(/\S+\s*/g) ?? [visibleDelta];
+            let i = 0;
+            const drip = () => {
+              if (myGen !== this.activeGenId) return; // aborted
+              if (i >= words.length) return;
+              emitNotch({ type: "message.chunk", data: { text: words[i++], from } });
+              setTimeout(drip, 25);
+            };
+            drip();
+          }
         }
       },
       reply: async (response: string) => {

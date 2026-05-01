@@ -12,8 +12,29 @@ import { useEffect, useState } from "react";
 import type { Bubble } from "../types";
 import { useNotchStore } from "../store";
 
+const HOST = ((window as any).__notchHost ?? window.location.origin).replace(/\/+$/, "");
+
 function fmtSec(s: number): string {
   return s.toFixed(1) + "s";
+}
+
+/**
+ * Stop the currently-playing TTS audio. Two parallel actions:
+ *   1. Pause the local <audio> element directly via window.jarvisAudio.stop()
+ *      (already wired by useSwiftBridge) — instant client-side cutoff.
+ *   2. POST /api/notch/barge so the router cancels the in-flight Cartesia
+ *      WS context and bumps the generation counter (stops further chunks
+ *      from being processed even if SSE delivery is in flight).
+ */
+async function stopAudio() {
+  // Local stop first — perceived latency 0ms.
+  try { (window as any).jarvisAudio?.stop?.(); } catch {}
+  // Server-side cancel for the streaming Cartesia context.
+  try {
+    await fetch(`${HOST}/api/notch/barge`, { method: "POST" });
+  } catch (err) {
+    console.warn("[stop] barge POST failed", err);
+  }
 }
 
 export function TimingStrip({ bubble }: { bubble: Bubble }) {
@@ -53,7 +74,20 @@ export function TimingStrip({ bubble }: { bubble: Bubble }) {
         <span className="live-timer audio frozen">audio {fmtSec(bubble.audioMs / 1000)}</span>
       )}
       {bubble.audioMs == null && isCurrentAudioBubble && (
-        <span className="live-timer audio">audio {fmtSec(audioElapsed)}</span>
+        <span className="live-timer audio with-stop">
+          audio {fmtSec(audioElapsed)}
+          <button
+            type="button"
+            className="stop-audio"
+            title="Interrompi audio (barge-in)"
+            aria-label="Interrompi audio"
+            onClick={stopAudio}
+          >
+            <svg width="9" height="9" viewBox="0 0 12 12" fill="currentColor">
+              <rect x="2" y="2" width="8" height="8" rx="1" />
+            </svg>
+          </button>
+        </span>
       )}
     </div>
   );

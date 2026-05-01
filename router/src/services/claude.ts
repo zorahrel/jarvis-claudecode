@@ -691,19 +691,17 @@ function spawnSession(
         // SDKPartialAssistantMessage. We only fire the chunk callback for
         // text deltas — tool_use deltas, message metadata, signature blocks
         // etc. don't belong in the TTS / chat-display path.
-        if (e.type === "stream_event" && s.pendingOnChunk) {
+        if (e.type === "stream_event") {
           const ev = (e as any).event;
           if (
             ev?.type === "content_block_delta" &&
             ev?.delta?.type === "text_delta" &&
             typeof ev.delta.text === "string" &&
-            ev.delta.text.length > 0
+            ev.delta.text.length > 0 &&
+            s.pendingOnChunk
           ) {
             try { s.pendingOnChunk(ev.delta.text); }
             catch (err) { log.warn({ err, key: s.sessionKey }, "pendingOnChunk threw (stream)"); }
-            // Don't accumulate into s.currentText here — the final
-            // `assistant` event below carries the consolidated text and
-            // is the canonical source of truth for the full reply.
           }
           continue;
         }

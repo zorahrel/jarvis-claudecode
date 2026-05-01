@@ -646,3 +646,35 @@
     .activity-pane { display: none; }
     html[data-notch-focus="activity"] .chat-pane { display: none; }
     html[data-notch-focus="activity"] .activity-pane { display: flex; }
+
+/* ── Live AUDIO chip with inline stop button ──────────────────────────
+   Replaces the bare `audio X.Xs` chip while playback is active. The
+   stop button targets the WAIT/AUDIO chips (live state) only — frozen
+   chips have `.frozen` class and stay non-interactive. */
+.live-timer.audio.with-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 3px;
+}
+.stop-audio {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  color: rgba(255, 220, 200, 0.90);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.stop-audio:hover {
+  background: rgba(220, 80, 80, 0.45);
+  color: #fff;
+}
+.stop-audio:active {
+  background: rgba(220, 80, 80, 0.65);
+}
