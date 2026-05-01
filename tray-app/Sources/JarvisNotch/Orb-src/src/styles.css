@@ -1,0 +1,253 @@
+/* ──────────────────────────────────────────────────────────────────────
+ * Notch React UI styles. Replaces the legacy inline <style> in notch.html
+ * with a single CSS file. Layout:
+ *   - .notch-app fills the WKWebView; transparent background so the macOS
+ *     notch shape clips through.
+ *   - Orb is fixed center, behind content.
+ *   - Content stack (chat log, toolbar, input) sits on top, padded for the
+ *     macOS notch curve.
+ * Color palette mirrors the original (warm amber accent + dark surface).
+ * ────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --accent: #ffb84d;
+  --accent-dim: rgba(255, 184, 77, 0.55);
+  --surface: rgba(14, 14, 16, 0.7);
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f2f3f5;
+  --muted: rgba(242, 243, 245, 0.55);
+  --bubble-user: rgba(255, 184, 77, 0.18);
+  --bubble-assistant: rgba(42, 44, 50, 0.85);
+  --font-ui: "Inter", -apple-system, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", monospace;
+  color-scheme: dark;
+}
+
+html, body {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-ui);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+#root { height: 100%; width: 100%; }
+
+.notch-app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: 1fr;
+  padding: 18px 14px 12px;
+  box-sizing: border-box;
+}
+
+/* ── Orb visual ─────────────────────────────────────────────────────── */
+.orb {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 320px;
+  height: 320px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 0;
+  --orb-intensity: 0.25;
+}
+.orb-core {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 184, 77, calc(0.3 + var(--orb-intensity) * 0.4)) 0%,
+    rgba(120, 80, 40, calc(0.15 + var(--orb-intensity) * 0.2)) 40%,
+    transparent 70%
+  );
+  filter: blur(16px);
+  transition: opacity 0.18s ease;
+  opacity: calc(0.5 + var(--orb-intensity) * 0.5);
+  transform: scale(calc(0.92 + var(--orb-intensity) * 0.12));
+}
+.orb-glow {
+  position: absolute;
+  inset: 25%;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 220, 160, calc(0.45 + var(--orb-intensity) * 0.4)) 0%,
+    transparent 65%
+  );
+  filter: blur(8px);
+  opacity: calc(0.6 + var(--orb-intensity) * 0.4);
+}
+.orb.state-thinking .orb-core { animation: pulse 1.6s ease-in-out infinite; }
+.orb.state-recording .orb-core { animation: pulse 0.7s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: calc(0.4 + var(--orb-intensity) * 0.4); }
+  50% { opacity: 1; }
+}
+
+/* ── Content stack ──────────────────────────────────────────────────── */
+.content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 2px;
+}
+.chat-log::-webkit-scrollbar { width: 3px; }
+.chat-log::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+.chat-log:empty::after {
+  content: "Scrivi qualcosa a Jarvis.";
+  color: rgba(255, 255, 255, 0.25);
+  font-size: 11px;
+  align-self: center;
+  margin-top: 30%;
+}
+
+/* ── Bubble ─────────────────────────────────────────────────────────── */
+.bubble-row { display: flex; flex-direction: column; gap: 2px; }
+.bubble-row.user { align-items: flex-end; }
+.bubble-row.assistant { align-items: flex-start; }
+
+.bubble {
+  padding: 8px 12px;
+  border-radius: 14px;
+  max-width: 82%;
+  font-size: 13px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  border: 1px solid var(--border);
+}
+.bubble.user {
+  background: var(--bubble-user);
+  color: var(--text);
+  border-color: rgba(255, 184, 77, 0.28);
+}
+.bubble.assistant {
+  background: var(--bubble-assistant);
+  color: var(--text);
+}
+.bubble.pending { opacity: 0.85; }
+.bubble.live-transcript {
+  background: rgba(255, 184, 77, 0.10);
+  font-style: italic;
+  color: rgba(255, 184, 77, 0.85);
+}
+
+.typing { display: inline-flex; gap: 3px; align-items: center; height: 14px; }
+.typing span {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.4);
+  animation: dot 1s ease-in-out infinite;
+}
+.typing span:nth-child(2) { animation-delay: 0.2s; }
+.typing span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot {
+  0%, 100% { opacity: 0.3; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* ── Timing strip + chips ───────────────────────────────────────────── */
+.timing-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.timing-strip .seg { display: inline-flex; gap: 3px; align-items: baseline; }
+.timing-strip .seg-label { color: rgba(242, 243, 245, 0.30); }
+.timing-strip .seg-val { color: rgba(255, 184, 77, 0.85); }
+.timing-strip .seg-model {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+.chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.chip.wait  { color: rgba(255, 184, 77, 0.95); background: rgba(255, 184, 77, 0.12); }
+.chip.audio { color: rgba(120, 230, 180, 0.85); background: rgba(120, 230, 180, 0.10); }
+
+/* ── Toolbar ────────────────────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 0;
+}
+.toolbar .toggle {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  cursor: pointer;
+}
+.toolbar .toggle input { accent-color: var(--accent); }
+.toolbar .model-tag {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+/* ── Input ──────────────────────────────────────────────────────────── */
+.input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px 8px;
+}
+.input-row input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+.input-row input::placeholder { color: rgba(255, 255, 255, 0.25); }
+.input-row button {
+  background: var(--accent);
+  color: #1a1a1c;
+  border: none;
+  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.input-row button:hover { background: #ffd080; }
