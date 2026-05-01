@@ -148,7 +148,22 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   const route = { agent } as { agent: typeof agent; action?: undefined };
 
   const agentName = basename(route.agent.workspace);
-  const key = sessionKey(msg.channel, msg.from, msg.group, agentName);
+  // Include modelOverride in the session key so swapping models from the
+  // notch toolbar spawns a fresh SDK session with the new model. Without
+  // this, the cached session on the previous model is reused and the
+  // footer keeps reporting the old model id.
+  const baseKey = sessionKey(msg.channel, msg.from, msg.group, agentName);
+  const key = msg.modelOverride ? `${baseKey}:m=${msg.modelOverride}` : baseKey;
+
+  // When the notch toolbar selects a non-default model, clone the agent
+  // with the override so `askClaude` actually spawns the SDK on that
+  // model (the session key alone wasn't enough — without the cloned agent,
+  // the footer kept reporting whatever model the agent's YAML defaulted
+  // to). Cheap shallow copy since we only mutate `model`.
+  const effectiveAgent = msg.modelOverride
+    ? { ...route.agent, model: msg.modelOverride }
+    : route.agent;
+  route.agent = effectiveAgent;
 
   // Initialize timings (media phase already populated by connector if present)
   const timings: MessageTimings = msg.timings ?? { received: Date.now() };
@@ -227,8 +242,9 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
         },
       });
     }
-    const response = await askClaude(route.agent, messageForClaude, key)
-      .finally(() => endJob(jobId));
+    const response = await askClaude(route.agent, messageForClaude, key, undefined, {
+      onChunk: msg.onChunk,
+    }).finally(() => endJob(jobId));
     timings.llmEnd = Date.now();
     trackMessage(msg.channel);
 

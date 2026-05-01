@@ -22,6 +22,11 @@ final class StreamingRecorder {
     private let engine = AVAudioEngine()
     private var file: AVAudioFile?
     private var converter: AVAudioConverter?
+    /// Dedicated converter from the AEC-processed input format to a Float32
+    /// 44.1kHz mono format that SFSpeechRecognizer accepts. The file write
+    /// keeps the raw input format (resampled at stop() via afconvert).
+    private var speechConverter: AVAudioConverter?
+    private var speechFormat: AVAudioFormat?
     private let outputURL: URL
 
     /// Serial queue for AVAudioFile writes. Writing the file directly from
@@ -44,6 +49,16 @@ final class StreamingRecorder {
     private let silenceSeconds: Double = 1.5
 
     private var silenceStart: TimeInterval = 0
+    /// Toggled by NotchController via setAssistantSpeaking() while Jarvis's
+    /// own TTS is playing. We keep the audio tap running (so VAD / barge-in
+    /// can still observe in real time) but DROP every buffer before it
+    /// touches the WAV file or the silence detector. This prevents:
+    ///   - whisper-cli on the server transcribing the TTS as user input
+    ///   - the silence-detector tripping while the speaker output is loud
+    ///   - the level-meter spiking on Jarvis's own voice
+    /// Apple's SFSpeechRecognizer (in VoiceTranscriber) has its own equivalent
+    /// flag — we set both from one entry point in NotchController.
+    private var assistantSpeaking: Bool = false
     /// Exposed so the controller can decide NOT to upload a recording
     /// that captured only room tone — mouse-out during hover-record can
     /// otherwise ship 300 ms of noise to whisper-cli, which hallucinates
@@ -68,6 +83,13 @@ final class StreamingRecorder {
     var isRunning: Bool { engine.isRunning }
     var fileURL: URL { outputURL }
 
+    /// Set the assistant-speaking flag. While true, the tap callback drops
+    /// every frame before file write / RMS processing — equivalent to the
+    /// flag VoiceTranscriber holds for the SFSpeechRecognizer feed.
+    func setAssistantSpeaking(_ speaking: Bool) {
+        assistantSpeaking = speaking
+    }
+
     /// Start capture. `onPartial` fires ~10 Hz with the current RMS level
     /// (0…1-ish). `onSilenceDetected` fires ONCE after a voiced segment
     /// followed by `silenceSeconds` of quiet — the caller can then stop()
@@ -88,7 +110,48 @@ final class StreamingRecorder {
         self.lastLevelEmitAt = 0
 
         let input = engine.inputNode
+
+        // ECHO CANCELLATION (AEC) — Apple's voiceProcessing AudioUnit
+        // sottrae lo speaker output dal mic input prima del tap. Critico
+        // quando user usa speakers MacBook (no cuffie): senza AEC, il mic
+        // capta il TTS che esce dagli altoparlanti e Apple SFSpeechRecognizer
+        // lo trascrive come user input.
+        //
+        // Trade-off precedente: voiceProcessing cambiava il format del input
+        // node (24kHz mono Float32 invece di 48kHz) e SFSpeechRecognizer
+        // smetteva di emettere partials. Soluzione: AVAudioConverter dedicato
+        // sul path verso il transcriber (file di WAV resta in hwFormat post-AEC).
+        // AEC voiceProcessing disabilitato per ora — alterava il routing
+        // audio macOS-wide e il WebView <audio> non emetteva più sound nei
+        // speaker. Echo handling resta software (drop buffer durante TTS,
+        // VAD pause, AVSpeech.stop su barge-in).
+        // Per riabilitare in futuro: serve confinare il routing al solo
+        // input node, oppure usare AUVoiceIO custom invece di
+        // setVoiceProcessingEnabled.
+        // try? input.setVoiceProcessingEnabled(true)
+
         let hwFormat = input.outputFormat(forBus: 0)
+        NotchLogger.shared.log("info", "[stream-rec] input format sr=\(hwFormat.sampleRate) ch=\(hwFormat.channelCount)")
+
+        // Mono buffer per SFSpeechRecognizer: stesso sample rate del input
+        // (Apple STT accetta 16k..48k senza problemi), 1 canale. Prendiamo
+        // channel 0 manualmente nel tap — AVAudioConverter automatico su 5ch
+        // (output di voiceProcessing su macOS) downmixa a silence senza un
+        // channel layout esplicito. Pickando il primo canale evitiamo tutto
+        // il problema layout.
+        if hwFormat.channelCount > 1 {
+            self.speechFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: hwFormat.sampleRate,
+                channels: 1,
+                interleaved: false
+            )
+            self.speechConverter = nil // not used in this path
+            NotchLogger.shared.log("info", "[stream-rec] mono extract active: \(hwFormat.sampleRate)Hz/\(hwFormat.channelCount)ch → \(hwFormat.sampleRate)Hz/1ch (channel 0)")
+        } else {
+            self.speechFormat = nil
+            self.speechConverter = nil
+        }
 
         // macOS 26.x's AVAudioFile refuses to write an interleaved Int16
         // PCM stream produced by AVAudioConverter from the tap thread —
@@ -108,10 +171,27 @@ final class StreamingRecorder {
             // no locks, no Objective-C.
             let rms = Self.computeRMS(buffer: buf)
 
-            // Fan out the raw buffer (e.g. to SFSpeechRecognizer). Apple's
-            // request.append is documented thread-safe and explicitly
-            // designed for audio-tap use, so we forward without hopping.
-            self.onBuffer?(buf)
+            // Forward to SFSpeechRecognizer. Two paths:
+            //   - multi-channel input (voiceProcessing 5ch on macOS): extract
+            //     channel 0 into a fresh mono buffer (same sample rate). Apple
+            //     STT accepts any sample rate 16-48kHz; the channel 0 path
+            //     avoids the silent-downmix bug AVAudioConverter has on 5ch
+            //     without an explicit channel layout.
+            //   - mono input: pass through.
+            // Buffer alloc is fixed-size and the loop is a memcpy-equivalent.
+            if let monoFmt = self.speechFormat, hwFormat.channelCount > 1 {
+                let frameLen = Int(buf.frameLength)
+                if frameLen > 0,
+                   let monoBuf = AVAudioPCMBuffer(pcmFormat: monoFmt, frameCapacity: AVAudioFrameCount(frameLen)),
+                   let srcCh0 = buf.floatChannelData?[0],
+                   let dstCh0 = monoBuf.floatChannelData?[0] {
+                    for i in 0..<frameLen { dstCh0[i] = srcCh0[i] }
+                    monoBuf.frameLength = AVAudioFrameCount(frameLen)
+                    self.onBuffer?(monoBuf)
+                }
+            } else {
+                self.onBuffer?(buf)
+            }
 
             // File write hops to the serial queue so we never touch
             // ExtAudioFile from the real-time audio IO thread. `buf` is

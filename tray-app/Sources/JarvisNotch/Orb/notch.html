@@ -205,6 +205,9 @@
       align-self: center;
     }
     .live-timer.audio { color: rgba(120, 230, 180, 0.85); background: rgba(120, 230, 180, 0.10); }
+    /* WAIT chip: tempo da reply complete a primo audio out (synthesis + network).
+       Arancio per distinguerlo dal verde dell'AUDIO (durata playback). */
+    .live-timer.wait  { color: rgba(255, 184, 77, 0.95); background: rgba(255, 184, 77, 0.12); }
     .live-timer.frozen::before { animation: none; opacity: 0.45; }
     .live-timer::before {
       content: '';
@@ -870,6 +873,11 @@
           if (event.type === 'message.out') {
             var text = event.data && event.data.text;
             var from = event.data && event.data.from;
+            // Anchor del WAIT timer: l'input dell'utente è ufficialmente
+            // arrivato al server, da qui parte il countdown "quanto aspetto
+            // prima di sentire Lorenzo". Indipendente da chi ha originato
+            // (notch native o dashboard send) — message.out è universale.
+            try { if (typeof noteUserInputDone === 'function') noteUserInputDone(); } catch (_) {}
             // Skip when the message originates from this notch — the
             // bundled triggerSend has already pushed the user bubble
             // locally. Without this guard the user sees their input twice.
@@ -1016,6 +1024,11 @@
             if (!el.__lifecycleStarted) {
               el.__lifecycleStarted = true;
               postPhase('start');
+              // VAD resta attivo durante TTS playback. L'AEC hardware
+              // (voiceProcessing in StreamingRecorder.swift) sottrae il
+              // segnale degli speakers dal mic input → il VAD non sente
+              // più l'echo del TTS, sente solo l'utente. Questo abilita
+              // il barge-in voce-attivato durante che Lorenzo parla.
             }
           });
         });
@@ -1235,45 +1248,115 @@
       // (or the strip below it) the moment TTS playback starts and ticks
       // 10× per second until playback ends. After end the chip freezes
       // with the final duration and stays as a permanent record.
+      //
+      // Two distinct timings tracked per turn:
+      //   - WAIT  = USER STOPPED SPEAKING → first audio out
+      //             (STT finalize + LLM thinking + TTS synthesis + network)
+      //             This is the human-perceived latency: "I shut up, how long
+      //             before I hear Jarvis?"
+      //   - PLAY  = first audio out → playback end (actual speech duration)
+      //
+      // For TEXT-input turns (dashboard send button), there's no "user stopped
+      // speaking" anchor — we set lastUserInputAt at message.out emit instead.
+      var lastUserInputAt = 0;      // set on user input (voice end OR text submit)
       var lastAudioStart = 0;
       var lastAssistantBubbleRef = null;
-      var audioTimerEl = null;
+      var audioTimerEl = null;       // chip live durante PLAY (audio.X.Xs)
+      var waitTimerEl = null;        // chip live durante WAIT (attesa.X.Xs)
       var audioTimerInterval = null;
+      var waitTimerInterval = null;
+      function startWaitLiveTimer(target) {
+        if (waitTimerInterval) clearInterval(waitTimerInterval);
+        if (!lastUserInputAt) return;  // niente anchor → niente timer
+        waitTimerEl = document.createElement('span');
+        waitTimerEl.className = 'live-timer wait';
+        // Tick immediately with the elapsed already-passed time (since user
+        // stopped speaking) so the chip starts at, e.g., 0.6s if STT took
+        // 0.6s before this hook landed.
+        var initialS = (Date.now() - lastUserInputAt) / 1000;
+        waitTimerEl.textContent = 'attesa ' + initialS.toFixed(1) + 's';
+        target.appendChild(waitTimerEl);
+        waitTimerInterval = setInterval(function () {
+          if (!waitTimerEl) return;
+          var s = (Date.now() - lastUserInputAt) / 1000;
+          waitTimerEl.textContent = 'attesa ' + s.toFixed(1) + 's';
+        }, 100);
+      }
+      function stopWaitLiveTimer() {
+        if (waitTimerInterval) clearInterval(waitTimerInterval);
+        waitTimerInterval = null;
+      }
       function startAudioLiveTimer(target) {
         if (audioTimerInterval) clearInterval(audioTimerInterval);
         audioTimerEl = document.createElement('span');
         audioTimerEl.className = 'live-timer audio';
-        audioTimerEl.textContent = '0.0s';
+        audioTimerEl.textContent = 'audio 0.0s';
         target.appendChild(audioTimerEl);
         audioTimerInterval = setInterval(function () {
           if (!audioTimerEl) return;
           var s = (Date.now() - lastAudioStart) / 1000;
-          audioTimerEl.textContent = s.toFixed(1) + 's';
+          audioTimerEl.textContent = 'audio ' + s.toFixed(1) + 's';
         }, 100);
       }
       function stopAudioLiveTimer() {
         if (audioTimerInterval) clearInterval(audioTimerInterval);
         audioTimerInterval = null;
       }
+      // Called when the user finishes their input. For voice: when
+      // StreamingRecorder fires onSilenceDetected (Apple STT done).
+      // For text: when message.out is emitted (user pressed send).
+      // The WAIT timer starts here and ticks until first audio out lands.
+      // We don't attach the chip yet — there's no assistant bubble until
+      // `thinking` state spawns one. The chip is created lazily on the first
+      // tick by noteFirstAssistantTick().
+      function noteUserInputDone() {
+        lastUserInputAt = Date.now();
+      }
+      // Called when the pending assistant bubble exists (state goes to
+      // thinking). At this point we can attach the WAIT chip and start
+      // ticking. The elapsed since lastUserInputAt is already 0..few hundred
+      // ms (STT finalize) — startWaitLiveTimer renders that immediately.
+      function maybeStartWaitChip() {
+        if (!lastUserInputAt || waitTimerEl) return;
+        var bubble = pending || lastAssistantBubble();
+        if (!bubble) return;
+        var host = bubble.__timingStripAttached || bubble;
+        startWaitLiveTimer(host);
+      }
       function noteAudioStart() {
         lastAudioStart = Date.now();
+        // Stop WAIT timer e freezalo come record permanente. Sanity-check
+        // sul valore: deve essere positivo e < 60s. Out-of-range = bug
+        // (stale lastUserInputAt across turns, or text-input edge case).
+        stopWaitLiveTimer();
+        if (waitTimerEl && lastUserInputAt > 0) {
+          var waitMs = lastAudioStart - lastUserInputAt;
+          if (waitMs >= 0 && waitMs < 60_000) {
+            waitTimerEl.textContent = 'attesa ' + (waitMs / 1000).toFixed(1) + 's';
+            waitTimerEl.classList.add('frozen');
+          } else {
+            try { waitTimerEl.remove(); } catch (_) {}
+          }
+          waitTimerEl = null;
+        } else if (waitTimerEl) {
+          try { waitTimerEl.remove(); } catch (_) {}
+          waitTimerEl = null;
+        }
+        // (Re-resolve target in case bubble è cambiato durante WAIT)
         lastAssistantBubbleRef = pending || lastAssistantBubble();
         if (!lastAssistantBubbleRef) return;
-        // Prefer the timing strip below the bubble; if not attached yet
-        // (audio started before finalize), drop the chip into the bubble
-        // itself so it's still visible.
         var host = lastAssistantBubbleRef.__timingStripAttached || lastAssistantBubbleRef;
         startAudioLiveTimer(host);
       }
       function noteAudioStop() {
         stopAudioLiveTimer();
         if (audioTimerEl) {
-          // Freeze the chip in place — final duration is already in its
-          // textContent thanks to the last interval tick.
+          // Freeze il chip — il valore è già nel textContent dall'ultimo tick.
           audioTimerEl.classList.add('frozen');
           audioTimerEl = null;
         }
         lastAudioStart = 0;
+        lastReplyCompleteAt = 0;
         lastAssistantBubbleRef = null;
       }
 
@@ -1305,6 +1388,10 @@
             : null);
           if (stripParsed) attachAssistantStrip(pending, stripParsed);
         }
+        // Bubble finalized — try to attach the WAIT chip if not already done.
+        // (It usually attaches earlier, on the `thinking` agent-state, but
+        // race conditions can land us here first.) Niente timer per turni aborted.
+        if (clean) maybeStartWaitChip();
         llmTimerEl = null;
         pendingTextEl = null;
         pending = null;

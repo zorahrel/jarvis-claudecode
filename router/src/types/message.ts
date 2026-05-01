@@ -55,6 +55,14 @@ export interface IncomingMessage {
   messageId?: string;
   /** Reply function to send response back */
   reply: (text: string) => Promise<void>;
+  /**
+   * Optional per-turn assistant DELTA callback. Fires for every text chunk
+   * as it arrives from the LLM, before the full reply is ready. Used by the
+   * notch streaming-TTS path to feed Cartesia WS incrementally
+   * (`JARVIS_TTS_LLM_STREAM=1`). Errors thrown are caught upstream — never
+   * break turn handling.
+   */
+  onChunk?: (delta: string) => void;
   /** Send a file to the chat */
   sendFile?: (filePath: string, caption?: string) => Promise<void>;
   /** Start typing indicator, returns a stop function */
@@ -73,4 +81,8 @@ export interface IncomingMessage {
   timings?: MessageTimings;
   /** When set, bypasses route.agent and uses this agent config instead. Used for owner-only @jarvis invocations. */
   agentOverride?: import("./config").AgentConfig;
+  /** When set, replaces the agent's `model` for this single call. Used by the
+   *  notch toolbar's model selector so the user can A/B test latency/quality
+   *  without restarting the router or editing agent.yaml. */
+  modelOverride?: string;
 }

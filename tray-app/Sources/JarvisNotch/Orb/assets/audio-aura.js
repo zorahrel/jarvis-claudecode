@@ -22,10 +22,22 @@
 (function () {
   "use strict";
 
-  const ORB = document.getElementById("three-container");
+  // Deferred init: il bundle three.js crea #three-container in parallelo,
+  // potrebbe non essere ancora nel DOM quando questo script viene parsed.
+  // Polling leggero (max 2s) per attendere — niente warning se l'orb non
+  // appare (es. embed mirror senza three).
+  let ORB = document.getElementById("three-container");
   if (!ORB) {
-    console.warn("[aura] #three-container not found, aura disabled");
-    return;
+    let attempts = 0;
+    const tryFindOrb = () => {
+      ORB = document.getElementById("three-container");
+      if (ORB) return; // proceed to setup below (handled by re-trigger)
+      if (++attempts < 20) setTimeout(tryFindOrb, 100);
+      // After 2s give up silently — orb not in this page (e.g. degraded mode)
+    };
+    tryFindOrb();
+    // Setup the rest of the script anyway: callbacks/aura state still
+    // exposed; ORB just won't be animated. setIntensity becomes a no-op.
   }
 
   // Stato dell'animazione — un'unica sorgente di "intensità" 0..1 a cui
@@ -53,13 +65,19 @@
       // - opacity: 0.85 (idle) → 1.0 (massimo)
       const scale = 1 + 0.18 * Math.pow(intensity, 1.5);
       const opacity = 0.85 + 0.15 * intensity;
-      ORB.style.transform = `translate(-50%, -50%) scale(${scale.toFixed(3)})`;
-      ORB.style.opacity = opacity.toFixed(3);
+      // Guard: ORB might not exist yet during boot or in stripped-down
+      // embed contexts (dashboard mirror without three.js bundle).
+      if (ORB && ORB.style) {
+        ORB.style.transform = `translate(-50%, -50%) scale(${scale.toFixed(3)})`;
+        ORB.style.opacity = opacity.toFixed(3);
+      }
 
       // Stop il loop quando siamo tornati piatti per evitare drain CPU
       if (intensity < 0.001 && targetIntensity < 0.001) {
-        ORB.style.transform = "translate(-50%, -50%)";
-        ORB.style.opacity = "";
+        if (ORB && ORB.style) {
+          ORB.style.transform = "translate(-50%, -50%)";
+          ORB.style.opacity = "";
+        }
         intensity = 0;
         active = false;
         rafId = null;

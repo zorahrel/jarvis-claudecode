@@ -669,12 +669,32 @@ final class NotchController: ObservableObject {
     private let transcriber = VoiceTranscriber()
 
     /// Forwarded from `audioLifecycle` JS messages — true while the
-    /// assistant's TTS audio element is playing. The transcriber drops
-    /// buffers during this window so Jarvis doesn't transcribe its own
-    /// voice leaking into the mic.
+    /// assistant's TTS audio element is playing. We act on three layers:
+    ///
+    /// 1. VoiceTranscriber drops Apple SFSpeechRecognizer buffers
+    ///    (was already there before this fix).
+    /// 2. If the StreamingRecorder is currently capturing, KILL the capture
+    ///    without uploading. Otherwise the mic picks up the speakers, the
+    ///    silence-detector eventually trips, the WAV ships to whisper-cli
+    ///    on the server, and the user sees their own TTS transcribed back
+    ///    as a fake user message ("STABILE ROUTER OK SERVIZIO ONLINE..." in
+    ///    the screenshot). This was the most user-visible bug pre-fix.
+    /// 3. Track the flag publicly so the hover-dwell arming code can refuse
+    ///    to start a new capture while TTS is playing.
     func setAssistantSpeaking(_ speaking: Bool) {
+        // Solo come safety/ridondanza — il vero echo-killer è ora l'AEC
+        // hardware (voiceProcessing) sul mic input. Apple SFSpeechRecognizer
+        // riceve audio già pulito dal TTS speakers.
         transcriber.setAssistantSpeaking(speaking)
+        NotchLogger.shared.log("info", "[setAssistantSpeaking] \(speaking)")
     }
+
+    /// Safety timer that auto-resets `assistantAudioPlaying` if the WebView
+    /// `audioLifecycle 'end'` event never arrives (e.g., MP3 stream errors,
+    /// browser bug, network drop). Without this, the flag stuck at true would
+    /// permanently lock out future hover-arm decisions that read it.
+    var assistantSpeakingResetTimer: Timer?
+    static let assistantSpeakingMaxDuration: TimeInterval = 60.0
 
     /// Track whether the WebView <audio> element is currently playing TTS.
     /// Set by `audioLifecycle` JS messages, read by `handleVADSpeechStart`
@@ -682,6 +702,12 @@ final class NotchController: ObservableObject {
     /// Internal access (not private) because the WKScriptMessage handler
     /// in the extension at the bottom of this file writes to it.
     var assistantAudioPlaying: Bool = false
+
+    /// True while the live SFSpeechRecognizer task is consuming buffers.
+    /// Promoted from a local var inside startStreamingVoice() to a property
+    /// so setAssistantSpeaking() can cancel the recognizer when echo guard
+    /// stops the recorder mid-capture.
+    private var transcriberRunning: Bool = false
 
     /// Silero VAD reported the user started speaking (from notch.html worker
     /// via vad-controller.js). Two outcomes:
@@ -1092,6 +1118,14 @@ final class NotchController: ObservableObject {
     }
 
     private func startStreamingVoice() {
+        // NOTE: Pre-arm echo refusal removed (was causing stuck-mic-off bug
+        // when audioLifecycle 'end' didn't fire — flag stayed true forever).
+        // Echo handling now relies on:
+        //   1. setAssistantSpeaking(true) → VoiceTranscriber drops buffers
+        //   2. setAssistantSpeaking(true) → kills mic mid-capture if it was open
+        //      when TTS started (no upload, log [echo-guard])
+        // The mic re-opens normally on every hover. If TTS happens to start
+        // RIGHT AFTER arm completes, layer 2 cleans up within milliseconds.
         NotchLogger.shared.log("info", "[hover-rec] start")
         pushMicState(on: true)
         // Show the bottom-right cancel affordance — quarter-circle with X
@@ -1104,7 +1138,6 @@ final class NotchController: ObservableObject {
         // Best-effort: live STT alongside the WAV capture. If Apple is
         // unavailable or denied permission, we fall back silently to the
         // whisper round-trip on the uploaded WAV (the existing path).
-        var transcriberRunning = false
         do {
             try transcriber.start(
                 onPartial: { [weak self] text in
@@ -1114,7 +1147,7 @@ final class NotchController: ObservableObject {
                     Task { @MainActor in self?.pushVoiceFinal(text: text) }
                 }
             )
-            transcriberRunning = true
+            self.transcriberRunning = true
         } catch {
             NotchLogger.shared.log("warn", "[hover-rec] transcriber unavailable: \(error.localizedDescription)")
         }
@@ -1148,7 +1181,7 @@ final class NotchController: ObservableObject {
             stickyCall = false
             hideCancelAffordance()
             updateAffordanceVisibility()
-            if transcriberRunning { transcriber.cancel() }
+            if self.transcriberRunning { transcriber.cancel(); self.transcriberRunning = false }
         }
     }
 
@@ -2510,9 +2543,28 @@ final class NotchWebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelega
             let phase = (body["phase"] as? String) ?? ""
             Task { @MainActor in
                 NotchController.shared.setAssistantSpeaking(phase == "start")
-                // Anche il VAD handler legge questa flag per decidere se un
-                // speechStart è un barge-in o solo un normal start.
-                NotchController.shared.assistantAudioPlaying = (phase == "start")
+                let isStart = (phase == "start")
+                NotchController.shared.assistantAudioPlaying = isStart
+                NotchLogger.shared.log("info", "[audioLifecycle] \(phase)")
+                // Safety auto-reset: if 'end' never arrives, force-clear after
+                // 60s. Otherwise stuck flag locks out future logic that reads it.
+                NotchController.shared.assistantSpeakingResetTimer?.invalidate()
+                if isStart {
+                    NotchController.shared.assistantSpeakingResetTimer = Timer.scheduledTimer(
+                        withTimeInterval: NotchController.assistantSpeakingMaxDuration,
+                        repeats: false
+                    ) { _ in
+                        Task { @MainActor in
+                            if NotchController.shared.assistantAudioPlaying {
+                                NotchLogger.shared.log("warn", "[audioLifecycle] safety auto-reset — 'end' never arrived")
+                                NotchController.shared.assistantAudioPlaying = false
+                                NotchController.shared.setAssistantSpeaking(false)
+                            }
+                        }
+                    }
+                } else {
+                    NotchController.shared.assistantSpeakingResetTimer = nil
+                }
             }
         case "voicePartial":
             // Live SFSpeechRecognizer transcript while the user is talking.

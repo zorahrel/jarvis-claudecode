@@ -1,4 +1,22 @@
 /**
+ * Strip ONLY the <spoken>...</spoken> delimiters, keep their inner content.
+ * Used for the chat log display — il display mostra TUTTO il testo (parlato +
+ * non-parlato), ma senza i tag literal che hanno solo significato per la TTS.
+ *
+ * Differente da extractSpoken (che restituisce SOLO il contenuto dei tag).
+ *
+ *   in:  "Penso... <spoken>OK fatto.</spoken> Tool output: ..."
+ *   out: "Penso... OK fatto. Tool output: ..."
+ */
+export function stripSpokenTags(text: string): string {
+  return text
+    .replace(/<spoken>/gi, "")
+    .replace(/<\/spoken>/gi, "")
+    .replace(/\s{3,}/g, " ")  // collapse extra whitespace from removed tags
+    .trim();
+}
+
+/**
  * Extract the speakable subset of an LLM response for the notch TTS pipeline.
  *
  * The notch agent is instructed (via `agents/notch/CLAUDE.md`) to wrap the

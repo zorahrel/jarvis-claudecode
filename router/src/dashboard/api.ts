@@ -1937,12 +1937,20 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     // ffmpeg, or ElevenLabs streaming endpoint) straight to the WebView
     // <audio> element as chunked audio/mpeg. Playback can start while
     // bytes are still arriving — Cartesia: ~100-200ms TTFA; ElevenLabs:
-    // ~150-250ms TTFA. Single-consumer: the registered body is removed
-    // from the map on take.
+    // ~150-250ms TTFA.
+    //
+    // Multi-consumer caching: WebKit fetches an audio URL TWICE in many
+    // cases — first a probe range request to validate, then the actual
+    // playback fetch. Single-consumer registry (original ElevenLabs
+    // pattern) made the second fetch find nothing → silent playback.
+    // takeTtsStream now tees the stream on first hit, buffers in
+    // background, serves from buffer on subsequent hits.
     const id = path.slice("/api/notch/tts-stream/".length);
     if (!/^[0-9a-fA-F-]{8,}$/.test(id)) {
       json(req, res, { error: "not found" }, 404); return;
     }
+    const range = req.headers["range"] ?? "";
+    log.info({ id, range, ua: (req.headers["user-agent"] || "").slice(0, 60) }, "[tts-stream] consumer hit");
     const { takeTtsStream } = await import("../services/tts.js");
     const body = takeTtsStream(id);
     if (!body) { json(req, res, { error: "expired" }, 404); return; }
@@ -1950,6 +1958,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     res.writeHead(200, {
       "Content-Type": "audio/mpeg",
       "Cache-Control": "no-store",
+      // Non offriamo range — WebKit allora non fa probe request separati
+      "Accept-Ranges": "none",
       "Access-Control-Allow-Origin": corsOrigin(req),
     });
     const node = Readable.fromWeb(body as any);

@@ -5,8 +5,9 @@ import { logger } from "../services/logger";
 import { emitNotch } from "../notch/events";
 import { appendHistory } from "../notch/history";
 import { getPrefs } from "../notch/prefs";
-import { speakToFile, registerCartesiaStream } from "../services/tts";
-import { extractSpoken } from "../services/spoken-extractor";
+import { speakToFile, registerCartesiaStream, registerExternalStream } from "../services/tts";
+import { extractSpoken, stripSpokenTags } from "../services/spoken-extractor";
+import { CartesiaStreamSession } from "../services/cartesia-ws";
 import { tmpdir } from "os";
 import { join, basename } from "path";
 
@@ -33,6 +34,14 @@ export class NotchConnector implements Connector {
    */
   private activeGenId = 0;
 
+  /**
+   * Currently active LLM-streaming TTS session, if any. Set when inject()
+   * decides to take the streaming path (JARVIS_TTS_LLM_STREAM=1 + tts pref on).
+   * Read by barge() and abort() to cancel the in-flight Cartesia context so
+   * the user doesn't hear the tail of an interrupted reply.
+   */
+  private currentStreamSession: CartesiaStreamSession | null = null;
+
   constructor(private _config: Config) {
     NotchConnector.instance = this;
   }
@@ -49,6 +58,10 @@ export class NotchConnector implements Connector {
   abort(): void {
     this.activeGenId++;
     log.info("Notch abort — suppressing in-flight reply");
+    if (this.currentStreamSession) {
+      this.currentStreamSession.cancel();
+      this.currentStreamSession = null;
+    }
     emitNotch({ type: "state.change", data: { state: "idle" } });
   }
 
@@ -65,6 +78,12 @@ export class NotchConnector implements Connector {
   barge(): void {
     this.activeGenId++;
     log.info("Notch barge-in — suppressing TTS, user is speaking");
+    // Hard cancel the streaming Cartesia context if active. Otherwise the
+    // synthesized tail keeps arriving and the WebView would have to discard it.
+    if (this.currentStreamSession) {
+      this.currentStreamSession.cancel();
+      this.currentStreamSession = null;
+    }
     emitNotch({ type: "audio.stop", data: {} });
     emitNotch({ type: "state.change", data: { state: "recording" } });
   }
@@ -86,6 +105,13 @@ export class NotchConnector implements Connector {
   async inject(text: string, from = "notch"): Promise<void> {
     const myGen = ++this.activeGenId;
     const messageId = `notch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Defensively cancel any prior streaming session that's still alive.
+    // Normal completion clears it; a quick second inject before audio
+    // playback ends would leak audio without this guard.
+    if (this.currentStreamSession) {
+      try { this.currentStreamSession.cancel(); } catch {}
+      this.currentStreamSession = null;
+    }
     // Echo the user's line back to every notch subscriber so the chat log
     // fills in immediately (native WKWebView + dashboard iframe mirror), and
     // persist it so a restart/reload rehydrates the conversation.
@@ -98,6 +124,55 @@ export class NotchConnector implements Connector {
     const earlyPrefs = await getPrefs().catch(() => null);
     const modelOverride = earlyPrefs?.model ?? undefined;
 
+    // ── LLM-STREAM-TO-TTS PATH ──
+    // When `JARVIS_TTS_LLM_STREAM=1`, open a Cartesia WS streaming session
+    // BEFORE the LLM call. Each LLM text delta gets pushed straight into the
+    // session's spoken-tag parser → sentence buffer → Cartesia. Audio starts
+    // playing on the user's machine roughly 400ms after the FIRST sentence
+    // is complete — instead of waiting for the whole reply.
+    //
+    // Decision logic:
+    //   - Only if pref `tts` is on AND not muted (user-controlled in toolbar)
+    //   - Only if env enables it (gradual rollout / easy A/B vs file-mode)
+    //   - Only if Cartesia API key is present
+    // Otherwise: fall back to the original "wait for full reply, then synth"
+    // path inside reply() below.
+    const llmStreamEnabled =
+      process.env.JARVIS_TTS_LLM_STREAM === "1" &&
+      !!process.env.CARTESIA_API_KEY &&
+      !!earlyPrefs?.tts &&
+      !earlyPrefs?.mute;
+
+    let streamSession: CartesiaStreamSession | null = null;
+    let streamId: string | null = null;
+    if (llmStreamEnabled) {
+      try {
+        streamSession = new CartesiaStreamSession({
+          apiKey: process.env.CARTESIA_API_KEY!,
+          voiceId: process.env.CARTESIA_VOICE_IT ?? "ee16f140-f6dc-490e-a1ed-c1d537ea0086",
+          modelId: process.env.CARTESIA_MODEL_ID ?? "sonic-3",
+          language: "it",
+        });
+        streamId = registerExternalStream(streamSession.getMP3Stream());
+        this.currentStreamSession = streamSession;
+        // Emit audio.play SUBITO. The WebView <audio> element pre-attaches
+        // and waits on the chunked transfer; bytes start flowing only when
+        // Cartesia has the first sentence ready. This lets the browser cut
+        // its own decode latency to near-zero on first chunk arrival.
+        emitNotch({
+          type: "audio.play",
+          data: { url: `/api/notch/tts-stream/${streamId}`, mime: "audio/mpeg" },
+        });
+        log.info({ engine: "cartesia-ws-llm-stream", streamId, ctx: streamSession.contextId }, "[tts] LLM-stream started");
+      } catch (err) {
+        log.warn({ err }, "[tts] LLM-stream open failed, falling back to post-reply synth");
+        if (streamSession) { try { streamSession.cancel(); } catch {} }
+        streamSession = null;
+        streamId = null;
+        this.currentStreamSession = null;
+      }
+    }
+
     const msg: IncomingMessage = {
       channel: "notch",
       from,
@@ -106,17 +181,55 @@ export class NotchConnector implements Connector {
       messageId,
       modelOverride,
       timings: { received: Date.now() },
+      onChunk: (delta) => {
+        // Drop deltas if the turn was aborted between LLM call and now.
+        if (myGen !== this.activeGenId) return;
+        // NOTE: message.chunk SSE emission tentato e ritirato 2026-05-01.
+        // Causava duplicato visivo nel notch: bundle minified non riconosce
+        // il pattern "chunk-then-in" e accodava la final bubble a quella
+        // pending già creata dai chunks. Per un display in streaming token-
+        // per-token serve un refactor del bundle (modificare il listener
+        // SSE message.in del bundle perché sostituisca invece di appendere).
+        // Per ora il display resta no-stream lato testo; lo streaming TTS
+        // (Cartesia WS qui sotto) è quello che importa per latenza percepita.
+
+        // Push to Cartesia WS if streaming session is open. The session
+        // internally parses spoken tags + buffers to sentence boundaries.
+        if (streamSession) {
+          try { streamSession.pushChunk(delta); }
+          catch (err) { log.warn({ err }, "stream pushChunk threw"); }
+        }
+      },
       reply: async (response: string) => {
         // Drop the reply entirely if abort() was called during the turn.
         if (myGen !== this.activeGenId) {
           log.info("Notch reply suppressed — generation aborted");
           return;
         }
+        // Display: strippa SOLO i delimitatori <spoken>/</spoken>, mantieni
+        // il contenuto. Chat log mostra testo cleaned, TTS estrae solo parti
+        // dentro i tag (extractSpoken qui sotto). Coerenza: storage history
+        // riceve lo stesso testo del display.
+        const displayText = stripSpokenTags(response);
         emitNotch({
           type: "message.in",
-          data: { text: response, from, agent: "notch" },
+          data: { text: displayText, from, agent: "notch" },
         });
-        appendHistory({ role: "agent", ts: Date.now(), from: "notch", text: response }).catch(() => {});
+        appendHistory({ role: "agent", ts: Date.now(), from: "notch", text: displayText }).catch(() => {});
+
+        // ── LLM-STREAM PATH FINALIZE ──
+        // If we opened a streaming session at the top of inject(), the LLM
+        // text deltas have ALREADY been pushed to Cartesia turn-by-turn.
+        // Here we just flush the trailing partial sentence and let Cartesia
+        // emit `done`, which closes ffmpeg → WebView <audio> hits EOF.
+        if (streamSession) {
+          try { streamSession.finalize(); }
+          catch (err) { log.warn({ err }, "stream finalize threw"); }
+          // Don't null out this.currentStreamSession yet — barge() during
+          // the audio tail still needs to cancel it. It's reaped below in
+          // the finally block of inject() (after typical playback time).
+          return;
+        }
         // Fire-and-forget TTS. Router synthesizes MP3 via mlx-audio
         // (Voxtral 4B IT, SOTA open-source) and emits `audio.play`;
         // the native notch's <audio> element streams it back. If

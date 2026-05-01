@@ -68,6 +68,16 @@ interface PendingTtsStream {
   createdAt: number;
   /** Best-effort byte counter, populated as the stream is consumed. */
   bytes: number;
+  /**
+   * Buffered copy populated in background after the first take. Subsequent
+   * `takeTtsStream` calls return a stream over this buffer instead of
+   * draining the upstream a second time. Solves WebKit's double-fetch
+   * pattern (probe + playback) on <audio> elements without losing
+   * streaming semantics for the first consumer.
+   */
+  cached?: Uint8Array;
+  /** True once `body` has been claimed by a first consumer. */
+  consumed: boolean;
 }
 const pendingStreams = new Map<string, PendingTtsStream>();
 const STREAM_TTL_MS = 60_000;
@@ -80,6 +90,19 @@ function gcStreams() {
       pendingStreams.delete(k);
     }
   }
+}
+
+/**
+ * Wrap a Uint8Array in a ReadableStream<Uint8Array> for replaying buffered
+ * TTS output to subsequent consumers (WebKit's probe + playback double-fetch).
+ */
+function streamFromBuffer(buf: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(buf);
+      controller.close();
+    },
+  });
 }
 
 /**
@@ -125,7 +148,7 @@ export async function registerElevenLabsStream(text: string): Promise<string> {
 
   gcStreams();
   const id = randomUUID();
-  pendingStreams.set(id, { body: resp.body, createdAt: Date.now(), bytes: 0 });
+  pendingStreams.set(id, { body: resp.body, createdAt: Date.now(), bytes: 0, consumed: false });
   return id;
 }
 
@@ -298,21 +321,105 @@ export async function registerCartesiaStream(text: string): Promise<string> {
 
   gcStreams();
   const id = randomUUID();
-  pendingStreams.set(id, { body: mp3Stream, createdAt: Date.now(), bytes: 0 });
+  pendingStreams.set(id, { body: mp3Stream, createdAt: Date.now(), bytes: 0, consumed: false });
   return id;
 }
 
 /**
- * Hand off the registered body to the HTTP endpoint. Returns null if the ID
- * is unknown or the entry already expired. Removes the entry — a stream is
- * single-consumer.
+ * Register an externally-built ReadableStream<Uint8Array> in the pendingStreams
+ * registry, return a stream id usable with /api/notch/tts-stream/{id}.
+ *
+ * Used by the LLM-streaming path (CartesiaStreamSession in cartesia-ws.ts)
+ * which builds its own MP3 stream from the Cartesia WS pipeline. This lets
+ * the connector emit `audio.play` URL BEFORE any audio bytes exist, so the
+ * WebView <audio> element pre-attaches and starts playing the moment chunks
+ * arrive.
+ */
+export function registerExternalStream(body: ReadableStream<Uint8Array>): string {
+  gcStreams();
+  const id = randomUUID();
+  pendingStreams.set(id, { body, createdAt: Date.now(), bytes: 0, consumed: false });
+  return id;
+}
+
+/**
+ * Hand off the registered body to the HTTP endpoint.
+ *
+ * Multi-consumer aware: WebKit's `<audio>` element typically issues TWO
+ * GETs for the same URL (a probe request + the playback request). Single
+ * consumer pattern (original ElevenLabs) failed silently on the second
+ * GET because the registry entry was already removed.
+ *
+ * Strategy:
+ *   - First call: tees the upstream body, hands one branch to the caller
+ *     (live streaming → low TTFA preserved), drains the other branch into
+ *     `entry.cached` Uint8Array in background.
+ *   - Subsequent calls: return a fresh ReadableStream over `entry.cached`.
+ *     Blocks (polls) up to 100ms waiting for cached to populate so the
+ *     second fetch doesn't 404 if it arrives before the buffer drained.
+ *   - Entry stays in registry until TTL expires (60s) so the second fetch
+ *     never finds null. gcStreams() reaps later.
+ *
+ * Returns null only if the id was never registered or already expired.
  */
 export function takeTtsStream(id: string): ReadableStream<Uint8Array> | null {
   const entry = pendingStreams.get(id);
-  log.info({ id, found: !!entry, registry: pendingStreams.size }, "[tts] take stream");
+  log.info({ id, found: !!entry, consumed: entry?.consumed, hasCached: !!entry?.cached, registry: pendingStreams.size }, "[tts] take stream");
   if (!entry) return null;
-  pendingStreams.delete(id);
-  return entry.body;
+
+  // Subsequent consumer: serve from buffer (which may still be filling)
+  if (entry.consumed) {
+    if (entry.cached) {
+      return streamFromBuffer(entry.cached);
+    }
+    // Cache not yet populated — return a stream that resolves later.
+    // Polling is acceptable: typical case the buffer fills in <2s and we
+    // poll every 50ms (max 40 ticks before giving up at 2s).
+    let ticks = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        while (ticks++ < 40) {
+          if (entry.cached) {
+            controller.enqueue(entry.cached);
+            controller.close();
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        controller.error(new Error("tts buffer never populated"));
+      },
+    });
+  }
+
+  // First consumer: tee the upstream so we can both stream + buffer in parallel
+  entry.consumed = true;
+  const [forCaller, forBuffer] = entry.body.tee();
+  // Background drain into Uint8Array
+  (async () => {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const reader = forBuffer.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          total += value.length;
+        }
+      }
+    } catch (err) {
+      log.warn({ err, id }, "[tts] background tee drain failed");
+      return;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
+    entry.cached = out;
+    entry.bytes = total;
+    log.debug({ id, bytes: total }, "[tts] cache populated");
+  })();
+  return forCaller;
 }
 
 export interface SpeakResult {
