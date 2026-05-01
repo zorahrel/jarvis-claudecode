@@ -115,36 +115,71 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
   },
 
   finalizeAssistant: (text, footer) => {
-    const id = get().pendingId;
-    set((st) => {
-      // If the agent emitted nothing speakable AND we have no chunks,
-      // we drop the placeholder. Otherwise replace text + freeze pending.
-      const target = id ? st.bubbles.find((b) => b.id === id) : null;
-      if (!target) {
-        // No pending — the bundle/router skipped state.change for some
-        // reason. Append a fresh assistant bubble with the final text.
-        if (!text.trim()) return st;
-        return {
-          bubbles: [
-            ...st.bubbles,
-            {
-              id: nextId("a"),
-              role: "assistant",
-              text,
-              ts: Date.now(),
-              footer: footer ?? undefined,
-            },
-          ],
-          pendingId: null,
-        };
-      }
-      return {
+    const cur = get();
+    const id = cur.pendingId;
+    const target = id ? cur.bubbles.find((b) => b.id === id) : null;
+
+    // Decide whether to do client-side word-by-word reveal.
+    // We do it ONLY if all of:
+    //   - we have a pending bubble that's still empty (no real-time chunks
+    //     ever landed during the turn — typical of extended-thinking models)
+    //   - the final text is long enough to benefit from a perceived
+    //     "typing" cadence (>40 chars threshold)
+    //   - we're not in dashboard mirror (lower-priority context)
+    // If real chunks already landed (target.text non empty), we just freeze.
+    const TYPING_THRESHOLD = 40;
+    const hadStream = target && target.text.length > 0;
+    const wantsClientStream = !!target && !hadStream && text.length > TYPING_THRESHOLD;
+
+    if (!target) {
+      // No pending — the SSE state.change skipped. Append a fresh bubble.
+      if (!text.trim()) return;
+      set((st) => ({
+        bubbles: [
+          ...st.bubbles,
+          { id: nextId("a"), role: "assistant", text, ts: Date.now(), footer: footer ?? undefined },
+        ],
+        pendingId: null,
+      }));
+      return;
+    }
+
+    if (!wantsClientStream) {
+      // Atomic finalize — chunks already filled the bubble OR text is short.
+      set((st) => ({
         bubbles: st.bubbles.map((b) =>
           b.id === id ? { ...b, text, pending: false, footer: footer ?? b.footer } : b,
         ),
         pendingId: null,
-      };
-    });
+      }));
+      return;
+    }
+
+    // Client-side word-by-word reveal. SAFE because by the time we're
+    // here message.in has already been dispatched — no more chunks racing.
+    // We mark the bubble as no-longer-pending immediately (so the typing
+    // dots disappear) but reveal the text progressively.
+    const targetId = id!;
+    set((st) => ({
+      bubbles: st.bubbles.map((b) =>
+        b.id === targetId ? { ...b, text: "", pending: false, footer: footer ?? b.footer } : b,
+      ),
+      pendingId: null,
+    }));
+    const words = text.match(/\S+\s*/g) ?? [text];
+    let i = 0;
+    const drip = () => {
+      if (i >= words.length) return;
+      const next = words[i++];
+      const cur2 = get();
+      const exists = cur2.bubbles.some((b) => b.id === targetId);
+      if (!exists) return; // bubble cleared (clearLog), abort reveal
+      set((st) => ({
+        bubbles: st.bubbles.map((b) => (b.id === targetId ? { ...b, text: b.text + next } : b)),
+      }));
+      setTimeout(drip, 22);
+    };
+    setTimeout(drip, 0);
   },
 
   dropPending: () => {

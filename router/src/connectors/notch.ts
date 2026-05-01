@@ -185,44 +185,25 @@ export class NotchConnector implements Connector {
         // Drop deltas if the turn was aborted between LLM call and now.
         if (myGen !== this.activeGenId) return;
 
-        // 1. TTS: push the FULL delta immediately to Cartesia WS — the
-        //    session buffers internally to sentence boundaries before
-        //    synthesis, so it benefits from getting all the text it can
-        //    as soon as possible.
+        // 1. TTS: push the delta to the Cartesia WS as soon as it lands.
         if (streamSession) {
           try { streamSession.pushChunk(delta); }
           catch (err) { log.warn({ err }, "stream pushChunk threw"); }
         }
 
-        // 2. DISPLAY: stream the visible delta to the chat as message.chunk
-        //    SSE events so the React store appends to the pending bubble.
-        //    Strip <spoken> delimiters — they only matter for the TTS
-        //    extractor in stripSpokenTags / extractSpoken.
-        //
-        //    Models with extended thinking (effort: medium/high) deliver
-        //    text deltas in a single burst after the thinking phase. To
-        //    give a streaming visual effect anyway, split long deltas at
-        //    word boundaries and emit at ~25ms/word — this adds a small,
-        //    perceived "typing" cadence without changing the underlying
-        //    LLM behavior. Short deltas pass through verbatim.
+        // 2. DISPLAY: emit message.chunk SSE for real SDK deltas only.
+        //    No fake server-side fan-out (a previous attempt with
+        //    setTimeout-based word splitting raced with message.in and
+        //    produced a duplicate "fragments" bubble). Models with
+        //    extended thinking deliver text in a single chunk → display
+        //    fills in one shot. Models that genuinely stream (no thinking
+        //    or long replies) → multiple chunks → progressive fill.
+        //    Visual word-by-word streaming, when desired, is now done
+        //    client-side in finalizeAssistant where it can't race the
+        //    server's finalize event.
         const visibleDelta = delta.replace(/<\/?spoken>/gi, "");
         if (visibleDelta) {
-          if (visibleDelta.length <= 25) {
-            emitNotch({ type: "message.chunk", data: { text: visibleDelta, from } });
-          } else {
-            // Word-boundary split. The match captures each non-whitespace
-            // run plus its trailing whitespace, so reconstruction is
-            // lossless when concatenated.
-            const words = visibleDelta.match(/\S+\s*/g) ?? [visibleDelta];
-            let i = 0;
-            const drip = () => {
-              if (myGen !== this.activeGenId) return; // aborted
-              if (i >= words.length) return;
-              emitNotch({ type: "message.chunk", data: { text: words[i++], from } });
-              setTimeout(drip, 25);
-            };
-            drip();
-          }
+          emitNotch({ type: "message.chunk", data: { text: visibleDelta, from } });
         }
       },
       reply: async (response: string) => {
