@@ -1,31 +1,17 @@
-// Service Worker — 最小版，支援離線 shell
-const CACHE_NAME = 'jarvis-v3';
-const SHELL = ['/', '/index.html'];
-
-self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then(async (cache) => {
-      for (const url of SHELL) {
-        try { await cache.add(url); } catch {}
-      }
-    })
-  );
-  self.skipWaiting();
-});
-
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
-});
-
-self.addEventListener('fetch', (e) => {
-  // API 請求不快取
-  if (e.request.url.includes('/api/')) return;
-  e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
-  );
+// Self-uninstalling service worker. The React notch refactor (2026-05-01)
+// removed the SW-based shell caching that used to back this. Any client
+// that still has the legacy SW cached will hit this shim, immediately
+// unregister, and clear all caches. On the next page load there is no
+// SW between browser and origin.
+self.addEventListener("install", () => { self.skipWaiting(); });
+self.addEventListener("activate", async (event) => {
+  event.waitUntil((async () => {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch {}
+    try { await self.registration.unregister(); } catch {}
+    const clients = await self.clients.matchAll({ includeUncontrolled: true });
+    for (const c of clients) { try { c.navigate(c.url); } catch {} }
+  })());
 });
