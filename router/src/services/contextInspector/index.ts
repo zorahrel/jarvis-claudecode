@@ -64,3 +64,6 @@ export {
   ACTIVE_SESSIONS_DIR,
 } from "./sidecar.js";
 export type { SessionSidecar } from "./sidecar.js";
+
+export { analyzeAgentBaselines } from "./agentBaselines.js";
+export type { AgentBaseline, AgentCruftHint } from "./agentBaselines.js";
