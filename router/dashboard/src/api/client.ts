@@ -216,6 +216,18 @@ export interface LocalSession {
   parentCommand: string | null
   preview: { lastUserMessage: string | null; lastAssistantText: string | null }
   isRouterSpawned: boolean
+  // Context Inspector enrichment — populated by /api/local-sessions handler.
+  liveTokens?: number
+  liveTokensSource?: 'sdk-task-progress' | 'sdk-result' | 'jsonl-tail' | 'unknown'
+  liveTokensAt?: number
+  contextWindow?: number
+  lastTurnCostUsd?: number
+  model?: string
+  compactionCount?: number
+  sessionKey?: string
+  agent?: string
+  fullAccess?: boolean
+  inheritUserScope?: boolean
 }
 
 export type OpenTargetId = 'iterm' | 'terminal' | 'topics' | 'finder' | 'editor' | 'pr'
@@ -229,19 +241,8 @@ export interface TargetAvailability {
 
 // ─── Context Inspector (Phase 1 — Plan 01-06) ────────────────────────────────
 
-export interface ContextLiveSession extends LocalSession {
-  liveTokens?: number
-  liveTokensSource?: 'sdk-task-progress' | 'sdk-result' | 'jsonl-tail' | 'unknown'
-  liveTokensAt?: number
-  contextWindow?: number
-  lastTurnCostUsd?: number
-  model?: string
-  compactionCount?: number
-  sessionKey?: string
-  agent?: string
-  fullAccess?: boolean
-  inheritUserScope?: boolean
-}
+/** Alias kept for backward import compat — fields are now on LocalSession directly. */
+export type ContextLiveSession = LocalSession
 
 export interface ContextAggregate {
   totalSessions: number
@@ -321,6 +322,37 @@ export interface AgentCruft {
 
 export interface CruftResponse {
   agents: AgentCruft[]
+}
+
+// ─── Agent Baselines (static config inspector) ───────────────────────────────
+
+export interface AgentCruftHint {
+  id: string
+  severity: 'info' | 'warn' | 'crit'
+  message: string
+  potentialSavingsTokens?: number
+}
+
+export interface AgentBaseline {
+  agent: string
+  model: string
+  fallbacks: string[]
+  fullAccess: boolean
+  inheritUserScope: boolean
+  tools: string[]
+  effort: string | null
+  workspace: string
+  /** Same shape as SessionBreakdown.breakdown — categories + totalEstimated. */
+  breakdown: {
+    categories: BreakdownCategory[]
+    totalEstimated: number
+    liveTotal: number
+  }
+  cruftHints: AgentCruftHint[]
+}
+
+export interface AgentBaselineResponse {
+  agents: AgentBaseline[]
 }
 
 export interface Exchange {
@@ -746,4 +778,5 @@ export const api = {
   sessionBreakdown: (sessionId: string) =>
     request<SessionBreakdown>(`/api/sessions/${encodeURIComponent(sessionId)}/breakdown`),
   sessionsCruft: () => request<CruftResponse>('/api/sessions/cruft'),
+  agentsBaseline: () => request<AgentBaselineResponse>('/api/agents/baseline'),
 }

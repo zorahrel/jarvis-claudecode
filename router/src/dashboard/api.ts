@@ -38,6 +38,7 @@ import {
   countCompactions,
   diskStats,
   recentSessions,
+  analyzeAgentBaselines,
   type SpawnConfig,
 } from "../services/contextInspector/index.js";
 import { getSessionMetadata } from "../services/claude";
@@ -2172,6 +2173,20 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     } catch (err: unknown) {
       log.warn({ err, sessionId }, "[breakdown] failed");
       json(req, res, { error: "breakdown failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && path === "/api/agents/baseline") {
+    // GET /api/agents/baseline — STATIC baseline per agent template (no live data).
+    // For each agent.yaml under ~/.claude/jarvis/agents/, computes the spawn-time
+    // token cost (history=0) + cruft hints derived from the config alone.
+    // This is the headline view of the Context Inspector — answers
+    // "quanto pesa ogni agent template prima di parlare?".
+    try {
+      const agents = await analyzeAgentBaselines();
+      json(req, res, { agents });
+    } catch (err: unknown) {
+      log.warn({ err }, "[agents/baseline] failed");
+      json(req, res, { error: "agents baseline failed" }, 500);
     }
 
   } else if (req.method === "GET" && path === "/api/sessions/cruft") {
