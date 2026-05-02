@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example LaunchAgent for Moondream Station (local vision inference, MLX).
+
+  Setup:
+    1. Create the venv and install moondream-station + runtime deps:
+         python3.12 -m venv ~/.claude/jarvis/router/scripts/moondream-env
+         ~/.claude/jarvis/router/scripts/moondream-env/bin/pip install \
+             moondream-station pydantic packaging fastapi uvicorn requests
+
+    2. Install the launchd plist:
+         sed "s|__HOME__|$HOME|g" com.jarvis.moondream.plist.example \
+           > ~/Library/LaunchAgents/com.jarvis.moondream.plist
+         launchctl load ~/Library/LaunchAgents/com.jarvis.moondream.plist
+
+  First boot downloads the Moondream 2 backend (~1-2 GB) and loads it into
+  RAM. Subsequent boots warm-cache and start in seconds.
+
+  Default model: moondream-2 (~1.6B params, fits in 16-32 GB Macs).
+  Switch to 'moondream-3-preview-mlx' on 48 GB+ Macs for higher quality;
+  the un-quantized MLX build needs ~30 GB resident, the INT4 quantized
+  build produced garbage tokens in our M2 Max testing.
+
+  Override the model via environment variable MOONDREAM_MODEL. Other vars:
+    MOONDREAM_PORT    REST port (default 2020)
+    MOONDREAM_HOST    bind host (default 127.0.0.1)
+    MOONDREAM_TIMEOUT inference timeout in seconds (default 180)
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.moondream</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.claude/jarvis/router/scripts/moondream-env/bin/python3</string>
+    <string>-u</string>
+    <string>__HOME__/.claude/jarvis/router/scripts/moondream-server.py</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.claude/jarvis/logs/moondream.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.claude/jarvis/logs/moondream.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.claude/jarvis/router</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>MOONDREAM_MODEL</key>
+    <string>moondream-2</string>
+    <key>MOONDREAM_PORT</key>
+    <string>2020</string>
+    <key>MOONDREAM_HOST</key>
+    <string>127.0.0.1</string>
+    <key>MOONDREAM_TIMEOUT</key>
+    <string>180</string>
+    <key>HF_TOKEN</key>
+    <string>skip</string>
+  </dict>
+</dict>
+</plist>

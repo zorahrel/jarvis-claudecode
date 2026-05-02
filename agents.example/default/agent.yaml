@@ -25,6 +25,10 @@ fallbacks:
 # Omit for minimal (read-only, no tools). List specific capabilities:
 tools:
   - vision          # Analyze images sent by user
+  # - vision-local        # Pre-caption + Q&A images on-device via Moondream
+                          # Station (port 2020). Adds ~3-5s per image but
+                          # gives the upstream model a textual brief and
+                          # zero vision-token cost. Composes with `vision`.
   - voice           # Transcribe voice messages
   # - email:myaccount       # Email via gws-mail (account name)
   # - calendar:myaccount    # Calendar via gws-mail
