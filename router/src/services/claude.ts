@@ -115,6 +115,12 @@ export interface ProcessInfo {
 }
 
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+// First-event timeout: if the SDK subprocess doesn't emit ANY event within
+// this window after the first sendMessage, assume MCP init or model spin-up
+// is wedged and kill the session so the caller can retry on a fresh spawn.
+// Without this guard a stuck spawn ate the full MESSAGE_TIMEOUT_MS (30 min)
+// of silence before the user got an error.
+const FIRST_EVENT_TIMEOUT_MS = 90 * 1000;
 const MAX_LIFETIME_MS = 2 * 60 * 60 * 1000;
 const MESSAGE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -295,6 +301,14 @@ interface SdkSession {
   consumer: Promise<void>;
   pendingResolve: ((r: TurnResult) => void) | null;
   pendingReject: ((e: Error) => void) | null;
+  /**
+   * Optional per-turn callback fired for every assistant text DELTA as it
+   * arrives from the SDK. Used by streaming-TTS callers (notch connector
+   * with `JARVIS_TTS_LLM_STREAM=1`) to feed the Cartesia WS pipeline before
+   * the full reply is ready. Cleared when the turn resolves/rejects so it
+   * never leaks across turns. NOT invoked for tool_use, only `block.text`.
+   */
+  pendingOnChunk?: ((delta: string) => void) | null;
   /** Files created by Write/Edit during the current turn. */
   pendingFiles: string[];
   /** Text accumulated from assistant text blocks during the current turn. */
@@ -309,6 +323,11 @@ interface SdkSession {
   inheritUserScope: boolean;
   totalInputTokens: number;
   compactionCount: number;
+  /** True after the SDK subprocess emits its first event (system init,
+   *  assistant chunk, etc.). Used to detect wedged spawns. */
+  firstEventReceived: boolean;
+  /** Active first-event watchdog timer; cleared on first event or kill. */
+  firstEventTimer: NodeJS.Timeout | null;
   lastSummary?: string;
   notifiedTaskIds?: Set<string>;
   bgToolUseStarts?: Map<string, { startedAt: number; kind: string }>;
@@ -473,6 +492,13 @@ function buildSdkOptions(opts: {
     settingSources,
     systemPrompt,
     strictMcpConfig: true,
+    // Enable token-level delta streaming. Without this, the SDK delivers
+    // each turn's reply as one or two `assistant` events with the whole
+    // text already concatenated → notch chat fills "tutto in un pezzo".
+    // With it, we receive `stream_event` messages carrying
+    // `content_block_delta` (BetaTextDelta) chunks and can pipe them to
+    // the notch SSE display + Cartesia WS streaming session token-by-token.
+    includePartialMessages: true,
     env: buildSafeEnv(opts.agentEnv, { isSubagent: opts.isSubagent, notify: opts.notify }),
     ...(opts.effort ? { effort: opts.effort } : {}),
     ...(mcpServers ? { mcpServers } : {}),
@@ -626,6 +652,8 @@ function spawnSession(
     inheritUserScope: inheritUserScope !== false,
     totalInputTokens: 0,
     compactionCount: 0,
+    firstEventReceived: false,
+    firstEventTimer: null,
     pid: null,
   };
 
@@ -634,6 +662,10 @@ function spawnSession(
       for await (const ev of q) {
         if (!s.alive) break;
         const e = ev as any;
+        if (!s.firstEventReceived) {
+          s.firstEventReceived = true;
+          if (s.firstEventTimer) { clearTimeout(s.firstEventTimer); s.firstEventTimer = null; }
+        }
         if (!s.resolvedModel) {
           const m = e.model ?? e.message?.model;
           if (typeof m === "string" && m.startsWith("claude-")) s.resolvedModel = m;
@@ -646,7 +678,7 @@ function spawnSession(
         if (e.type === "assistant" && typeof e.error === "string") {
           if (s.pendingReject) {
             const reject = s.pendingReject;
-            s.pendingResolve = null;
+            s.pendingResolve = null; s.pendingOnChunk = null;
             s.pendingReject = null;
             const errName = e.error === "rate_limit" ? "RATE_LIMIT" : `SDK_ERROR_${e.error}`;
             reject(new Error(errName));
@@ -654,7 +686,31 @@ function spawnSession(
           continue;
         }
 
-        // Assistant message: collect text + track tool_use (Write/Edit + bg starts)
+        // Token-level streaming via includePartialMessages=true. The SDK
+        // wraps Anthropic's BetaRawMessageStreamEvent inside an
+        // SDKPartialAssistantMessage. We only fire the chunk callback for
+        // text deltas — tool_use deltas, message metadata, signature blocks
+        // etc. don't belong in the TTS / chat-display path.
+        if (e.type === "stream_event") {
+          const ev = (e as any).event;
+          if (
+            ev?.type === "content_block_delta" &&
+            ev?.delta?.type === "text_delta" &&
+            typeof ev.delta.text === "string" &&
+            ev.delta.text.length > 0 &&
+            s.pendingOnChunk
+          ) {
+            try { s.pendingOnChunk(ev.delta.text); }
+            catch (err) { log.warn({ err, key: s.sessionKey }, "pendingOnChunk threw (stream)"); }
+          }
+          continue;
+        }
+
+        // Assistant message: collect text + track tool_use (Write/Edit + bg starts).
+        // We do NOT fire pendingOnChunk here when partial-message streaming is
+        // active — the deltas have already been delivered above. Falling back
+        // to firing on the full block.text would emit duplicate text into
+        // Cartesia / the chat display.
         if (e.type === "assistant" && Array.isArray(e.message?.content)) {
           for (const block of e.message.content) {
             if (!block || typeof block !== "object") continue;
@@ -686,7 +742,7 @@ function spawnSession(
         // text.
         if (e.type === "result" && e.subtype && e.subtype !== "success" && s.pendingReject) {
           const reject = s.pendingReject;
-          s.pendingResolve = null;
+          s.pendingResolve = null; s.pendingOnChunk = null;
           s.pendingReject = null;
           const errs = Array.isArray(e.errors) ? e.errors.join("; ") : "";
           reject(new Error(`SDK_RESULT_${e.subtype}${errs ? ": " + errs.slice(0, 200) : ""}`));
@@ -705,7 +761,7 @@ function spawnSession(
           s.consecutiveTimeouts = 0;
           const resolve = s.pendingResolve;
           const files = [...s.pendingFiles];
-          s.pendingResolve = null;
+          s.pendingResolve = null; s.pendingOnChunk = null;
           s.pendingReject = null;
           s.pendingFiles = [];
           s.currentText = "";
@@ -726,7 +782,7 @@ function spawnSession(
       log.error({ err: err?.message, key: s.sessionKey }, "SDK consumer error");
       if (s.pendingReject) {
         const reject = s.pendingReject;
-        s.pendingResolve = null;
+        s.pendingResolve = null; s.pendingOnChunk = null;
         s.pendingReject = null;
         reject(err instanceof Error ? err : new Error(String(err)));
       }
@@ -747,6 +803,7 @@ function spawnSession(
 function cleanupTimers(s: SdkSession): void {
   if (s.inactivityTimer) { clearTimeout(s.inactivityTimer); s.inactivityTimer = null; }
   if (s.lifetimeTimer) { clearTimeout(s.lifetimeTimer); s.lifetimeTimer = null; }
+  if (s.firstEventTimer) { clearTimeout(s.firstEventTimer); s.firstEventTimer = null; }
 }
 
 function killSession(s: SdkSession): void {
@@ -757,7 +814,7 @@ function killSession(s: SdkSession): void {
   // MESSAGE_TIMEOUT_MS for a result that will never arrive.
   if (s.pendingReject) {
     const reject = s.pendingReject;
-    s.pendingResolve = null;
+    s.pendingResolve = null; s.pendingOnChunk = null;
     s.pendingReject = null;
     reject(new Error("PROCESS_DIED"));
   }
@@ -828,6 +885,7 @@ function sendMessage(
   s: SdkSession,
   message: string,
   images?: ImageBlock[],
+  onChunk?: (delta: string) => void,
 ): Promise<TurnResult> {
   return new Promise((resolve, reject) => {
     if (!s.alive) {
@@ -847,7 +905,31 @@ function sendMessage(
     }
     s.pendingResolve = resolve;
     s.pendingReject = reject;
+    s.pendingOnChunk = onChunk ?? null;
     s.lastActivity = Date.now();
+
+    // Arm a first-event watchdog only on the first turn of a new SDK
+    // subprocess. If the spawn is wedged (e.g. a stdio MCP that never
+    // completes its init handshake), tear it down quickly so the caller
+    // can fall back / retry instead of waiting MESSAGE_TIMEOUT_MS.
+    if (!s.firstEventReceived && !s.firstEventTimer) {
+      s.firstEventTimer = setTimeout(() => {
+        s.firstEventTimer = null;
+        if (s.firstEventReceived || !s.alive) return;
+        log.warn({ key: s.sessionKey, model: s.model }, "SDK first-event timeout — killing wedged spawn");
+        // Reject with a distinct error so askClaudeInternal can retry the
+        // SAME model on a fresh spawn instead of advancing to fallbacks
+        // (silently downgrading opus → haiku is unacceptable).
+        if (s.pendingReject) {
+          const reject = s.pendingReject;
+          s.pendingResolve = null; s.pendingOnChunk = null;
+          s.pendingReject = null;
+          reject(new Error("INIT_TIMEOUT"));
+        }
+        killSession(s);
+        sessions.delete(s.sessionKey);
+      }, FIRST_EVENT_TIMEOUT_MS);
+    }
 
     let content: any;
     if (images && images.length > 0) {
@@ -970,7 +1052,17 @@ export async function askClaude(
   message: string,
   key: string,
   images?: ImageBlock[],
-  opts?: { isSubagent?: boolean },
+  opts?: {
+    isSubagent?: boolean;
+    /**
+     * Per-turn assistant text DELTA callback. Fires for every text block as it
+     * arrives from the SDK, before the full reply is ready. Used by streaming
+     * TTS callers (notch connector with `JARVIS_TTS_LLM_STREAM=1`) to feed the
+     * Cartesia WS pipeline incrementally. Errors thrown by the callback are
+     * caught and logged — they never break turn handling.
+     */
+    onChunk?: (delta: string) => void;
+  },
 ): Promise<ClaudeResponse> {
   const prev = queues.get(key) ?? Promise.resolve();
   let resolveQueue!: () => void;
@@ -990,13 +1082,19 @@ async function askClaudeInternal(
   message: string,
   key: string,
   images?: ImageBlock[],
-  opts?: { isSubagent?: boolean },
+  opts?: { isSubagent?: boolean; onChunk?: (delta: string) => void },
 ): Promise<ClaudeResponse> {
   const models = [agent.model, ...(agent.fallbacks ?? [])].filter(Boolean) as string[];
   if (models.length === 0) models.push("opus");
   const startTime = Date.now();
   const envContext = loadEnvContext(agent.env);
   const fullMessage = envContext ? `${envContext}\n\n${message}` : message;
+
+  // Per-spawn init-timeout retry budget: a wedged MCP init can happen on a
+  // fresh spawn, but a SECOND wedge in the same call almost certainly means
+  // a real environmental problem — surface it to the user instead of looping.
+  let initTimeoutRetries = 0;
+  const MAX_INIT_TIMEOUT_RETRIES = 1;
 
   for (let i = 0; i < models.length; i++) {
     const model = resolveModel(models[i]);
@@ -1020,9 +1118,21 @@ async function askClaudeInternal(
         s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
       }
 
-      return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, images);
+      return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, images, opts?.onChunk);
     } catch (err: any) {
       const errMsg = err?.message ?? "";
+      if (errMsg === "INIT_TIMEOUT") {
+        const s = sessions.get(key);
+        if (s) { killSession(s); sessions.delete(key); }
+        if (initTimeoutRetries < MAX_INIT_TIMEOUT_RETRIES) {
+          initTimeoutRetries++;
+          log.warn({ key, model, attempt: initTimeoutRetries }, "Init timeout — retrying same model on fresh spawn (no fallback)");
+          i--; // retry same model index
+          continue;
+        }
+        log.error({ key, model }, "Init timeout persisted after retry — surfacing to caller");
+        throw new Error(`Lo spawn di ${model} è bloccato all'init (probabile MCP wedged). Riprova tra poco — non sto facendo fallback automatico a un modello più debole.`);
+      }
       if (errMsg === "TIMEOUT") {
         log.warn({ key, model }, "Message timed out (sdk)");
         const s = sessions.get(key);
@@ -1058,6 +1168,7 @@ async function doSendWithTimeout(
   charsIn: number,
   startTime: number,
   images?: ImageBlock[],
+  onChunk?: (delta: string) => void,
 ): Promise<ClaudeResponse> {
   let message = inputMessage;
   log.info({ key, model: s.model, alive: s.alive, hasImages: !!images?.length }, "Sending message to SDK session");
@@ -1082,12 +1193,12 @@ async function doSendWithTimeout(
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(() => {
       s.consecutiveTimeouts++;
-      if (s.pendingReject) { s.pendingResolve = null; s.pendingReject = null; }
+      if (s.pendingReject) { s.pendingResolve = null; s.pendingOnChunk = null; s.pendingReject = null; }
       reject(new Error("TIMEOUT"));
     }, MESSAGE_TIMEOUT_MS);
   });
 
-  const result = await Promise.race([sendMessage(s, message, images), timeoutPromise]);
+  const result = await Promise.race([sendMessage(s, message, images, onChunk), timeoutPromise]);
 
   resetInactivityTimer(key, s);
   trackUsage(key, charsIn, result.text.length, Date.now() - startTime, {
