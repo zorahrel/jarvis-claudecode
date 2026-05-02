@@ -52,6 +52,20 @@ export function getCoreServices(): ServiceDef[] {
         logName: "omega",
       },
     },
+    {
+      // Local vision (Moondream Station, MLX-native on Apple Silicon).
+      // First boot downloads the Moondream 3 Preview MLX backend (~4-8 GB)
+      // and may take a few minutes; subsequent boots are seconds.
+      name: "Moondream",
+      port: 2020,
+      healthUrl: "http://localhost:2020/health",
+      launchd: {
+        label: "com.jarvis.moondream",
+        args: ["scripts/moondream-env/bin/python3", "-u", "scripts/moondream-server.py"],
+        cwd: ROUTER_DIR,
+        logName: "moondream",
+      },
+    },
   ];
 }
 
