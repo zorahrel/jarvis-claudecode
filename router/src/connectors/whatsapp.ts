@@ -98,6 +98,8 @@ export class WhatsAppConnector implements Connector {
   }
 
   private sock: WASocket | null = null;
+  /** Read-only handle for in-process MCP tools (mcp/whatsapp.ts). Null until paired+connected. */
+  get socket(): WASocket | null { return this.sock; }
   private authDir: string;
   private selfJid: string = "";
   private myLidBase: string = "";
@@ -547,6 +549,7 @@ export class WhatsAppConnector implements Connector {
     const replyJid = this.getReplyJid(jid);
     const msgKey = waMsg.key;
 
+    const groupName = isGroup ? (waMsg.pushName || waMsg.key?.participant || undefined) : undefined;
     const msg: IncomingMessage = {
       channel: "whatsapp",
       from: isFromSelf ? "self" : "+" + senderJid.split(":")[0].split("@")[0],
@@ -560,6 +563,16 @@ export class WhatsAppConnector implements Connector {
       quotedMessage,
       timings: (waMsg as any)._timings,
       agentOverride,
+      channelContext: {
+        whatsapp: {
+          jid,
+          isGroup,
+          groupName,
+          senderJid,
+          senderName: waMsg.pushName,
+          messageId: waMsg.key.id ?? undefined,
+        },
+      },
       reply: async (response: string) => {
         log.info({ replyJid, responseLen: response.length }, "Sending WhatsApp reply");
         const maxRetries = 3;
