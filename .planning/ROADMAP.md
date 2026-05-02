@@ -10,7 +10,7 @@ Jarvis Router è un orchestrator multi-canale (Telegram/WhatsApp/Discord/tray-ap
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 1: Context Inspector** — Tab dashboard per audit token/categoria + cruft detection delle sessioni Claude Code attive
+- [x] **Phase 1: Context Inspector** — Tab dashboard per audit token/categoria + cruft detection delle sessioni Claude Code attive ✓ 2026-05-01 (code complete, UAT pending user)
 
 ## Phase Details
 
@@ -38,10 +38,10 @@ Plans:
 - [x] 01-05-PLAN.md — Wave 2: API endpoints (extended /api/local-sessions + /breakdown + /cruft) + claude.ts SDK tap
 - [x] 01-06-PLAN.md — Wave 3: ContextTab UI components (AggregateHeader, SessionRow, BreakdownStackedBar, CruftPanel, RecentSessionsList, DiskHygieneFooter)
 - [x] 01-07-PLAN.md — Wave 3: Polling hook with memory-leak guards + Sidebar/App route wiring
-- [ ] 01-08-PLAN.md — Wave 4: Final test sweep + dashboard build + router restart + manual UAT (checkpoint:human-verify)
+- [x] 01-08-PLAN.md — Wave 4: Final test sweep + dashboard build + router restart + manual UAT (checkpoint:human-verify)
 
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Context Inspector | 7/8 | In progress | - |
+| 1. Context Inspector | 8/8 | Code complete (UAT pending user) | 2026-05-01 |
