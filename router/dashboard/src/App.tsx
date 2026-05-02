@@ -10,6 +10,7 @@ import { Tools } from './pages/Tools'
 import { Skills } from './pages/Skills'
 import { Memory } from './pages/Memory'
 import { Sessions } from './pages/Sessions'
+import { Context } from './pages/Context'
 import { Logs } from './pages/Logs'
 import { Settings } from './pages/Settings'
 import { Cron } from './pages/Cron'
@@ -57,6 +58,8 @@ function App() {
         return <Cron onToast={addToast} />
       case 'sessions':
         return <Sessions onToast={addToast} />
+      case 'context':
+        return <Context onToast={addToast} />
       case 'logs':
         return <Logs />
       case 'analytics':
