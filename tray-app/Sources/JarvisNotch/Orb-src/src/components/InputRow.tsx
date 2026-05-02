@@ -21,11 +21,11 @@ import { useNotchStore } from "../store";
 
 const HOST = ((window as any).__notchHost ?? window.location.origin).replace(/\/+$/, "");
 
-function postToNative(type: string): boolean {
+function postToNative(type: string, extra?: Record<string, unknown>): boolean {
   const handler = (window as any).webkit?.messageHandlers?.jarvis;
   if (!handler) return false;
   try {
-    handler.postMessage({ type });
+    handler.postMessage(extra ? { type, ...extra } : { type });
     return true;
   } catch (err) {
     console.warn("[input] postToNative failed", err);
@@ -98,7 +98,15 @@ export function InputRow() {
         autoComplete="off"
         spellCheck={false}
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => {
+          const v = e.target.value;
+          setValue(v);
+          // Tell Swift the input has text. Swift uses this to set the
+          // "sticky" flag so a mouse-out doesn't auto-collapse the panel
+          // and lose what the user just typed. Without this, leaning the
+          // mouse 40px above the compact zone wipes the in-progress message.
+          postToNative("inputChange", { hasText: v.length > 0 });
+        }}
         onKeyDown={onKey}
       />
       <button

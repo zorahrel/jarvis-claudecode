@@ -53,11 +53,6 @@ final class NotchController: ObservableObject {
     /// we fall back silently to icon-clicks only.
     private var notchEventTap: NotchEventTap?
 
-    /// Transparent red overlay showing the clickable hit zone. Toggle with
-    /// `NotchController.shared.setDebugHitZone(true|false)`. Click-through,
-    /// always on top, borderless — purely for visual debugging.
-    private var debugHitZoneWindow: NSWindow?
-
     /// Whether the mouse is currently over the hover zone (compact notch area
     /// OR the expanded panel rect). Drives the auto-expand / auto-collapse.
     private var isHovering: Bool = false
@@ -163,80 +158,6 @@ final class NotchController: ObservableObject {
         NotchEventBus.shared.start { [weak self] event in
             Task { @MainActor in self?.apply(event: event) }
         }
-    }
-
-    /// Flashes a small dot at the exact screen position where the CGEvent
-    /// tap received a click, so we can visually verify whether the tap
-    /// coordinates match what the user actually clicks. Green = inside the
-    /// hit zone, orange = outside. Auto-dismisses after 600ms.
-    func flashDebugClickMarker(cgX: CGFloat, cgY: CGFloat, inside: Bool) {
-        let notchScreen = NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main
-        guard let screen = notchScreen else { return }
-        let f = screen.frame
-        // Convert CG (top-down) Y into Cocoa (bottom-up) Y for NSWindow.
-        let cocoaY = f.maxY - cgY
-        let size: CGFloat = 14
-        let rect = NSRect(x: cgX - size / 2, y: cocoaY - size / 2, width: size, height: size)
-        let win = NSWindow(
-            contentRect: rect,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false,
-            screen: screen
-        )
-        win.isOpaque = false
-        win.backgroundColor = (inside ? NSColor.systemGreen : NSColor.systemOrange).withAlphaComponent(0.9)
-        win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
-        win.ignoresMouseEvents = true
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        win.hasShadow = false
-        win.contentView?.wantsLayer = true
-        win.contentView?.layer?.cornerRadius = size / 2
-        win.orderFrontRegardless()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak win] in
-            win?.orderOut(nil)
-        }
-    }
-
-    /// Shows a translucent red overlay matching the CGEvent-tap hit zone
-    /// (Y ≤ 64pt from top, X within ±220pt of center). Click-through so it
-    /// never blocks user interaction — it's just a visual ruler.
-    func setDebugHitZone(_ on: Bool) {
-        if !on {
-            debugHitZoneWindow?.orderOut(nil)
-            debugHitZoneWindow = nil
-            return
-        }
-        let notchScreen = NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main
-        guard let screen = notchScreen else { return }
-        let f = screen.frame
-        // Keep in sync with NotchEventTap: Y ≤ 40 (CG, top-down), X ±140.
-        let width: CGFloat = 280
-        let height: CGFloat = 40
-        let rect = NSRect(
-            x: f.midX - width / 2,
-            y: f.maxY - height,
-            width: width,
-            height: height
-        )
-        let win = NSWindow(
-            contentRect: rect,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false,
-            screen: screen
-        )
-        win.isOpaque = false
-        win.backgroundColor = NSColor.systemRed.withAlphaComponent(0.25)
-        win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
-        win.ignoresMouseEvents = true
-        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        win.hasShadow = false
-        win.orderFrontRegardless()
-        debugHitZoneWindow = win
-        NotchLogger.shared.log("info",
-            "[debug] hit-zone overlay rect=\(Int(rect.minX)),\(Int(rect.minY)) " +
-            "size=\(Int(rect.width))x\(Int(rect.height)) screen=\(Int(f.width))x\(Int(f.height))")
     }
 
     private func installNotchEventTap() {
@@ -378,12 +299,6 @@ final class NotchController: ObservableObject {
     /// the main one, which would otherwise expand the panel on the
     /// wrong display (and leave the user staring at a screen with no
     /// visible notch). Restrict to main + fall back to notched.
-    private func isHoverActiveScreen(_ screen: NSScreen) -> Bool {
-        if let main = NSScreen.main, screen == main { return true }
-        if screen == notchScreen() { return true }
-        return false
-    }
-
     /// IMPORTANT: hover zones must use the screen where the panel ACTUALLY
     /// lives (= `notchScreen()`), not the screen under the cursor. Otherwise
     /// on multi-monitor setups, hovering near the top-center of an external
@@ -501,6 +416,12 @@ final class NotchController: ObservableObject {
 
     private func makeWebView() -> WKWebView {
         let config = WKWebViewConfiguration()
+        // Ephemeral data store: no on-disk caches/cookies/localStorage for
+        // the notch webview. The orb has no auth state, no persistent
+        // user prefs (those live router-side), and no cross-session need
+        // for a cache. The default `.default()` store accumulates HTTP
+        // caches forever — pure waste in our case.
+        config.websiteDataStore = .nonPersistent()
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = true
         config.defaultWebpagePreferences = prefs
@@ -689,10 +610,20 @@ final class NotchController: ObservableObject {
     /// 3. Track the flag publicly so the hover-dwell arming code can refuse
     ///    to start a new capture while TTS is playing.
     func setAssistantSpeaking(_ speaking: Bool) {
-        // Solo come safety/ridondanza — il vero echo-killer è ora l'AEC
-        // hardware (voiceProcessing) sul mic input. Apple SFSpeechRecognizer
-        // riceve audio già pulito dal TTS speakers.
+        // Three-layer echo defense (any one is in theory sufficient, but they
+        // catch different leak paths and add up to robust silence):
+        //   1. AEC hardware (AVAudioEngine voiceProcessing) — primary defense,
+        //      subtracts speaker output from mic input at the AudioUnit level.
+        //   2. transcriber.setAssistantSpeaking → SFSpeechRecognizer drops
+        //      buffers from its recognition request (Apple already-clean audio
+        //      can still pick up TTS in some quiet rooms with speakers).
+        //   3. streamRecorder.setAssistantSpeaking → file-write tap drops
+        //      buffers entirely, so even if AEC + Apple let something through,
+        //      the WAV that goes to whisper-cli on the server is silent.
+        // The doc-comment block historically promised layer 3 but only wired
+        // layer 2 — fixed here.
         transcriber.setAssistantSpeaking(speaking)
+        streamRecorder.setAssistantSpeaking(speaking)
         NotchLogger.shared.log("info", "[setAssistantSpeaking] \(speaking)")
     }
 
@@ -977,17 +908,23 @@ final class NotchController: ObservableObject {
     func cancelHoverRecord(reason: String) {
         armingTask?.cancel()
         armingTask = nil
-        guard streamRecorder.isRunning else { return }
-        // Toggle-off is an explicit user signal that overrides everything
-        // — they flipped Call-on-hover off, so end the call immediately.
+        // Toggle-off is an explicit user signal that overrides everything,
+        // even when no recorder is running yet (the user might toggle off
+        // mid-dwell, before the arm fires). Clear residual call flags so
+        // the next hover doesn't inherit a stale `inContinuousCall=true`
+        // from a previous session that the recorder-not-running guard
+        // would have skipped.
         if reason == "toggle-off" {
             NotchLogger.shared.log("info", "[hover-rec] toggle-off — ending call")
             inContinuousCall = false
             stickyCall = false
-            stopStreamingVoice(andUpload: true)
+            if streamRecorder.isRunning {
+                stopStreamingVoice(andUpload: true)
+            }
             updateAffordanceVisibility()
             return
         }
+        guard streamRecorder.isRunning else { return }
         // Once we're in a continuous call (hover-armed OR click-armed), a
         // mouse-out is no longer a "are you done?" signal — the call is
         // hands-free by design. The user ends it via the corner, the
@@ -1056,24 +993,20 @@ final class NotchController: ObservableObject {
         evalJS("window.__notchVoiceGraceEnd && window.__notchVoiceGraceEnd();")
     }
 
-    /// Distance from cursor to the nearest corner of any active screen.
-    /// Returns Inf if no screen contains a "trigger" zone.
+    /// Distance from cursor to the bottom-right corner of the screen the
+    /// cursor is currently on. The cancel-affordance UI (CancelAffordanceView)
+    /// only paints the bottom-right corner — iterating all 12 corners across
+    /// 3 monitors made the abort fire when moving toward an unrelated corner
+    /// (e.g. menubar icon click on the MacBook), with no visual indication.
+    /// Locking the gesture to the cursor's screen + bottom-right matches the
+    /// affordance the user sees.
     private func nearestCornerDistance() -> CGFloat {
         let mouse = NSEvent.mouseLocation
-        var best: CGFloat = .infinity
-        for screen in NSScreen.screens {
-            let f = screen.frame
-            let corners = [
-                CGPoint(x: f.minX, y: f.minY), CGPoint(x: f.maxX, y: f.minY),
-                CGPoint(x: f.minX, y: f.maxY), CGPoint(x: f.maxX, y: f.maxY),
-            ]
-            for c in corners {
-                let dx = mouse.x - c.x, dy = mouse.y - c.y
-                let d = (dx * dx + dy * dy).squareRoot()
-                if d < best { best = d }
-            }
-        }
-        return best
+        guard let s = cursorScreen() else { return .infinity }
+        let f = s.frame
+        let dx = mouse.x - f.maxX
+        let dy = mouse.y - f.minY
+        return (dx * dx + dy * dy).squareRoot()
     }
 
     /// Px from the corner where abort fires (must commit fully). Within
@@ -1420,34 +1353,6 @@ final class NotchController: ObservableObject {
         }
     }
 
-    /// Writes what the WKWebView is rendering right now to /tmp/notch-snapshot.png
-    /// — lets us verify visually whether the orb is actually drawing something
-    /// (and just looks black on the DynamicNotch backdrop) or rendering nothing.
-    func snapshotToFile() {
-        let config = WKSnapshotConfiguration()
-        config.snapshotWidth = NSNumber(value: 420)
-        webView.takeSnapshot(with: config) { image, error in
-            let url = URL(fileURLWithPath: "/tmp/notch-snapshot.png")
-            if let err = error {
-                NotchLogger.shared.log("error", "[snapshot] failed: \(err.localizedDescription)")
-                return
-            }
-            guard let image,
-                  let tiff = image.tiffRepresentation,
-                  let rep = NSBitmapImageRep(data: tiff),
-                  let png = rep.representation(using: .png, properties: [:])
-            else {
-                NotchLogger.shared.log("error", "[snapshot] could not encode PNG")
-                return
-            }
-            do {
-                try png.write(to: url)
-                NotchLogger.shared.log("info", "[snapshot] wrote \(url.path) (\(png.count) bytes, \(Int(image.size.width))×\(Int(image.size.height)))")
-            } catch {
-                NotchLogger.shared.log("error", "[snapshot] write failed: \(error.localizedDescription)")
-            }
-        }
-    }
 
     private func apply(event: NotchEvent) {
         connected = true
@@ -1726,8 +1631,13 @@ final class NotchController: ObservableObject {
         // first compact→expand cycle in continuous-call mode.
         if notchAuraVisible {
             notchAuraPanel?.orderFrontRegardless()
-        } else if notchAuraPanel?.isVisible == false {
-            notchAuraPanel?.orderFrontRegardless()
+        } else {
+            // When inactive, actually orderOut so the panel stops appearing
+            // in NSApp.windows enumerations (and the AppKit window server
+            // can release its surface). The view's alpha is already 0 via
+            // `setActive(false)` but the panel itself was lingering in the
+            // window stack indefinitely.
+            notchAuraPanel?.orderOut(nil)
         }
     }
 
@@ -2245,195 +2155,6 @@ struct NotchDot: View {
                     )
                 )
                 .shadow(color: Color(red: 1.00, green: 0.70, blue: 0.30).opacity(breathe), radius: 4)
-        }
-    }
-}
-
-/// Trailing icon — minimal "pulse" glyph coherent with the voice-orb on
-/// the left. A thin outer ring + bright inner dot. When any channel has
-/// activity, a second ring expands outward and fades (radar-style ping).
-/// Single coherent visual, matches the orb's circular language.
-struct SignalPulse: View {
-    @ObservedObject var controller: NotchController
-
-    var anyActive: Bool {
-        controller.channelLevels.contains { $0 > 0.05 }
-    }
-    var totalLevel: Double {
-        min(1.0, controller.channelLevels.reduce(0, +))
-    }
-
-    private var baseColor: Color {
-        anyActive
-            ? Color(red: 1.00, green: 0.70, blue: 0.25)
-            : Color(red: 0.78, green: 0.84, blue: 0.98)
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in
-            let t = tl.date.timeIntervalSinceReferenceDate
-            Canvas { ctx, size in
-                let rect = CGRect(origin: .zero, size: size)
-                let center = CGPoint(x: rect.midX, y: rect.midY)
-                let canvasR = rect.width / 2
-                // Base ring radius sits at ~55% of canvas so the radar
-                // ping can expand outward without clipping.
-                let ringR = canvasR * 0.52
-
-                // Inner bright dot — always visible, breathes gently.
-                let dotPulse = anyActive
-                    ? 1.0 + 0.25 * (0.5 + 0.5 * sin(t * 3.2))
-                    : 1.0 + 0.08 * sin(t * 1.2)
-                let dotR = CGFloat(ringR * 0.28 * dotPulse)
-                let dotRect = CGRect(
-                    x: center.x - dotR, y: center.y - dotR,
-                    width: dotR * 2, height: dotR * 2
-                )
-                // Soft dot glow
-                let dotGrad = Gradient(colors: [
-                    baseColor.opacity(anyActive ? 1.0 : 0.85),
-                    baseColor.opacity(0.3),
-                    baseColor.opacity(0.0),
-                ])
-                ctx.fill(
-                    Path(ellipseIn: rect),
-                    with: .radialGradient(
-                        dotGrad,
-                        center: center,
-                        startRadius: dotR * 0.2,
-                        endRadius: ringR * 1.4
-                    )
-                )
-                ctx.fill(Path(ellipseIn: dotRect), with: .color(baseColor))
-
-                // Outer ring — always visible at low opacity.
-                var ring = Path()
-                ring.addEllipse(in: CGRect(
-                    x: center.x - ringR, y: center.y - ringR,
-                    width: ringR * 2, height: ringR * 2
-                ))
-                ctx.stroke(ring, with: .color(baseColor.opacity(anyActive ? 0.75 : 0.45)), lineWidth: 1)
-
-                // Radar ping: second ring expands + fades when something
-                // is live. Scales with total activity so multiple active
-                // channels produce a punchier pulse.
-                if anyActive {
-                    let phase = (sin(t * 2.0) + 1) / 2 // 0..1
-                    let pingR = ringR * (1.0 + 0.55 * phase)
-                    let pingAlpha = (1.0 - phase) * (0.35 + 0.5 * totalLevel)
-                    var ping = Path()
-                    ping.addEllipse(in: CGRect(
-                        x: center.x - pingR, y: center.y - pingR,
-                        width: pingR * 2, height: pingR * 2
-                    ))
-                    ctx.stroke(ping, with: .color(baseColor.opacity(pingAlpha)), lineWidth: 1)
-                }
-            }
-        }
-    }
-}
-
-/// Mini version of the expanded voice-orb: four concentric shells with
-/// per-layer opacity, blended so the edges fresnel into the background.
-/// Native SwiftUI Canvas — cheaper and crisper than a second WKWebView for
-/// a 22pt glyph. Palette mirrors voice-orb.js state-by-state.
-struct CompactOrb: View {
-    let state: NotchAgentState
-
-    private struct Layer {
-        let color: Color
-        let opacity: Double
-        let scale: Double
-    }
-
-    private var layers: [Layer] {
-        switch state {
-        case .idle:
-            return [
-                .init(color: Color(red: 0.42, green: 0.46, blue: 0.82), opacity: 0.10, scale: 1.28),
-                .init(color: Color(red: 0.55, green: 0.58, blue: 0.91), opacity: 0.32, scale: 1.00),
-                .init(color: Color(red: 0.39, green: 0.44, blue: 0.85), opacity: 0.55, scale: 0.78),
-                .init(color: Color(red: 0.26, green: 0.31, blue: 0.81), opacity: 0.85, scale: 0.52),
-                .init(color: Color(red: 0.94, green: 0.96, blue: 1.00), opacity: 0.95, scale: 0.22),
-            ]
-        case .thinking:
-            return [
-                .init(color: Color(red: 1.00, green: 0.56, blue: 0.31), opacity: 0.12, scale: 1.30),
-                .init(color: Color(red: 1.00, green: 0.75, blue: 0.44), opacity: 0.34, scale: 1.00),
-                .init(color: Color(red: 1.00, green: 0.63, blue: 0.09), opacity: 0.58, scale: 0.78),
-                .init(color: Color(red: 0.96, green: 0.48, blue: 0.00), opacity: 0.88, scale: 0.52),
-                .init(color: Color(red: 1.00, green: 0.96, blue: 0.86), opacity: 0.98, scale: 0.22),
-            ]
-        case .responding:
-            return [
-                .init(color: Color(red: 0.74, green: 0.84, blue: 1.00), opacity: 0.12, scale: 1.30),
-                .init(color: Color(red: 0.95, green: 0.97, blue: 1.00), opacity: 0.38, scale: 1.00),
-                .init(color: Color(red: 0.92, green: 0.96, blue: 1.00), opacity: 0.56, scale: 0.78),
-                .init(color: Color(red: 0.74, green: 0.84, blue: 1.00), opacity: 0.88, scale: 0.52),
-                .init(color: .white, opacity: 1.00, scale: 0.22),
-            ]
-        }
-    }
-
-    private var pulsate: (Bool, Double) {
-        switch state {
-        case .idle: return (false, 0)
-        case .thinking: return (true, 2.2) // fast breath
-        case .responding: return (true, 1.3)
-        }
-    }
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in
-            let t = tl.date.timeIntervalSinceReferenceDate
-            let (pulses, speed) = pulsate
-            let pulse = pulses ? 1.0 + 0.10 * sin(t * speed) : 1.0
-            Canvas { ctx, size in
-                let rect = CGRect(origin: .zero, size: size)
-                let center = CGPoint(x: rect.midX, y: rect.midY)
-                // The visible orb takes ~60% of the canvas so the soft
-                // bloom gradient can fade to zero inside the frame — no
-                // square mask appearing at the clip edges.
-                let canvasR = rect.width / 2
-                let orbR = canvasR * 0.58
-
-                // Bloom — fills the full canvas, fades to transparent well
-                // before the frame edge so the clip never shows.
-                let bloomColor = layers[1].color
-                let bloomGrad = Gradient(colors: [
-                    bloomColor.opacity(0.55),
-                    bloomColor.opacity(0.20),
-                    bloomColor.opacity(0.04),
-                    bloomColor.opacity(0.0),
-                ])
-                ctx.fill(
-                    Path(ellipseIn: rect),
-                    with: .radialGradient(bloomGrad, center: center, startRadius: orbR * 0.2, endRadius: canvasR)
-                )
-
-                // Five concentric layers — drawn using orbR (not canvasR),
-                // so the outer halo shell stays comfortably inside bounds.
-                for (i, layer) in layers.enumerated() {
-                    let s = CGFloat(layer.scale * pulse)
-                    let lr = orbR * s
-                    let layerRect = CGRect(
-                        x: center.x - lr,
-                        y: center.y - lr,
-                        width: lr * 2,
-                        height: lr * 2
-                    )
-                    let shimmer = 0.05 * sin(t * (0.7 + Double(i) * 0.35))
-                    let grad = Gradient(colors: [
-                        layer.color.opacity(layer.opacity * (1.0 + shimmer)),
-                        layer.color.opacity(layer.opacity * 0.4),
-                        layer.color.opacity(0.0),
-                    ])
-                    ctx.fill(
-                        Path(ellipseIn: layerRect),
-                        with: .radialGradient(grad, center: center, startRadius: lr * 0.05, endRadius: lr)
-                    )
-                }
-            }
         }
     }
 }

@@ -209,7 +209,16 @@ final class StreamingRecorder {
         }
 
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            // Roll back the tap install. Without this, the next start() call
+            // would hit AVAudioEngine fatal error "required condition is
+            // false: nullptr == Tap()" — the bus already has a tap installed,
+            // and AVAudioEngine forbids stacking taps on the same bus.
+            input.removeTap(onBus: 0)
+            throw error
+        }
     }
 
     /// Stop capture and return a 16 kHz mono Int16 WAV URL ready for

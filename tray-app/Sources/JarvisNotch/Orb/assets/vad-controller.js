@@ -52,11 +52,21 @@ let isStarting = false;
  * cache HTTP del WKWebView lo serve offline.
  */
 async function loadVADLib() {
+  // TODO(offline-first): l'import remoto da esm.sh contraddice la promessa
+  // "zero CDN" del file. Bundlare @ricky0123/vad-web@0.0.27 in
+  // Orb/vendor/vad-web/ e ri-puntare l'import lì. Per ora try/catch + log
+  // così, se il primo avvio è offline, vediamo l'errore esplicitamente
+  // invece di silenziare il VAD (postNative("vad.error", ...) lo emette).
   // esm.sh è stabile, gestisce CORS, e resta lo stesso URL della doc ufficiale.
   // Pinning della versione per evitare breakages: 0.0.27 è quello compatibile
   // con i nostri asset locali silero_vad_v5.onnx + vad.worklet.bundle.min.js.
-  const { MicVAD } = await import("https://esm.sh/@ricky0123/vad-web@0.0.27");
-  return MicVAD;
+  try {
+    const { MicVAD } = await import("https://esm.sh/@ricky0123/vad-web@0.0.27");
+    return MicVAD;
+  } catch (err) {
+    VAD_LOG("loadVADLib: remote import failed (offline?):", err);
+    throw err;
+  }
 }
 
 /**
