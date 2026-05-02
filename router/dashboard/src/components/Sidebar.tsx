@@ -15,6 +15,7 @@ const navItems: { id: string; label: string; hint: string }[] = [
   { id: 'cron',      label: 'Cron',      hint: 'Scheduled jobs that trigger agents on a recurring timer' },
   { id: 'memory',    label: 'Memory',    hint: 'Memory graph — documents and conversation memory' },
   { id: 'sessions',  label: 'Sessions',  hint: 'Active and historical conversations across channels' },
+  { id: 'context',   label: 'Context',   hint: 'Token usage, breakdown and cruft detection per Claude session' },
   { id: 'analytics', label: 'Analytics', hint: 'Message volume, costs, and response-time trends' },
   { id: 'settings',  label: 'Settings',  hint: 'Router, hooks, and MCP server configuration' },
   { id: 'logs',      label: 'Logs',      hint: 'Live router log stream' },
