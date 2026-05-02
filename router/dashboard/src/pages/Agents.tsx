@@ -13,6 +13,7 @@ import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Input, Select, Textarea } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
+import { AgentBaselineList } from '../components/context/AgentBaselineList'
 import { RelatedList } from '../components/RelatedList'
 import { ToolIcon } from '../icons'
 import type { FullAgent, ProcessSession, Tool } from '../api/client'
@@ -541,6 +542,19 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
           </>
         }
       />
+
+      {/* CONTEXT BASELINE — quanto pesa ogni agente prima di parlare */}
+      <Card padding={16}>
+        <SectionHeader
+          title="🧠 Context baseline"
+          count="static, no live data"
+        />
+        <p style={{ margin: '0 0 12px 0', fontSize: 12, color: 'var(--text-3)' }}>
+          Token alla nascita di ogni agente — system + tools + MCP + skills + CLAUDE.md chain.
+          Click su un agente per vedere il breakdown 8-categorie e i suggerimenti cruft.
+        </p>
+        <AgentBaselineList />
+      </Card>
 
       {/* JARVIS HERO */}
       {jarvisAgent && (
