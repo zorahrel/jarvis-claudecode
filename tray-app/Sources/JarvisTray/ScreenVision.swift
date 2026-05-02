@@ -3,23 +3,25 @@ import CoreGraphics
 import AppKit
 import ScreenCaptureKit
 
-/// On-device screen vision via the local Moondream Station daemon (port 2020).
+/// Screen vision via Moondream — cloud or local, picked at runtime.
 ///
-/// This module is intentionally standalone: it has no SwiftUI / app state
-/// dependency so the notch process (or any other host) can link it. The
-/// daemon is supervised by launchd (`com.jarvis.moondream`); if it's down,
-/// every call returns a structured error.
+/// Backend selection (transparent to callers):
+///   - **Cloud** when `MOONDREAM_API_KEY` is set in the process env. Hits
+///     `https://api.moondream.ai/v1` with `X-Moondream-Auth`. Server-side
+///     Moondream 3, ~0.5–1.1s per call, ~$0.000068/image (Personal tier
+///     includes ~70k images/mo). Best quality, sub-second, but the
+///     screenshot leaves the device.
+///   - **Local daemon** (default) at `http://127.0.0.1:2020`, served by
+///     the `com.jarvis.moondream` launchd job (Moondream 2 on M2 Max).
+///     Free, fully offline, slower (~3-4s/call). Override the URL with
+///     `VISION_LOCAL_URL` if the daemon lives somewhere unusual.
 ///
-/// Latency on M2 Max 32GB with Moondream 2 (default model):
-///   - first hit after a cold daemon: ~24s (weight load + warmup)
-///   - steady-state caption ("short"): ~4s
-///   - steady-state query/detect/point: ~3s
+/// This module is intentionally standalone — no SwiftUI / app state so
+/// the notch process can link it directly.
 ///
-/// Permissions: capturing the active display requires the **Screen Recording**
-/// entitlement on macOS. The host app must call
-/// `CGRequestScreenCaptureAccess()` (System Settings → Privacy → Screen
-/// Recording) on first run; this module surfaces the prompt for you when
-/// `captureMainDisplay()` is called.
+/// Permissions: screen capture requires the **Screen Recording**
+/// entitlement on macOS. The first call to `captureMainDisplay()`
+/// surfaces the system prompt automatically.
 public enum ScreenVision {
 
     public struct Caption {
@@ -61,10 +63,26 @@ public enum ScreenVision {
         }
     }
 
-    // MARK: - Endpoint
+    // MARK: - Endpoint selection
 
-    /// Override via env var VISION_LOCAL_URL if you ever move the daemon.
+    public enum Backend { case cloud, local }
+
+    /// `cloud` when `MOONDREAM_API_KEY` is set, `local` otherwise.
+    public static var backend: Backend {
+        return apiKey != nil ? .cloud : .local
+    }
+
+    private static var apiKey: String? {
+        guard let k = ProcessInfo.processInfo.environment["MOONDREAM_API_KEY"], !k.isEmpty else {
+            return nil
+        }
+        return k
+    }
+
     private static var baseURL: URL {
+        if backend == .cloud {
+            return URL(string: "https://api.moondream.ai")!
+        }
         if let s = ProcessInfo.processInfo.environment["VISION_LOCAL_URL"],
            let u = URL(string: s) {
             return u
@@ -74,9 +92,10 @@ public enum ScreenVision {
 
     // MARK: - Health
 
-    /// Cheap liveness probe. Use this before kicking off a long flow so
-    /// you can fall back to a cloud VLM gracefully when the daemon is down.
+    /// Cheap liveness probe. For cloud we just confirm the key is set —
+    /// no network call burned per check. For local we hit /health.
     public static func isAvailable(timeout: TimeInterval = 1.5) async -> Bool {
+        if backend == .cloud { return apiKey != nil }
         var req = URLRequest(url: baseURL.appendingPathComponent("health"))
         req.timeoutInterval = timeout
         do {
@@ -208,6 +227,7 @@ public enum ScreenVision {
         req.httpMethod = "POST"
         req.timeoutInterval = timeout
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = apiKey { req.setValue(key, forHTTPHeaderField: "X-Moondream-Auth") }
         req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
         let (data, response): (Data, URLResponse)
         do {

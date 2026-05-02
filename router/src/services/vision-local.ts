@@ -1,17 +1,29 @@
 /**
- * Local vision service — bridges to Moondream Station on :2020.
+ * Vision service — bridges to Moondream (caption / query / detect / point).
  *
- * Runs Moondream 3 Preview MLX natively on Apple Silicon, fully offline.
- * Use this instead of mailing screenshots to a cloud VLM when you want:
- *   - sub-cloud latency (single-digit seconds end-to-end on M-series)
- *   - zero token cost on the hot path
- *   - privacy: nothing leaves the device
+ * Two transparent backends, picked by env at runtime:
  *
- * The daemon is supervised by launchd (com.jarvis.moondream); see
- * scripts/moondream-server.py for the boot path. If the daemon is down,
- * every function returns a structured error rather than throwing — the
- * caller decides whether to fall back to a cloud VLM (Claude vision) or
- * surface "vision unavailable" to the user.
+ *   1. **Cloud** (`MOONDREAM_API_KEY` set) — `https://api.moondream.ai/v1`
+ *      with `X-Moondream-Auth`. Uses Moondream 3 server-side. ~0.5-1.1s per
+ *      call on a normal connection, ~$0.000068 per image (Personal tier
+ *      includes $5/mo, ~70k images). Best quality + best latency, but the
+ *      image leaves the device and you depend on internet.
+ *
+ *   2. **Local daemon** — falls back to `http://localhost:2020` (the
+ *      `com.jarvis.moondream` launchd service running Moondream Station).
+ *      Free, fully offline, but slower (~3-4s per call on M2 Max with
+ *      Moondream 2) and quality-limited by what fits in your RAM.
+ *
+ * The capability name stays `vision-local` upstream because the
+ * **interface** is the same — only the endpoint changes. Any caller
+ * setting `MOONDREAM_API_KEY` automatically gets the speed/quality
+ * upgrade with no code change. Override with `VISION_LOCAL_URL` if you
+ * point the daemon somewhere unusual (e.g. a LAN box).
+ *
+ * If the chosen backend is unreachable every function returns a
+ * structured `{ error }` rather than throwing — the caller decides
+ * whether to surface "vision unavailable" or fall back further to
+ * Claude's own vision via Read tool.
  */
 import { readFileSync } from "fs";
 import { extname } from "path";
@@ -19,8 +31,18 @@ import { logger } from "./logger";
 
 const log = logger.child({ module: "vision-local" });
 
-const VISION_URL = process.env.VISION_LOCAL_URL || "http://localhost:2020";
-const DEFAULT_TIMEOUT_MS = 60_000;
+const CLOUD_URL = "https://api.moondream.ai";
+const LOCAL_URL = process.env.VISION_LOCAL_URL || "http://localhost:2020";
+const API_KEY = process.env.MOONDREAM_API_KEY;
+const USE_CLOUD = !!API_KEY;
+const VISION_URL = USE_CLOUD ? CLOUD_URL : LOCAL_URL;
+const DEFAULT_TIMEOUT_MS = USE_CLOUD ? 15_000 : 60_000;
+
+if (USE_CLOUD) {
+  log.info({ endpoint: CLOUD_URL }, "vision-local using Moondream Cloud (sub-second, M3)");
+} else {
+  log.info({ endpoint: LOCAL_URL }, "vision-local using local Moondream Station (set MOONDREAM_API_KEY for cloud)");
+}
 
 const MIME_BY_EXT: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -65,15 +87,18 @@ function resolveImage(image: string): string | null {
 
 async function postJson<T>(path: string, body: Record<string, unknown>, timeoutMs: number): Promise<VisionResult<T>> {
   const url = `${VISION_URL}${path}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (USE_CLOUD) headers["X-Moondream-Auth"] = API_KEY!;
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
-      return { error: `vision-local ${path}: HTTP ${res.status}` };
+      const txt = await res.text().catch(() => "");
+      return { error: `vision-local ${path}: HTTP ${res.status}${txt ? ` ${txt.slice(0, 120)}` : ""}` };
     }
     const data = (await res.json()) as VisionResult<T>;
     if ("error" in data && data.error) {
@@ -87,14 +112,25 @@ async function postJson<T>(path: string, body: Record<string, unknown>, timeoutM
   }
 }
 
-/** GET /health — returns true if the daemon is reachable. */
+/**
+ * Liveness probe. For Cloud we just check we have a key; we don't burn an
+ * API call on every check. For local we hit /health. Returning `false`
+ * tells the caller to skip the pre-pass without falling back to a cloud
+ * vendor blindly.
+ */
 export async function isAvailable(timeoutMs = 1500): Promise<boolean> {
+  if (USE_CLOUD) return true;
   try {
     const res = await fetch(`${VISION_URL}/health`, { signal: AbortSignal.timeout(timeoutMs) });
     return res.ok;
   } catch {
     return false;
   }
+}
+
+/** Inspect which backend is active — useful for logs/UI. */
+export function visionBackend(): "cloud" | "local" {
+  return USE_CLOUD ? "cloud" : "local";
 }
 
 /**
