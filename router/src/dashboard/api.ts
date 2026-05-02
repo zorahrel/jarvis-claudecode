@@ -26,6 +26,23 @@ import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, 
 import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
 import { getAllServices, generatePlist } from "../services/services";
 import { discoverLocalSessions, dispatchOpenTarget, availableTargets, type OpenTargetId } from "../services/localSessions";
+import {
+  getLiveTokensFromSdk,
+  getLiveTokensFromJsonl,
+  costPerTurn,
+  normalizeModel,
+  calculateBreakdown,
+  detectCruft,
+  getSuggestionsForCruft,
+  extractToolUseEvents,
+  countCompactions,
+  diskStats,
+  recentSessions,
+  type SpawnConfig,
+} from "../services/contextInspector/index.js";
+import { getSessionMetadata } from "../services/claude";
+import { promises as fsPromises } from "fs";
+import { homedir as getHomedir } from "os";
 import { subscribe as subscribeNotch, emitNotch } from "../notch/events";
 import { NotchConnector } from "../connectors/notch";
 import { WhatsAppConnector } from "../connectors/whatsapp";
@@ -2015,10 +2032,201 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
   } else if (path === "/api/local-sessions" && req.method === "GET") {
     try {
       const sessions = await discoverLocalSessions();
-      json(req, res, sessions);
+      const projectsRoot = join(getHomedir(), ".claude", "projects");
+
+      // Backward-compat: ?legacy=1 returns the OLD LocalSession[] shape.
+      const isLegacy = req.url?.includes("legacy=1") ?? false;
+
+      // Enrich each session with live tokens + cost + model + compactionCount.
+      // sessionKey/agent/fullAccess come from the sidecar (set in discovery.ts).
+      const enriched = await Promise.all(sessions.map(async (s) => {
+        let liveTokens: number | undefined;
+        let liveTokensSource: "sdk-task-progress" | "sdk-result" | "jsonl-tail" | "unknown" | undefined;
+        let liveTokensAt: number | undefined;
+        let contextWindow: number | undefined;
+        let lastTurnCostUsd: number | undefined;
+        let model: string | undefined;
+        let compactionCount = 0;
+
+        // Router-spawned: sessionKey set by sidecar.
+        if (s.sessionKey) {
+          const meta = getSessionMetadata(s.sessionKey);
+          if (meta) {
+            model = meta.resolvedModel ?? meta.model;
+            compactionCount = meta.compactionCount;
+            const snap = getLiveTokensFromSdk({
+              sessionKey: s.sessionKey,
+              resolvedModel: meta.resolvedModel,
+              totalInputTokens: meta.totalInputTokens,
+              compactionCount: meta.compactionCount,
+              alive: meta.alive,
+            });
+            liveTokens = snap.totalTokens;
+            liveTokensSource = snap.source;
+            liveTokensAt = snap.capturedAt;
+            contextWindow = snap.contextWindow;
+            if (snap.lastTurnUsage) {
+              const c = costPerTurn(snap.lastTurnUsage, normalizeModel(model ?? null));
+              lastTurnCostUsd = c.totalUsd;
+            }
+          }
+        }
+
+        // Fallback for bare CLI or router-spawned without sessionKey: read JSONL tail.
+        if (liveTokens === undefined && s.transcriptPath) {
+          const snap = await getLiveTokensFromJsonl(s.transcriptPath, model ?? null);
+          if (snap) {
+            liveTokens = snap.totalTokens;
+            liveTokensSource = snap.source;
+            liveTokensAt = snap.capturedAt;
+            contextWindow = snap.contextWindow;
+            if (snap.lastTurnUsage) {
+              const c = costPerTurn(snap.lastTurnUsage, normalizeModel(model ?? null));
+              lastTurnCostUsd = c.totalUsd;
+            }
+          }
+          if (s.transcriptPath) {
+            compactionCount = await countCompactions(s.transcriptPath);
+          }
+        }
+
+        return {
+          ...s,
+          liveTokens,
+          liveTokensSource,
+          liveTokensAt,
+          contextWindow,
+          lastTurnCostUsd,
+          model,
+          compactionCount,
+        };
+      }));
+
+      // Legacy shape: just the array (with optional fields ignored by old consumers).
+      if (isLegacy) {
+        json(req, res, enriched);
+        return;
+      }
+
+      // Aggregate stats.
+      const totalLiveTokens = enriched.reduce((sum, s) => sum + (s.liveTokens ?? 0), 0);
+      const costsKnown = enriched.map((s) => s.lastTurnCostUsd).filter((c): c is number => typeof c === "number");
+      const avgCostPerTurnUsd = costsKnown.length > 0
+        ? costsKnown.reduce((a, b) => a + b, 0) / costsKnown.length
+        : 0;
+
+      const [disk, recent] = await Promise.all([
+        diskStats(projectsRoot),
+        recentSessions(projectsRoot, 10),
+      ]);
+
+      json(req, res, {
+        sessions: enriched,
+        aggregate: {
+          totalSessions: enriched.length,
+          totalLiveTokens,
+          avgCostPerTurnUsd,
+        },
+        disk,
+        recent,
+      });
     } catch (err: unknown) {
       log.warn({ err }, "[local-sessions] discovery failed");
       json(req, res, { error: "discovery failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && /^\/api\/sessions\/[^/]+\/breakdown$/.test(path)) {
+    // GET /api/sessions/:sessionId/breakdown — drill-down 8-category view (CTX-14).
+    const parts = path.split("/");
+    const sessionId = parts[3];
+    try {
+      const sessions = await discoverLocalSessions();
+      const target = sessions.find((s) => s.sessionId === sessionId);
+      if (!target) { json(req, res, { error: "session not found" }, 404); return; }
+
+      const sessionKey = target.sessionKey;
+      const meta = sessionKey ? getSessionMetadata(sessionKey) : null;
+
+      let liveTotal = 0;
+      if (meta && sessionKey) {
+        const snap = getLiveTokensFromSdk({
+          sessionKey,
+          resolvedModel: meta.resolvedModel,
+          totalInputTokens: meta.totalInputTokens,
+          compactionCount: meta.compactionCount,
+          alive: meta.alive,
+        });
+        liveTotal = snap.totalTokens;
+      } else if (target.transcriptPath) {
+        const snap = await getLiveTokensFromJsonl(target.transcriptPath, null);
+        if (snap) liveTotal = snap.totalTokens;
+      }
+
+      const spawn: SpawnConfig = {
+        agent: target.agent ?? (sessionKey ? sessionKey.split(":").pop() ?? "unknown" : "bare-cli"),
+        fullAccess: target.fullAccess ?? meta?.fullAccess ?? false,
+        inheritUserScope: target.inheritUserScope ?? meta?.inheritUserScope ?? false,
+        tools: [],
+        workspace: meta?.workspace ?? target.cwd,
+        mcpConfigPath: join(getHomedir(), ".claude.json"),
+      };
+
+      const breakdown = await calculateBreakdown(spawn, liveTotal);
+      json(req, res, {
+        sessionId,
+        sessionKey: sessionKey ?? null,
+        agent: spawn.agent,
+        ...breakdown,
+      });
+    } catch (err: unknown) {
+      log.warn({ err, sessionId }, "[breakdown] failed");
+      json(req, res, { error: "breakdown failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && path === "/api/sessions/cruft") {
+    // GET /api/sessions/cruft — global cruft view per agent (CTX-08/09/10).
+    try {
+      const sessions = await discoverLocalSessions();
+      type CruftEntry = {
+        agent: string;
+        findings: Array<{ kind: string; name: string; loadedTokens: number; recentTurns: number; callCount: number }>;
+        suggestions: Array<{ id: string; when: string; action: string; rationale: string }>;
+      };
+      const findingsByAgent: Record<string, CruftEntry> = {};
+
+      for (const s of sessions) {
+        if (!s.transcriptPath) continue;
+        const sessionKey = s.sessionKey ?? null;
+        const meta = sessionKey ? getSessionMetadata(sessionKey) : null;
+        const agent = s.agent ?? (sessionKey ? sessionKey.split(":").pop() ?? "unknown" : "bare-cli");
+
+        let mcpsLoaded: string[] = [];
+        const isFullAccess = s.fullAccess ?? meta?.fullAccess ?? false;
+        if (isFullAccess) {
+          try {
+            const cfgRaw = await fsPromises.readFile(join(getHomedir(), ".claude.json"), "utf-8");
+            const cfg = JSON.parse(cfgRaw);
+            mcpsLoaded = Object.keys(cfg.mcpServers ?? {});
+          } catch { /* empty mcpsLoaded */ }
+        }
+        // v1: skills index reader is deferred (Plan 04 must_haves CTX-09 caveat).
+        const skillsLoaded: string[] = [];
+
+        const events = await extractToolUseEvents(s.transcriptPath, 5);
+        const findings = detectCruft({ mcpsLoaded, skillsLoaded, toolUseEvents: events, recentTurns: 5 });
+        const suggestions = getSuggestionsForCruft(findings, {
+          agentName: agent,
+          inheritUserScope: s.inheritUserScope ?? meta?.inheritUserScope,
+          fullAccess: isFullAccess,
+        });
+
+        findingsByAgent[agent] = { agent, findings, suggestions };
+      }
+
+      json(req, res, { agents: Object.values(findingsByAgent) });
+    } catch (err: unknown) {
+      log.warn({ err }, "[cruft] failed");
+      json(req, res, { error: "cruft failed" }, 500);
     }
 
   } else if (/^\/api\/local-sessions\/\d+\/targets$/.test(path) && req.method === "GET") {
