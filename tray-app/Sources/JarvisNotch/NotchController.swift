@@ -229,7 +229,7 @@ final class NotchController: ObservableObject {
         let d = nearestCornerDistance()
         updateCancelAffordanceProximity(distance: d)
         // No dwell — instant abort on entering the corner radius.
-        if d <= cornerAbortPx {
+        if d <= NotchTuning.cornerAbortPx {
             if streamRecorder.isRunning {
                 abortHoverRecord(reason: "hot-corner")
             } else {
@@ -237,7 +237,7 @@ final class NotchController: ObservableObject {
             }
         }
         if streamRecorder.isRunning {
-            if d <= cornerWarnPx && d > cornerAbortPx {
+            if d <= NotchTuning.cornerWarnPx && d > NotchTuning.cornerAbortPx {
                 if !lastCornerWarn {
                     lastCornerWarn = true
                     evalJS("window.__notchVoiceAbortWarn && window.__notchVoiceAbortWarn(true);")
@@ -273,9 +273,10 @@ final class NotchController: ObservableObject {
             pendingCollapseTask?.cancel()
             pendingCollapseTask = Task { @MainActor in
                 // Short debounce so a cursor that briefly strays out and
-                // comes back doesn't trigger a flicker. 60 ms feels instant
-                // to the user but still absorbs single-frame hover noise.
-                try? await Task.sleep(for: .milliseconds(60))
+                // comes back doesn't trigger a flicker. NotchTuning.
+                // pendingCollapseSeconds (60ms default) feels instant but
+                // still absorbs single-frame hover noise.
+                try? await Task.sleep(for: .seconds(NotchTuning.pendingCollapseSeconds))
                 if Task.isCancelled { return }
                 if self.isExpanded && !self.isSticky {
                     self.compact()
@@ -309,13 +310,17 @@ final class NotchController: ObservableObject {
     private func isInsideCompactZone(cgX: CGFloat, cgY: CGFloat) -> Bool {
         guard let screen = notchScreen(), cursorScreen() == screen else { return false }
         let midX = screen.frame.midX
-        return cgY >= 0 && cgY <= 40 && abs(cgX - midX) <= 140
+        return cgY >= 0
+            && cgY <= NotchTuning.compactZoneMaxY
+            && abs(cgX - midX) <= NotchTuning.compactZoneHalfWidth
     }
 
     private func isInsideExpandedZone(cgX: CGFloat, cgY: CGFloat) -> Bool {
         guard let screen = notchScreen(), cursorScreen() == screen else { return false }
         let midX = screen.frame.midX
-        return cgY >= 0 && cgY <= 560 && abs(cgX - midX) <= 240
+        return cgY >= 0
+            && cgY <= NotchTuning.expandedZoneMaxY
+            && abs(cgX - midX) <= NotchTuning.expandedZoneHalfWidth
     }
 
     private func isOverExpandedPanel() -> Bool {
@@ -438,7 +443,7 @@ final class NotchController: ObservableObject {
         (function() {
           if (window.__jarvisDebugWired) return;
           window.__jarvisDebugWired = true;
-          window.__notchHost = 'http://localhost:3340';
+          window.__notchHost = '\(NotchEndpoints.host)';
           var send = function(level, args) {
             try {
               var text = Array.from(args).map(function(a) {
@@ -539,15 +544,9 @@ final class NotchController: ObservableObject {
         // `/notch/orb/` resolves to the Vite demo index (or, if the dashboard
         // static fallback kicks in, to the full dashboard SPA — which is
         // exactly the "dashboard in the notch" bug).
-        if let remote = URL(string: "http://localhost:3340/notch/orb/notch.html") {
-            NotchLogger.shared.log("info", "[swift] loading orb from \(remote)")
-            web.load(URLRequest(url: remote))
-        } else if let url = Bundle.module.url(forResource: "notch", withExtension: "html", subdirectory: "Orb") {
-            NotchLogger.shared.log("warn", "[swift] router URL invalid — fallback file:// \(url.path)")
-            web.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        } else {
-            NotchLogger.shared.log("error", "[swift] No orb URL available")
-        }
+        let remote = NotchEndpoints.orbHTML
+        NotchLogger.shared.log("info", "[swift] loading orb from \(remote)")
+        web.load(URLRequest(url: remote))
         return web
     }
 
@@ -632,7 +631,6 @@ final class NotchController: ObservableObject {
     /// browser bug, network drop). Without this, the flag stuck at true would
     /// permanently lock out future hover-arm decisions that read it.
     var assistantSpeakingResetTimer: Timer?
-    static let assistantSpeakingMaxDuration: TimeInterval = 60.0
 
     /// Track whether the WebView <audio> element is currently playing TTS.
     /// Set by `audioLifecycle` JS messages, read by `handleVADSpeechStart`
@@ -669,12 +667,10 @@ final class NotchController: ObservableObject {
             completionHandler: nil
         )
         // Notifica il router: bumpa generation, emit audio.stop, state→recording.
-        if let url = URL(string: "http://localhost:3340/api/notch/barge") {
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.timeoutInterval = 1.0
-            URLSession.shared.dataTask(with: req).resume()
-        }
+        var bargeReq = URLRequest(url: NotchEndpoints.barge)
+        bargeReq.httpMethod = "POST"
+        bargeReq.timeoutInterval = 1.0
+        URLSession.shared.dataTask(with: bargeReq).resume()
         NotchLogger.shared.log("info", "[barge-in] VAD detected user voice during TTS — interrupted")
     }
 
@@ -688,29 +684,23 @@ final class NotchController: ObservableObject {
 
     /// Grace-period task that cancels the hover-record after a fade-out
     /// window when the cursor leaves the zone. Replaces the old immediate
-    /// 60ms collapse — gives the user 2.5s to come back without losing
-    /// what they were saying. Cancelled if the cursor re-enters or if the
-    /// recorder stops naturally on silence.
+    /// Cancellable grace timer that runs after a mouse-out while the
+    /// recorder is still capturing. See NotchTuning.hoverRecordGraceSeconds.
     private var hoverRecordGraceTask: Task<Void, Never>?
-    private let hoverRecordGraceSeconds: Double = 2.5
 
     /// Hover-record master switch, mirrored to `~/.claude/jarvis/state/notch-prefs.json`
     /// via the router's `/api/notch/prefs`. OFF by default — hover is too
     /// trigger-happy a gesture to arm a mic automatically without user opt-in.
     @Published var hoverRecord: Bool = false
 
-    /// Dwell timer: the user must hover CONTINUOUSLY for ~400 ms before the
-    /// mic arms. Cancelled if the cursor leaves inside the window.
+    /// Dwell timer: the user must hover CONTINUOUSLY for `NotchTuning.
+    /// hoverArmDelaySeconds` before the mic arms. Cancelled if the cursor
+    /// leaves inside the window.
     private var armingTask: Task<Void, Never>?
     /// Epoch of the last streaming stop — used to enforce a post-stop cooldown
     /// so a cursor that immediately re-enters the zone doesn't re-arm before
     /// the user intends to.
     private var lastStreamStopAt: TimeInterval = 0
-    /// Dwell delay & post-stop cooldown. Tuned for the hover-to-talk UX
-    /// described in the phase plan — 400 ms is the sweet spot between
-    /// "feels responsive" and "accidentally triggers while aiming menubar".
-    private let hoverArmDelaySeconds: Double = 0.4
-    private let hoverStopCooldownSeconds: Double = 0.8
 
     // MARK: Public control
 
@@ -766,7 +756,7 @@ final class NotchController: ObservableObject {
 
     @MainActor
     private func reloadOrb() {
-        guard let url = URL(string: "http://localhost:3340/notch/orb/notch.html") else { return }
+        let url = NotchEndpoints.orbHTML
         NotchLogger.shared.log("info", "[reload] orb \(url)")
         webView.load(URLRequest(url: url))
     }
@@ -884,10 +874,10 @@ final class NotchController: ObservableObject {
         guard hoverRecord else { return }
         guard !streamRecorder.isRunning else { return }
         let now = Date().timeIntervalSince1970
-        if now - lastStreamStopAt < hoverStopCooldownSeconds { return }
+        if now - lastStreamStopAt < NotchTuning.hoverStopCooldownSeconds { return }
         armingTask?.cancel()
         armingTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(Int(400)))
+            try? await Task.sleep(for: .seconds(NotchTuning.hoverArmDelaySeconds))
             guard let self, !Task.isCancelled, self.isHovering else { return }
             // Hover engagement is a CALL, not a single utterance — set
             // inContinuousCall so silence re-arms the mic. NOT sticky:
@@ -938,10 +928,10 @@ final class NotchController: ObservableObject {
             return
         }
         NotchLogger.shared.log("info", "[hover-rec] grace start reason=\(reason)")
-        let graceMs = Int(hoverRecordGraceSeconds * 1000)
+        let graceMs = Int(NotchTuning.hoverRecordGraceSeconds * 1000)
         evalJS("window.__notchVoiceGraceStart && window.__notchVoiceGraceStart(\(graceMs));")
         hoverRecordGraceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(self?.hoverRecordGraceSeconds ?? 2.5))
+            try? await Task.sleep(for: .seconds(NotchTuning.hoverRecordGraceSeconds))
             if Task.isCancelled { return }
             guard let self, self.streamRecorder.isRunning else { return }
             NotchLogger.shared.log("info", "[hover-rec] grace expired, stopping")
@@ -1010,9 +1000,8 @@ final class NotchController: ObservableObject {
     }
 
     /// Px from the corner where abort fires (must commit fully). Within
-    /// `cornerWarnPx` we paint a red ring as a "you're about to abort" hint.
-    private let cornerAbortPx: CGFloat = 80
-    private let cornerWarnPx: CGFloat = 260
+    /// `NotchTuning.cornerWarnPx` we paint a red ring as a "you're about to
+    /// abort" hint. Constants live in NotchConstants.swift.
     private var lastCornerWarn: Bool = false
 
     /// Bottom-right cancel affordance — small standalone NSPanel shown
@@ -1065,10 +1054,11 @@ final class NotchController: ObservableObject {
     }
 
     func updateCancelAffordanceProximity(distance: CGFloat) {
-        // Proximity 0 (far) → 1 (at corner). Use cornerWarnPx as the start
-        // of the visible engagement; below cornerAbortPx it's full-bleed red.
-        let warn = cornerWarnPx
-        let abort = cornerAbortPx
+        // Proximity 0 (far) → 1 (at corner). Use NotchTuning.cornerWarnPx as
+        // the start of the visible engagement; below cornerAbortPx it's
+        // full-bleed red.
+        let warn = NotchTuning.cornerWarnPx
+        let abort = NotchTuning.cornerAbortPx
         let p: CGFloat
         if distance >= warn { p = 0 }
         else if distance <= abort { p = 1 }
@@ -1272,9 +1262,8 @@ final class NotchController: ObservableObject {
         // renders the user bubble. The 'notch' value is suppressed there
         // because the bundled JS pushes typed input locally — for voice we
         // need the SSE echo to be the source of truth.
-        guard let url = URL(string: "http://localhost:3340/api/notch/send"),
-              let body = try? JSONSerialization.data(withJSONObject: ["text": text, "from": "notch-voice"]) else { return }
-        var req = URLRequest(url: url)
+        guard let body = try? JSONSerialization.data(withJSONObject: ["text": text, "from": "notch-voice"]) else { return }
+        var req = URLRequest(url: NotchEndpoints.send)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
@@ -1301,7 +1290,7 @@ final class NotchController: ObservableObject {
         // (matches StreamingRecorder's silence threshold * a few). Push the
         // boolean transitions to JS so the aura can flip between "ascolto"
         // (cyan) and "parlando" (green) without polling.
-        let voiced = clamped > 0.18
+        let voiced = clamped > NotchTuning.voicedRmsThreshold
         if voiced != lastVoicedState {
             lastVoicedState = voiced
             let evt = voiced ? "window.__notchVoiceVoiced && window.__notchVoiceVoiced();"
@@ -1327,9 +1316,8 @@ final class NotchController: ObservableObject {
     }
 
     private func postPrefPatch(_ patch: [String: Bool]) async {
-        guard let url = URL(string: "http://localhost:3340/api/notch/prefs"),
-              let body = try? JSONSerialization.data(withJSONObject: patch) else { return }
-        var req = URLRequest(url: url)
+        guard let body = try? JSONSerialization.data(withJSONObject: patch) else { return }
+        var req = URLRequest(url: NotchEndpoints.prefs)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
@@ -1340,9 +1328,8 @@ final class NotchController: ObservableObject {
     /// on the compiled-in defaults.
     private func loadPrefsFromRouter() {
         Task { @MainActor in
-            guard let url = URL(string: "http://localhost:3340/api/notch/prefs") else { return }
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                let (data, _) = try await URLSession.shared.data(from: NotchEndpoints.prefs)
                 if let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let h = obj["hoverRecord"] as? Bool {
                     self.setHoverRecord(h, persist: false)
@@ -1400,7 +1387,7 @@ final class NotchController: ObservableObject {
     func bumpChannel(index: Int) {
         guard index >= 0 && index < channelLevels.count else { return }
         var next = channelLevels
-        next[index] = min(1.0, next[index] + 0.75)
+        next[index] = min(1.0, next[index] + NotchTuning.channelBumpBoost)
         channelLevels = next
         // Cancel any in-flight decay for this slot so a single decay loop
         // owns the channel until completion (or the next bump).
@@ -1408,12 +1395,12 @@ final class NotchController: ObservableObject {
         channelDecayTasks[targetIndex]?.cancel()
         channelDecayTasks[targetIndex] = Task { @MainActor [weak self] in
             for _ in 0..<30 {
-                try? await Task.sleep(for: .milliseconds(66))
+                try? await Task.sleep(for: .milliseconds(NotchTuning.channelDecayTickMs))
                 if Task.isCancelled { return }
                 guard let self else { return }
                 if self.channelLevels[targetIndex] <= 0 { return }
                 var decayed = self.channelLevels
-                decayed[targetIndex] = max(0, decayed[targetIndex] - 0.045)
+                decayed[targetIndex] = max(0, decayed[targetIndex] - NotchTuning.channelDecayStep)
                 self.channelLevels = decayed
             }
         }
@@ -1550,7 +1537,7 @@ final class NotchController: ObservableObject {
         // a physical notch so the peek still aligns under the menu bar.
         let f = screen.frame
         let notchH: CGFloat = max(screen.safeAreaInsets.top, 38)
-        let width: CGFloat = min(440, f.width - 120)
+        let width: CGFloat = min(NotchTuning.peekMaxWidth, f.width - 120)
         let height: CGFloat = peekView?.preferredHeight(forWidth: width) ?? 44
         // Top edge of the panel = bottom edge of the notch cutout, exactly.
         // No gap, so the concave top corners (drawn by MessagePeekView's
@@ -1570,7 +1557,7 @@ final class NotchController: ObservableObject {
         peekDismissTask = nil
         if autoDismiss {
             peekDismissTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(NotchTuning.peekAutoDismissSeconds))
                 guard let self, !Task.isCancelled else { return }
                 self.dismissPeek()
             }
@@ -1648,18 +1635,16 @@ final class NotchController: ObservableObject {
     @MainActor
     private func interruptJarvis(reason: String) {
         let now = Date().timeIntervalSince1970
-        if now - lastInterruptAt < 0.6 { return }
+        if now - lastInterruptAt < NotchTuning.interruptCooldownSeconds { return }
         lastInterruptAt = now
         NotchLogger.shared.log("info", "[interrupt] \(reason)")
         // 1. Local TTS via AVSpeechSynthesizer
         NotchSpeechSynthesizer.shared.stop()
         // 2. Server-side: cancel any in-flight assistant reply
-        if let url = URL(string: "http://localhost:3340/api/notch/abort") {
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.timeoutInterval = 3
-            URLSession.shared.dataTask(with: req).resume()
-        }
+        var abortReq = URLRequest(url: NotchEndpoints.abort)
+        abortReq.httpMethod = "POST"
+        abortReq.timeoutInterval = 3
+        URLSession.shared.dataTask(with: abortReq).resume()
         // 3. WebView <audio> playback (mp3 streamed via audio.play)
         evalJS("(function(){var a=document.querySelector('audio');if(a){try{a.pause();a.currentTime=0;}catch(_){}}})();")
         // Force state back to idle locally so the affordance hides as
@@ -2220,7 +2205,7 @@ enum NotchEvent {
 final class NotchEventBus {
     static let shared = NotchEventBus()
 
-    private let url = URL(string: "http://localhost:3340/api/notch/stream")!
+    private let url = NotchEndpoints.sseStream
     /// Active SSE session. Created fresh per connect() because URLSession
     /// strongly retains its delegate until `invalidateAndCancel()` is called
     /// — without that, every reconnect would leak a session + its SSEDelegate.
@@ -2228,7 +2213,7 @@ final class NotchEventBus {
     private var task: URLSessionDataTask?
     private var delegate: SSEDelegate?
     private var handler: ((NotchEvent) -> Void)?
-    private var backoff: TimeInterval = 0.5
+    private var backoff: TimeInterval = NotchTuning.sseBackoffStart
 
     func start(_ handler: @escaping (NotchEvent) -> Void) {
         self.handler = handler
@@ -2262,7 +2247,7 @@ final class NotchEventBus {
 
     private func scheduleReconnect() {
         let delay = backoff
-        backoff = min(backoff * 1.6, 10)
+        backoff = min(backoff * NotchTuning.sseBackoffFactor, NotchTuning.sseBackoffMax)
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
             connect()
@@ -2281,7 +2266,7 @@ final class NotchEventBus {
         else { return }
         let d = (obj["data"] as? [String: Any]) ?? [:]
 
-        backoff = 0.5 // reset on any successful event
+        backoff = NotchTuning.sseBackoffStart // reset on any successful event
 
         switch type {
         case "state.change":
@@ -2399,7 +2384,7 @@ final class NotchWebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelega
                 NotchController.shared.assistantSpeakingResetTimer?.invalidate()
                 if isStart {
                     NotchController.shared.assistantSpeakingResetTimer = Timer.scheduledTimer(
-                        withTimeInterval: NotchController.assistantSpeakingMaxDuration,
+                        withTimeInterval: NotchTuning.assistantSpeakingMaxDuration,
                         repeats: false
                     ) { _ in
                         Task { @MainActor in
@@ -2491,12 +2476,9 @@ final class NotchWebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelega
             // Prefer reloading the original URL — `reload()` is a no-op when
             // the previous load never committed (e.g. router was down at
             // boot), which is exactly the case we need to recover from.
-            if let remote = URL(string: "http://localhost:3340/notch/orb/notch.html") {
-                self.onLog("info", "[nav] reload (\(reason)) → \(remote)")
-                w.load(URLRequest(url: remote))
-            } else {
-                w.reload()
-            }
+            let remote = NotchEndpoints.orbHTML
+            self.onLog("info", "[nav] reload (\(reason)) → \(remote)")
+            w.load(URLRequest(url: remote))
         }
     }
 }
