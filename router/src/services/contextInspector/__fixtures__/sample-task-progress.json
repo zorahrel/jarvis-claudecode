@@ -1,0 +1,12 @@
+{
+  "type": "system",
+  "subtype": "task_progress",
+  "usage": {
+    "total_tokens": 87432,
+    "input_tokens": 1500,
+    "output_tokens": 800,
+    "cache_read_input_tokens": 50000,
+    "cache_creation_input_tokens": 30000
+  },
+  "model": "claude-sonnet-4-6"
+}

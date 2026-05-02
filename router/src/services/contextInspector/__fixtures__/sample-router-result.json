@@ -1,0 +1,15 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "duration_ms": 12340,
+  "duration_api_ms": 11200,
+  "total_cost_usd": 0.0421,
+  "result": "Sample assistant response text",
+  "usage": {
+    "input_tokens": 1500,
+    "cache_creation_input_tokens": 30000,
+    "cache_read_input_tokens": 50000,
+    "output_tokens": 800,
+    "service_tier": "standard"
+  }
+}
