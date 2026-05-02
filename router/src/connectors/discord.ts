@@ -151,47 +151,57 @@ export class DiscordConnector implements Connector {
       const hasVision = canVision(agent);
 
       // Process attachments
-      const media: MediaAttachment[] = [];
+      const processAttachments = async (
+        atts: Iterable<{ url: string; name?: string | null; contentType?: string | null }>,
+      ): Promise<MediaAttachment[]> => {
+        const out: MediaAttachment[] = [];
+        for (const att of atts) {
+          try {
+            const mime = att.contentType ?? "";
+            let type: MediaAttachment["type"] = "document";
+            if (mime.startsWith("audio/") || att.name?.endsWith(".ogg") || att.name?.endsWith(".mp3")) type = "voice";
+            else if (mime.startsWith("image/")) type = "image";
+            else if (mime.startsWith("video/")) type = "video";
+
+            if ((type === "voice") && !hasVoice) {
+              log.warn({ attName: att.name }, "Voice attachment but 'voice' tool not authorized — skipping");
+              continue;
+            }
+            if ((type === "image" || type === "video") && !hasVision) {
+              log.warn({ attName: att.name, type }, "Visual attachment but 'vision' tool not authorized — skipping");
+              continue;
+            }
+
+            const localPath = await downloadMedia(att.url, att.name ?? "attachment");
+            const processed = await processMedia(type, localPath, mime);
+            out.push({ type, processedText: processed, localPath, fileName: att.name ?? undefined, mimeType: mime });
+          } catch (err) {
+            log.error({ err, attName: att.name }, "Error processing Discord attachment");
+          }
+        }
+        return out;
+      };
+
       const hasAttachments = discordMsg.attachments.size > 0;
       if (hasAttachments) timings.mediaStart = Date.now();
-      for (const [, att] of discordMsg.attachments) {
-        try {
-          const mime = att.contentType ?? "";
-          let type: MediaAttachment["type"] = "document";
-          if (mime.startsWith("audio/") || att.name?.endsWith(".ogg") || att.name?.endsWith(".mp3")) type = "voice";
-          else if (mime.startsWith("image/")) type = "image";
-          else if (mime.startsWith("video/")) type = "video";
-
-          // Gate by tool authorization
-          if ((type === "voice") && !hasVoice) {
-            log.warn({ attName: att.name }, "Voice attachment but 'voice' tool not authorized — skipping");
-            continue;
-          }
-          if ((type === "image" || type === "video") && !hasVision) {
-            log.warn({ attName: att.name, type }, "Visual attachment but 'vision' tool not authorized — skipping");
-            continue;
-          }
-
-          const localPath = await downloadMedia(att.url, att.name ?? "attachment");
-          const processed = await processMedia(type, localPath, mime);
-          media.push({ type, processedText: processed, localPath, fileName: att.name ?? undefined, mimeType: mime });
-        } catch (err) {
-          log.error({ err, attName: att.name }, "Error processing Discord attachment");
-        }
-      }
+      const media = await processAttachments(discordMsg.attachments.values());
       if (hasAttachments) timings.mediaEnd = Date.now();
 
-      // Process reply/reference
+      // Process reply/reference (text + attachments — so replies to messages with images work)
       let quotedMessage: QuotedMessage | undefined;
       if (discordMsg.reference?.messageId) {
         try {
           const refMsg = await discordMsg.channel.messages.fetch(discordMsg.reference.messageId);
           if (refMsg) {
             const rawQuotedText = refMsg.content || undefined;
+            const quotedMedia = refMsg.attachments.size > 0
+              ? await processAttachments(refMsg.attachments.values())
+              : undefined;
             quotedMessage = {
               text: rawQuotedText ? resolveDiscordMentions(rawQuotedText, refMsg) : undefined,
               from: refMsg.author.username,
               timestampEpoch: Math.floor(refMsg.createdTimestamp / 1000),
+              media: quotedMedia && quotedMedia.length > 0 ? quotedMedia : undefined,
             };
           }
         } catch { /* ignore */ }
