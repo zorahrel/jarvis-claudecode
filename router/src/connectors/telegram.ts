@@ -8,6 +8,7 @@ import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
 import { processMedia, downloadMedia, saveMedia, cleanupMedia } from "../services/media";
+import { pushTelegram } from "../services/message-buffer";
 import { loadSlashCommands, pickMenuCommands, rewriteIncomingSlash, handleRouterCommand, type SlashCommand } from "../services/slash-commands";
 import { basename } from "path";
 
@@ -15,19 +16,29 @@ const log = logger.child({ module: "telegram" });
 
 export class TelegramConnector implements Connector {
   readonly channel = "telegram" as const;
-  private bot: Bot | null = null;
+  private static singleton: TelegramConnector | null = null;
+  static getInstance(): TelegramConnector | null {
+    return TelegramConnector.singleton;
+  }
+
+  private _bot: Bot | null = null;
+  /** Read-only handle for in-process MCP tools (mcp/telegram.ts). Null until start() succeeds. */
+  get bot(): Bot | null { return this._bot; }
+
   private slashCatalog: SlashCommand[] = [];
 
-  constructor(private config: Config) {}
+  constructor(private config: Config) {
+    TelegramConnector.singleton = this;
+  }
 
   async start(): Promise<void> {
     const token = this.config.channels.telegram?.botToken;
     if (!token) throw new Error("Telegram bot token not configured");
 
-    this.bot = new Bot(token);
+    this._bot = new Bot(token);
 
     // Handle ALL messages (text, voice, photo, document, video_note, audio)
-    this.bot.on("message", async (ctx) => {
+    this._bot.on("message", async (ctx) => {
       const chatId = ctx.chat.id;
       const messageId = ctx.message.message_id;
       const m = ctx.message;
@@ -184,6 +195,22 @@ export class TelegramConnector implements Connector {
       // Skip if no text and no media
       if (!text && media.length === 0 && !quotedMessage) return;
 
+      // Capture into the local Telegram ring buffer so MCP read tools can serve it.
+      // We do this even when the message is *not* routed to an agent — the buffer
+      // is the only history we have on Telegram.
+      pushTelegram(String(chatId), {
+        id: String(messageId),
+        fromId: ctx.from ? String(ctx.from.id) : undefined,
+        fromName: ctx.from
+          ? [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || ctx.from.username
+          : undefined,
+        text,
+        ts: m.date,
+      });
+
+      const chatTitle = ctx.chat.type !== "private" && (ctx.chat as { title?: string }).title
+        ? (ctx.chat as { title: string }).title
+        : undefined;
       const msg: IncomingMessage = {
         channel: "telegram",
         from: String(ctx.from?.id),
@@ -195,6 +222,16 @@ export class TelegramConnector implements Connector {
         media: media.length > 0 ? media : undefined,
         quotedMessage,
         timings,
+        channelContext: {
+          telegram: {
+            chatId: String(chatId),
+            chatType: ctx.chat.type as "private" | "group" | "supergroup" | "channel",
+            chatTitle,
+            fromId: ctx.from ? String(ctx.from.id) : undefined,
+            fromUsername: ctx.from?.username,
+            messageId,
+          },
+        },
         reply: async (response: string) => {
           try {
             await ctx.reply(response, { parse_mode: "Markdown" });
@@ -235,11 +272,11 @@ export class TelegramConnector implements Connector {
       await handleMessage(msg);
     });
 
-    this.bot.catch((err) => {
+    this._bot.catch((err) => {
       log.error({ err: err.error }, "Telegram bot error");
     });
 
-    this.bot.start({
+    this._bot.start({
       onStart: () => log.info("Telegram bot started"),
     });
 
@@ -254,7 +291,7 @@ export class TelegramConnector implements Connector {
    *  Retries once after 60 s if the first attempt fails (handles DNS-not-ready
    *  at boot: bot.start() works via long-poll but setMyCommands hits the API). */
   private async syncSlashCommands(): Promise<void> {
-    if (!this.bot) return;
+    if (!this._bot) return;
     this.slashCatalog = loadSlashCommands();
     if (this.slashCatalog.length === 0) {
       log.debug("No slash commands to register");
@@ -264,7 +301,7 @@ export class TelegramConnector implements Connector {
     const payload = menu.map(c => ({ command: c.tgName, description: c.description }));
     const trySync = async (): Promise<true | { err: unknown; menuSize: number }> => {
       try {
-        await this.bot!.api.setMyCommands(payload);
+        await this._bot!.api.setMyCommands(payload);
         log.info(
           { menu: payload.length, catalog: this.slashCatalog.length },
           "Registered Telegram slash commands",
@@ -290,7 +327,7 @@ export class TelegramConnector implements Connector {
   /** Download a Telegram file by file_id */
   private async downloadTgFile(token: string, fileId: string, filename: string): Promise<MediaAttachment | null> {
     try {
-      const bot = this.bot!;
+      const bot = this._bot!;
       const file = await bot.api.getFile(fileId);
       if (!file.file_path) return null;
 
@@ -308,21 +345,21 @@ export class TelegramConnector implements Connector {
   }
 
   async stop(): Promise<void> {
-    await this.bot?.stop();
-    this.bot = null;
+    await this._bot?.stop();
+    this._bot = null;
     log.info("Telegram bot stopped");
   }
 
   /** Send a text message to an arbitrary chat — used by cron delivery and crash recovery notices.
    *  Splits payloads above Telegram's 4096-char cap across sequential messages. */
   async sendMessage(target: string, text: string): Promise<void> {
-    if (!this.bot) throw new Error("Telegram bot not started");
+    if (!this._bot) throw new Error("Telegram bot not started");
     const chunks = splitMessage(text, 4000);
     for (const chunk of chunks) {
       try {
-        await this.bot.api.sendMessage(target, chunk, { parse_mode: "Markdown" });
+        await this._bot.api.sendMessage(target, chunk, { parse_mode: "Markdown" });
       } catch {
-        await this.bot.api.sendMessage(target, chunk);
+        await this._bot.api.sendMessage(target, chunk);
       }
     }
   }

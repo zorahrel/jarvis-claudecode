@@ -27,6 +27,7 @@ import type { AgentConfig } from "../types";
 import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
+import { buildMessagingMcps } from "../mcp";
 import { MEDIA_DIR } from "./media";
 import { issueToken, revokeToken } from "./notify-tokens";
 import { resetNotifyBudget, hasNotifyBudget, consumeNotifyBudget } from "./rate-limiter";
@@ -419,6 +420,10 @@ function buildSdkOptions(opts: {
   inheritUserScope?: boolean;
   isSubagent?: boolean;
   notify?: NotifyEnvContext;
+  /** Full agent config (passed through for in-process messaging MCPs). */
+  agent?: AgentConfig;
+  /** Session key (passed through for in-process messaging MCPs). */
+  sessionKey?: string;
 }): SdkOptions {
   const isReadonly = !opts.fullAccess && opts.tools.includes("fileAccess:readonly") && !opts.tools.includes("fileAccess:full");
   const permissionMode: "acceptEdits" | "bypassPermissions" = isReadonly ? "acceptEdits" : "bypassPermissions";
@@ -440,6 +445,16 @@ function buildSdkOptions(opts: {
         if (all[name]) filtered[name] = all[name] as SdkMcpServerConfig;
       }
       if (Object.keys(filtered).length > 0) mcpServers = filtered;
+    }
+  }
+
+  // In-process messaging MCPs (Discord/WhatsApp/Telegram/Channels). Built only
+  // when the agent has the corresponding tool. Subagents inherit nothing here —
+  // they're a separate spawn with their own toolset.
+  if (opts.agent && opts.sessionKey && !opts.isSubagent) {
+    const messagingMcps = buildMessagingMcps({ agent: opts.agent, sessionKey: opts.sessionKey });
+    if (Object.keys(messagingMcps).length > 0) {
+      mcpServers = { ...(mcpServers ?? {}), ...messagingMcps };
     }
   }
 
@@ -583,6 +598,7 @@ function spawnSession(
   agentEnv?: Record<string, string>,
   inheritUserScope?: boolean,
   isSubagent?: boolean,
+  agent?: AgentConfig,
 ): SdkSession {
   let notifyToken: string | null = null;
   let notify: NotifyEnvContext | undefined;
@@ -596,6 +612,7 @@ function spawnSession(
 
   const sdkOpts = buildSdkOptions({
     model, tools, workspace, effort, fullAccess, agentEnv, inheritUserScope, isSubagent, notify,
+    agent, sessionKey: key,
   });
 
   const pushable = makePushable<SDKUserMessage>();
@@ -785,6 +802,7 @@ function getOrCreateSession(
   tools: string[] = [], effort?: "low" | "medium" | "high" | "max",
   fullAccess?: boolean, agentEnv?: Record<string, string>,
   inheritUserScope?: boolean, isSubagent?: boolean,
+  agent?: AgentConfig,
 ): SdkSession {
   const existing = sessions.get(key);
   if (existing && existing.alive) {
@@ -817,7 +835,7 @@ function getOrCreateSession(
   const mcpCount = tools.filter(t => t.startsWith("mcp:")).length;
   log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false, isSubagent: !!isSubagent }, "Spawning new SDK session");
 
-  const s = spawnSession(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent);
+  const s = spawnSession(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent, agent);
   const pending = pendingSummaries.get(key);
   if (pending) s.compactionCount = pending.compactionCount;
   sessions.set(key, s);
@@ -1002,12 +1020,12 @@ async function askClaudeInternal(
     const model = resolveModel(models[i]);
     try {
       const tools = agent.tools ?? [];
-      let s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+      let s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
 
       if (s.model !== model) {
         killSession(s);
         sessions.delete(key);
-        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
       }
 
       if (s.alive && s.totalInputTokens > 0 && shouldCompact(s.totalInputTokens, s.model)) {
@@ -1017,7 +1035,7 @@ async function askClaudeInternal(
         } else {
           await compactSession(s, key);
         }
-        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
       }
 
       return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, images);

@@ -48,15 +48,24 @@ function resolveDiscordMentions(text: string, msg: Message): string {
 
 export class DiscordConnector implements Connector {
   readonly channel = "discord" as const;
-  private client: Client | null = null;
+  private static singleton: DiscordConnector | null = null;
+  static getInstance(): DiscordConnector | null {
+    return DiscordConnector.singleton;
+  }
 
-  constructor(private config: Config) {}
+  private _client: Client | null = null;
+  /** Read-only handle for in-process MCP tools (mcp/discord.ts). Null until start() succeeds. */
+  get client(): Client | null { return this._client; }
+
+  constructor(private config: Config) {
+    DiscordConnector.singleton = this;
+  }
 
   async start(): Promise<void> {
     const token = this.config.channels.discord?.botToken;
     if (!token) throw new Error("Discord bot token not configured");
 
-    this.client = new Client({
+    this._client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -69,7 +78,7 @@ export class DiscordConnector implements Connector {
     // Workaround: discord.js v14 sometimes doesn't emit MessageCreate for DMs
     // even with all required partials. Catch raw DM events and re-emit them.
     const dmProcessed = new Set<string>();
-    this.client.on("raw" as any, async (event: any) => {
+    this._client.on("raw" as any, async (event: any) => {
       if (event.t !== "MESSAGE_CREATE" || event.d?.guild_id) return;
       if (event.d?.author?.bot) return;
       const msgId = event.d?.id;
@@ -80,19 +89,19 @@ export class DiscordConnector implements Connector {
       if (!dmProcessed.has(msgId)) return; // already handled by normal event
       // discord.js didn't emit — fetch the channel & message manually
       try {
-        const channel = await this.client!.channels.fetch(event.d.channel_id);
+        const channel = await this._client!.channels.fetch(event.d.channel_id);
         if (!channel?.isTextBased()) return;
         const msg = await (channel as any).messages.fetch(msgId);
         if (msg) {
           log.debug({ authorId: msg.author?.id, isDM: true }, "DM recovered from raw event");
-          this.client!.emit(Events.MessageCreate, msg);
+          this._client!.emit(Events.MessageCreate, msg);
         }
       } catch (err) {
         log.error({ err, msgId }, "Failed to recover DM from raw event");
       }
     });
 
-    this.client.on(Events.MessageCreate, async (discordMsg) => {
+    this._client.on(Events.MessageCreate, async (discordMsg) => {
       // Mark as handled so raw workaround doesn't double-process
       dmProcessed.delete(discordMsg.id);
       try {
@@ -105,7 +114,7 @@ export class DiscordConnector implements Connector {
       // Ignore empty (unless has attachments or reference)
       if (!discordMsg.content && discordMsg.attachments.size === 0 && !discordMsg.reference) return;
 
-      const botId = this.client?.user?.id;
+      const botId = this._client?.user?.id;
       const isDM = !discordMsg.guildId;
 
       log.debug({ authorId: discordMsg.author?.id, guildId: discordMsg.guildId, isDM, content: discordMsg.content?.slice(0, 50) }, "Discord MessageCreate");
@@ -208,6 +217,9 @@ export class DiscordConnector implements Connector {
         ? `[@${discordMsg.author.username}]: ${baseText}`
         : baseText;
 
+      const channelName = "name" in discordMsg.channel
+        ? (discordMsg.channel as { name: string }).name
+        : undefined;
       const msg: IncomingMessage = {
         channel: "discord",
         from: discordMsg.author.id,
@@ -219,6 +231,17 @@ export class DiscordConnector implements Connector {
         media: media.length > 0 ? media : undefined,
         quotedMessage,
         timings,
+        channelContext: {
+          discord: {
+            guildId: discordMsg.guildId,
+            guildName: discordMsg.guild?.name,
+            channelId: discordMsg.channelId,
+            channelName,
+            authorId: discordMsg.author.id,
+            authorName: discordMsg.author.displayName ?? discordMsg.author.username,
+            messageId: discordMsg.id,
+          },
+        },
         reply: async (response: string) => {
           await discordMsg.reply(response);
         },
@@ -256,7 +279,7 @@ export class DiscordConnector implements Connector {
     });
 
 
-    this.client.on(Events.ClientReady, async (c) => {
+    this._client.on(Events.ClientReady, async (c) => {
       log.info({ user: c.user.tag }, "Discord bot ready");
       // Cache guild names for dashboard
       for (const [id, guild] of c.guilds.cache) {
@@ -276,24 +299,24 @@ export class DiscordConnector implements Connector {
       } catch { /* ignore */ }
     });
 
-    this.client.on(Events.Error, (err) => {
+    this._client.on(Events.Error, (err) => {
       log.error({ err }, "Discord client error");
     });
 
-    await this.client.login(token);
+    await this._client.login(token);
   }
 
   async stop(): Promise<void> {
-    await this.client?.destroy();
-    this.client = null;
+    await this._client?.destroy();
+    this._client = null;
     log.info("Discord bot stopped");
   }
 
   /** Send a text message to a channel — used by cron delivery and crash recovery notices.
    *  `target` is a Discord channel.id (works for both DMs and guild channels). */
   async sendMessage(target: string, text: string): Promise<void> {
-    if (!this.client) throw new Error("Discord client not started");
-    const channel = await this.client.channels.fetch(target);
+    if (!this._client) throw new Error("Discord client not started");
+    const channel = await this._client.channels.fetch(target);
     if (!channel || !channel.isTextBased() || !("send" in channel)) {
       throw new Error(`Discord channel ${target} not sendable`);
     }
