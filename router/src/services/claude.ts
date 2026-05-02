@@ -41,6 +41,17 @@ import {
 } from "./task-notification";
 import { getDeliveryFn } from "./cron";
 import { formatForChannel } from "./formatting";
+import { execFile as execFileCb } from "child_process";
+import { promisify } from "util";
+import {
+  recordTaskProgress,
+  recordTurnResult,
+  clearTaskProgress,
+  writeSessionSidecar,
+  removeSessionSidecar,
+} from "./contextInspector/index.js";
+
+const execFile = promisify(execFileCb);
 
 const log = logger.child({ module: "claude" });
 
@@ -427,6 +438,98 @@ function startFcacheWatcher(): void {
 
 startFcacheWatcher();
 
+// ─── Context Inspector — sidecar lifecycle ───────────────────────────────────
+// Per-PID JSON files at ~/.claude/jarvis/active-sessions/<pid>.json link a
+// spawned Claude SDK process to its router sessionKey. discovery.ts reads
+// these to enrich LocalSession with sessionKey/agent/fullAccess fields.
+//
+// Why sidecar (not env-var-via-ps): cleaner filesystem read, no shell parsing
+// fragility, survives executable-name variation across SDK process variants.
+// MAJOR 5 fix from the plan-checker revision.
+
+/** sessionKey -> Set of child PIDs we've registered sidecar files for. */
+const sidecarPidsBySession = new Map<string, Set<number>>();
+
+/**
+ * Find direct child PIDs of the router process that look like Claude CLI
+ * processes. Mirrors the heuristic in localSessions/discovery.ts.
+ */
+async function findChildClaudePids(): Promise<number[]> {
+  try {
+    const { stdout } = await execFile("ps", ["-axo", "pid=,ppid=,args="], {
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const myPid = process.pid;
+    const pids: number[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const m = trimmed.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (!m) continue;
+      const pid = parseInt(m[1], 10);
+      const ppid = parseInt(m[2], 10);
+      const args = m[3];
+      if (ppid !== myPid) continue;
+      // Skip Electron / Claude.app GUI processes
+      if (/Claude\.app\//.test(args) || /Electron/.test(args)) continue;
+      // Match Claude CLI signatures (same pattern as discovery.ts isClaudeCliProcess)
+      if (
+        /(^|\/)claude($|\s)/.test(args) ||
+        /@anthropic-ai\/claude-code\//.test(args) ||
+        /\/claude-code\/.*cli\.(m?js|cjs)/.test(args)
+      ) {
+        pids.push(pid);
+      }
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Register sidecar files for all Claude child processes belonging to this
+ * session. Idempotent — re-registering a known PID is a no-op.
+ * Called on the FIRST task_progress event (proves SDK process is alive +
+ * discoverable via `ps`).
+ */
+async function registerSessionSidecars(s: SdkSession): Promise<void> {
+  const pids = await findChildClaudePids();
+  if (pids.length === 0) return;
+  let known = sidecarPidsBySession.get(s.sessionKey);
+  if (!known) {
+    known = new Set();
+    sidecarPidsBySession.set(s.sessionKey, known);
+  }
+  const parsed = parseSessionKey(s.sessionKey);
+  const agentName = parsed?.agent ?? "unknown";
+  for (const pid of pids) {
+    if (known.has(pid)) continue;
+    known.add(pid);
+    await writeSessionSidecar({
+      pid,
+      sessionKey: s.sessionKey,
+      agent: agentName,
+      workspace: s.workspace,
+      model: s.model,
+      resolvedModel: s.resolvedModel,
+      fullAccess: s.fullAccess,
+      inheritUserScope: s.inheritUserScope,
+      spawnedAt: Date.now(),
+    });
+  }
+}
+
+/** Remove all sidecar files for a session — called from killSession. */
+async function unregisterSessionSidecars(sessionKey: string): Promise<void> {
+  const known = sidecarPidsBySession.get(sessionKey);
+  if (!known) return;
+  for (const pid of known) {
+    await removeSessionSidecar(pid);
+  }
+  sidecarPidsBySession.delete(sessionKey);
+}
+
 // --- Build SDK Options from agent config ---
 function buildSdkOptions(opts: {
   model: string;
@@ -671,6 +774,37 @@ function spawnSession(
           if (typeof m === "string" && m.startsWith("claude-")) s.resolvedModel = m;
         }
 
+        // ─── Context Inspector live signals ───────────────────────────────
+        // BOTH events feed the live-progress map:
+        //  - task_progress: running totalTokens (every step within a turn)
+        //  - result: per-field usage breakdown (one per turn, needed for cost)
+        // BLOCKER 1 fix from plan-checker: result tap MUST exist or cost calc
+        // is always undefined for router-spawned sessions.
+        if (e?.type === "system" && e?.subtype === "task_progress") {
+          const total = e?.usage?.total_tokens;
+          if (typeof total === "number" && total >= 0) {
+            recordTaskProgress(s.sessionKey, total);
+          }
+          // Opportunistic sidecar registration — first task_progress means
+          // the SDK process is alive and discoverable via `ps`.
+          if (!sidecarPidsBySession.has(s.sessionKey)) {
+            registerSessionSidecars(s).catch((err) => {
+              log.debug({ err: String(err), sessionKey: s.sessionKey }, "registerSessionSidecars failed (best-effort)");
+            });
+          }
+        }
+        if (e?.type === "result" && e?.usage) {
+          const u = e.usage;
+          if (typeof u.input_tokens === "number" && typeof u.output_tokens === "number") {
+            recordTurnResult(s.sessionKey, {
+              input_tokens: u.input_tokens ?? 0,
+              output_tokens: u.output_tokens ?? 0,
+              cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+              cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+            });
+          }
+        }
+
         // Typed SDK error on the assistant message — surface it as the
         // canonical RATE_LIMIT/etc. so askClaudeInternal's fallback chain
         // triggers instead of waiting for the iterator to throw with a
@@ -809,6 +943,11 @@ function cleanupTimers(s: SdkSession): void {
 function killSession(s: SdkSession): void {
   s.alive = false;
   cleanupTimers(s);
+  // Context Inspector cleanup: drop live progress + sidecar files for this session.
+  clearTaskProgress(s.sessionKey);
+  unregisterSessionSidecars(s.sessionKey).catch((err) => {
+    log.debug({ err: String(err), sessionKey: s.sessionKey }, "unregisterSessionSidecars failed (best-effort)");
+  });
   // Reject a pending caller now — otherwise an external kill (lifetime timer,
   // killProcessByKey, killAllProcesses) leaves askClaude waiting up to
   // MESSAGE_TIMEOUT_MS for a result that will never arrive.
@@ -1410,4 +1549,39 @@ export function getProcesses(): ProcessInfo[] {
  *  with the CLI dispatcher's public surface (used by dashboard diagnostic). */
 export function resolveCliPath(): string {
   return "(sdk: bundled cli.js)";
+}
+
+// ─── Context Inspector — read-only metadata exports for the API layer ───────
+
+/**
+ * Read-only access to a router-spawned session's metadata for the API layer.
+ * Returns null if no session by that key (session has been killed or never existed).
+ */
+export function getSessionMetadata(sessionKey: string): {
+  workspace: string;
+  model: string;
+  resolvedModel: string | null;
+  fullAccess: boolean;
+  inheritUserScope: boolean;
+  totalInputTokens: number;
+  compactionCount: number;
+  alive: boolean;
+} | null {
+  const s = sessions.get(sessionKey);
+  if (!s) return null;
+  return {
+    workspace: s.workspace,
+    model: s.model,
+    resolvedModel: s.resolvedModel,
+    fullAccess: s.fullAccess,
+    inheritUserScope: s.inheritUserScope,
+    totalInputTokens: s.totalInputTokens,
+    compactionCount: s.compactionCount,
+    alive: s.alive,
+  };
+}
+
+/** List all live router session keys (used by the cruft endpoint + dashboard). */
+export function listSessionKeys(): string[] {
+  return [...sessions.keys()];
 }
