@@ -35,7 +35,7 @@ Plans:
 - [x] 01-02-PLAN.md — Wave 1: Token source (SDK + JSONL tail) + cost calculation library
 - [x] 01-03-PLAN.md — Wave 1: 8-category breakdown estimator + CLAUDE.md @-import resolver
 - [x] 01-04-PLAN.md — Wave 1: Cruft detector + JSONL parser + disk hygiene stats
-- [ ] 01-05-PLAN.md — Wave 2: API endpoints (extended /api/local-sessions + /breakdown + /cruft) + claude.ts SDK tap
+- [x] 01-05-PLAN.md — Wave 2: API endpoints (extended /api/local-sessions + /breakdown + /cruft) + claude.ts SDK tap
 - [ ] 01-06-PLAN.md — Wave 3: ContextTab UI components (AggregateHeader, SessionRow, BreakdownStackedBar, CruftPanel, RecentSessionsList, DiskHygieneFooter)
 - [ ] 01-07-PLAN.md — Wave 3: Polling hook with memory-leak guards + Sidebar/App route wiring
 - [ ] 01-08-PLAN.md — Wave 4: Final test sweep + dashboard build + router restart + manual UAT (checkpoint:human-verify)
@@ -44,4 +44,4 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Context Inspector | 4/8 | In progress | - |
+| 1. Context Inspector | 5/8 | In progress | - |
