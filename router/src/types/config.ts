@@ -24,6 +24,30 @@ export interface ToolDef {
   command?: string;
 }
 
+/**
+ * Per-channel scoping policy. Applied to in-process messaging MCPs (discord/whatsapp/telegram).
+ * Default safe: when no policy is set the agent can only read/write the *current* conversation
+ * (the one that triggered the session). Allow/deny lists let the agent reach further.
+ */
+export interface ChannelScope {
+  /** Discord guild IDs the agent may touch. Empty/missing → only current guild. */
+  allowedGuilds?: string[];
+  /** Discord channel IDs explicitly allowed (overrides guild filter when set). */
+  allowedChannels?: string[];
+  /** Discord channel IDs explicitly blocked (private/finance/etc). Always respected. */
+  denyChannels?: string[];
+  /** WhatsApp JIDs (group `@g.us` or DM `@s.whatsapp.net`) the agent may read/write. */
+  allowedJids?: string[];
+  /** WhatsApp JIDs to deny even if matched by allowedJids prefixes. */
+  denyJids?: string[];
+  /** Telegram chat IDs (string form) the agent may touch. */
+  allowedChats?: string[];
+  /** Telegram chat IDs to deny. */
+  denyChats?: string[];
+  /** When true, the agent may send to chats outside the current session conversation. Default false. */
+  allowCrossChatWrite?: boolean;
+}
+
 /** Agent configuration (from agents/<name>/agent.yaml + workspace auto-resolved). */
 export interface AgentConfig {
   /** Agent name (from folder). Injected at load time, not present in agent.yaml. */
@@ -31,7 +55,10 @@ export interface AgentConfig {
   /** Absolute workspace path. Injected at load time. */
   workspace: string;
   model?: string;
-  /** Granular tool list: ["vision", "email:myaccount", "mcp:github", "memory:business"] */
+  /** Granular tool list: ["vision", "email:myaccount", "mcp:github", "memory:business",
+   *  "discord", "discord:write", "whatsapp", "whatsapp:write", "telegram", "telegram:write",
+   *  "channels"]
+   */
   tools?: string[];
   fallbacks?: string[];
   env?: Record<string, string>;
@@ -41,6 +68,10 @@ export interface AgentConfig {
   fullAccess?: boolean;
   /** Inherit ~/.claude/ user-scope settings (CLAUDE.md, hooks, skills). Default true. Set false for external/client agents that must not see the user's global config. */
   inheritUserScope?: boolean;
+  /** Per-channel scoping for messaging MCPs. */
+  discord?: ChannelScope;
+  whatsapp?: ChannelScope;
+  telegram?: ChannelScope;
 }
 
 /** A single route definition — thin matcher that references an agent by name. */
