@@ -37,7 +37,7 @@ export interface AgentBaseline {
 export interface AgentCruftHint {
   id: string;
   severity: "info" | "warn" | "crit";
-  /** Italian, displayed verbatim in UI. */
+  /** Plain-English message displayed verbatim in the UI. */
   message: string;
   /** Optional savings in tokens if the user applies the suggested fix. */
   potentialSavingsTokens?: number;
@@ -98,25 +98,25 @@ function deriveCruftHints(name: string, spawn: SpawnConfig, breakdown: Breakdown
   const skillsCat = breakdown.categories.find((c) => c.category === "skills_index");
   const subagentsCat = breakdown.categories.find((c) => c.category === "subagents");
 
-  // Hint 1: notch eredita user scope ma è documentato come ambient/non-coding
+  // Hint 1: notch inherits user scope but is documented as ambient/chat
   if (name === "notch" && spawn.inheritUserScope === true) {
     const savings = (skillsCat?.tokens ?? 0) + (subagentsCat?.tokens ?? 0);
     hints.push({
       id: "notch-user-scope",
       severity: "warn",
       message:
-        "notch è ambient/chat ma eredita user-scope (skills + subagents). Setta inheritUserScope: false per togliere il GSD index e altri.",
+        "notch is an ambient/chat agent but inherits user-scope (skills + subagents). Set inheritUserScope: false to drop the GSD index and other user-scope artifacts.",
       potentialSavingsTokens: savings > 0 ? savings : undefined,
     });
   }
 
-  // Hint 2: jarvis fullAccess — propone split chat/code
+  // Hint 2: jarvis fullAccess — propose chat/code split
   if (name === "jarvis" && spawn.fullAccess === true && (mcpCat?.tokens ?? 0) >= 10000) {
     hints.push({
       id: "split-jarvis-chat",
       severity: "warn",
       message:
-        "jarvis con fullAccess carica tutti i 13 MCP server (~13k token). Considera di splittare in jarvis-chat (no MCP) per voce/TG/WA e jarvis-code per coding.",
+        "jarvis with fullAccess loads all 13 MCP servers (~13k tokens). Consider splitting into jarvis-chat (no MCP) for voice/TG/WA and jarvis-code (full MCP) for coding.",
       potentialSavingsTokens: mcpCat?.tokens,
     });
   }
@@ -127,16 +127,16 @@ function deriveCruftHints(name: string, spawn: SpawnConfig, breakdown: Breakdown
       id: "fullaccess-explicit-mcps",
       severity: "info",
       message:
-        "fullAccess: true carica TUTTI gli MCP. Se ne usi solo alcuni, sostituiscilo con tools: ['mcp:exa', 'mcp:zenda', ...] per risparmiare.",
+        "fullAccess: true loads ALL MCP servers. If you only use a few, replace it with tools: ['mcp:exa', 'mcp:zenda', ...] to save tokens.",
     });
   }
 
-  // Hint 4: inherit + no narrow tools = pesante implicito
+  // Hint 4: inherit + heavy skills index → implicit overhead
   if (spawn.inheritUserScope === true && (skillsCat?.tokens ?? 0) >= 2000 && name !== "jarvis") {
     hints.push({
       id: "userscope-skills-heavy",
       severity: "info",
-      message: `Skills index pesa ${skillsCat!.tokens} token (gsd:* da solo ~2.5k). Se '${name}' non usa GSD, valuta inheritUserScope: false.`,
+      message: `Skills index weighs ${skillsCat!.tokens} tokens (gsd:* alone is ~2.5k). If '${name}' doesn't use GSD, consider inheritUserScope: false.`,
       potentialSavingsTokens: skillsCat?.tokens,
     });
   }

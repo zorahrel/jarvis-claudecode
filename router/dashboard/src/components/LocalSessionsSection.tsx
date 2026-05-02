@@ -206,11 +206,11 @@ function LocalSessionCard({
 
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
         {session.sessionId && (
-          <Tooltip content="Esplora il context: breakdown 8 categorie, MCP, CLAUDE.md chain" placement="top">
+          <Tooltip content="Explore context: 8-category breakdown, MCP, CLAUDE.md chain" placement="top">
             <span>
               <Button size="xs" variant="ghost" onClick={() => setExplorerOpen(true)}>
                 <Brain size={12} />
-                <span style={{ marginLeft: 4 }}>Esplora</span>
+                <span style={{ marginLeft: 4 }}>Explore</span>
               </Button>
             </span>
           </Tooltip>

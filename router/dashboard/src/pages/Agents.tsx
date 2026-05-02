@@ -594,7 +594,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <th style={jarvisHeadCell}>Own files</th>
                 <th style={jarvisHeadCell}>Model</th>
                 <th style={jarvisHeadCell}>Tools</th>
-                <th style={{ ...jarvisHeadCell, textAlign: 'right' }} title="Token alla nascita: system + tools + MCP + skills + CLAUDE.md">Baseline</th>
+                <th style={{ ...jarvisHeadCell, textAlign: 'right' }} title="Spawn-time tokens: system + tools + MCP + skills + CLAUDE.md">Baseline</th>
                 <th style={{ ...jarvisHeadCell, textAlign: 'right' }}>Total</th>
               </tr>
             </thead>
@@ -658,7 +658,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                     return (
                       <span
                         onClick={() => setDetailAgent('jarvis')}
-                        title={`Click per breakdown · ${b.cruftHints.length} cruft hint${b.cruftHints.length === 1 ? '' : 's'}`}
+                        title={`Click for breakdown · ${b.cruftHints.length} cruft hint${b.cruftHints.length === 1 ? '' : 's'}`}
                         style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: colorForThreshold(ratio), cursor: 'pointer' }}
                       >
                         {formatTokens(tot)}
@@ -721,7 +721,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <th style={tableHeadCell}>Routes</th>
                 <th style={tableHeadCell}>Own files</th>
                 <th style={tableHeadCell}>Tools</th>
-                <th style={{ ...tableHeadCell, textAlign: 'right' }} title="Token alla nascita: system + tools + MCP + skills + CLAUDE.md">Baseline</th>
+                <th style={{ ...tableHeadCell, textAlign: 'right' }} title="Spawn-time tokens: system + tools + MCP + skills + CLAUDE.md">Baseline</th>
                 <th style={{ ...tableHeadCell, textAlign: 'right' }}>Total</th>
                 <th style={{ ...tableHeadCell, textAlign: 'right' }}></th>
               </tr>
@@ -832,7 +832,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         return (
                           <span
                             onClick={(e) => { e.stopPropagation(); setDetailAgent(a.name) }}
-                            title={`Click per breakdown · ${b.cruftHints.length} cruft hint${b.cruftHints.length === 1 ? '' : 's'}`}
+                            title={`Click for breakdown · ${b.cruftHints.length} cruft hint${b.cruftHints.length === 1 ? '' : 's'}`}
                             style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, color: colorForThreshold(ratio), cursor: 'pointer' }}
                           >
                             {formatTokens(tot)}
@@ -1129,26 +1129,16 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
 
               {baseline && (
                 <div style={{ background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12 }}>
-                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
-                      🧠 Context baseline
+                      Context baseline
                     </span>
                     <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600, color: colorForThreshold(Math.min(1, baseline.breakdown.totalEstimated / 200000)) }}>
                       {formatTokens(baseline.breakdown.totalEstimated)}
                     </span>
                     <span style={{ fontSize: 10, color: 'var(--text-4)' }}>
-                      su 200k window · stima alla nascita
+                      of 200k window · spawn-time estimate
                     </span>
-                    {baseline.fullAccess && (
-                      <span style={{ padding: '2px 6px', borderRadius: 999, background: 'rgba(239,68,68,0.15)', fontSize: 9, fontFamily: 'var(--mono)', color: '#ef4444' }}>
-                        fullAccess
-                      </span>
-                    )}
-                    {baseline.inheritUserScope && (
-                      <span style={{ padding: '2px 6px', borderRadius: 999, background: 'rgba(234,179,8,0.15)', fontSize: 9, fontFamily: 'var(--mono)', color: '#eab308' }}>
-                        inheritUserScope
-                      </span>
-                    )}
                   </div>
 
                   {baseline.cruftHints.length > 0 && (
@@ -1163,7 +1153,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                               <div>{h.message}</div>
                               {h.potentialSavingsTokens && (
                                 <div style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 }}>
-                                  Risparmio potenziale: ~{formatTokens(h.potentialSavingsTokens)} tok
+                                  Potential savings: ~{formatTokens(h.potentialSavingsTokens)} tok
                                 </div>
                               )}
                             </div>
