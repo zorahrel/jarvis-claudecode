@@ -5,5 +5,14 @@
  * or when audio.play arrives (turn moved on).
  */
 export function LivePartial({ text }: { text: string }) {
-  return <div className="bubble user live-transcript">{text}</div>;
+  return (
+    <div
+      className="bubble user live-transcript"
+      role="status"
+      aria-live="polite"
+      aria-atomic="false"
+    >
+      {text}
+    </div>
+  );
 }

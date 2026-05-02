@@ -4,7 +4,9 @@
       --surface: rgba(14, 14, 16, 0.7);
       --border: rgba(255, 255, 255, 0.08);
       --text: #f2f3f5;
-      --muted: rgba(242, 243, 245, 0.55);
+      /* WCAG AA per testo piccolo richiede 4.5:1; con --surface scuro il
+         minimum opacity per rispettarlo è ~0.72. Prima era 0.55 → fail. */
+      --muted: rgba(242, 243, 245, 0.75);
       --font-ui: 'Inter', -apple-system, system-ui, sans-serif;
       --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
     }
@@ -470,7 +472,9 @@
       align-items: center;
       gap: 4px;
       padding: 3px 7px;
-      font-size: 9px;
+      /* 9px era sotto la soglia leggibile WCAG (12px raccomandato). 10px su
+         retina + opacity --muted alzata garantisce 4.5:1 e leggibilità. */
+      font-size: 10px;
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--muted);
