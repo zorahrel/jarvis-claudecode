@@ -2034,9 +2034,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       const sessions = await discoverLocalSessions();
       const projectsRoot = join(getHomedir(), ".claude", "projects");
 
-      // Backward-compat: ?legacy=1 returns the OLD LocalSession[] shape.
-      const isLegacy = req.url?.includes("legacy=1") ?? false;
-
       // Enrich each session with live tokens + cost + model + compactionCount.
       // sessionKey/agent/fullAccess come from the sidecar (set in discovery.ts).
       const enriched = await Promise.all(sessions.map(async (s) => {
@@ -2101,12 +2098,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
           compactionCount,
         };
       }));
-
-      // Legacy shape: just the array (with optional fields ignored by old consumers).
-      if (isLegacy) {
-        json(req, res, enriched);
-        return;
-      }
 
       // Aggregate stats.
       const totalLiveTokens = enriched.reduce((sum, s) => sum + (s.liveTokens ?? 0), 0);

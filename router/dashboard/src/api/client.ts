@@ -725,9 +725,13 @@ export const api = {
   removeCliSession: (id: string) =>
     request<{ ok: boolean }>(`/api/cli-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  // Local Claude Code sessions (auto-discovered from the process table)
-  // Legacy shape — Sessions.tsx still uses this. Kept until Plan 07 migrates that consumer.
-  localSessions: () => request<LocalSession[]>('/api/local-sessions?legacy=1'),
+  // Local Claude Code sessions (auto-discovered from the process table).
+  // Returns the LocalSession[] shape — projection of `.sessions` from the
+  // unified /api/local-sessions response (no backward-compat branch on server).
+  localSessions: async (): Promise<LocalSession[]> => {
+    const r = await request<ContextSessionsResponse>('/api/local-sessions')
+    return r.sessions as LocalSession[]
+  },
   localSessionTargets: (pid: number) =>
     request<TargetAvailability[]>(`/api/local-sessions/${pid}/targets`),
   openLocalSession: (pid: number, target: OpenTargetId) =>
