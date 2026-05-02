@@ -384,14 +384,21 @@ final class NotchController: ObservableObject {
         return false
     }
 
+    /// IMPORTANT: hover zones must use the screen where the panel ACTUALLY
+    /// lives (= `notchScreen()`), not the screen under the cursor. Otherwise
+    /// on multi-monitor setups, hovering near the top-center of an external
+    /// display would compute "inside compact zone" against THAT screen's
+    /// center-X and trigger an expand on the MacBook (where the panel is).
+    /// The cursor must be on the same screen as the panel for the zone test
+    /// to be meaningful.
     private func isInsideCompactZone(cgX: CGFloat, cgY: CGFloat) -> Bool {
-        guard let screen = cursorScreen() else { return false }
+        guard let screen = notchScreen(), cursorScreen() == screen else { return false }
         let midX = screen.frame.midX
         return cgY >= 0 && cgY <= 40 && abs(cgX - midX) <= 140
     }
 
     private func isInsideExpandedZone(cgX: CGFloat, cgY: CGFloat) -> Bool {
-        guard let screen = cursorScreen() else { return false }
+        guard let screen = notchScreen(), cursorScreen() == screen else { return false }
         let midX = screen.frame.midX
         return cgY >= 0 && cgY <= 560 && abs(cgX - midX) <= 240
     }
@@ -792,6 +799,11 @@ final class NotchController: ObservableObject {
             self.forceShowDynamicNotchPanel()
             self.isExpanded = true
             // Expanded chat already shows everything — no need for the peek.
+            // (Both the auto-dismissing message peek AND the live-transcript
+            // peek used during compact-mode hover-record need to go: in
+            // expanded mode the in-webview <LivePartial/> takes over the
+            // live transcript display, otherwise we'd render two bubbles.)
+            self.liveTranscriptActive = false
             self.dismissPeek()
             // Health-probe the WebView. If macOS reaped the WebContent
             // process while the panel was idle in the preload window, the
@@ -838,6 +850,20 @@ final class NotchController: ObservableObject {
             self.isSticky = false
             self.pendingCollapseTask?.cancel()
             self.pendingCollapseTask = nil
+            // If a continuous-call session was running and the user clicked
+            // outside (→ this `compact()` call), the panel disappears but
+            // without this cleanup `inContinuousCall` + `streamRecorder`
+            // would stay alive — invisible mic open in the background.
+            // Sticky-call (explicit mic-button click) is preserved: the user
+            // chose that mode deliberately, only corner-abort or a second
+            // click on the mic button should end it.
+            if self.streamRecorder.isRunning && !self.stickyCall {
+                NotchLogger.shared.log("info", "[state] compact while recording (non-sticky) — ending call")
+                self.inContinuousCall = false
+                self.stopStreamingVoice(andUpload: true)
+            } else if self.streamRecorder.isRunning && self.stickyCall {
+                NotchLogger.shared.log("info", "[state] compact while sticky-call active — mic stays open")
+            }
             // Park the webview offscreen again so WebGL stays alive.
             if let preload = self.preloadWindow?.contentView {
                 self.webView.removeFromSuperview()
@@ -1127,6 +1153,10 @@ final class NotchController: ObservableObject {
         // The mic re-opens normally on every hover. If TTS happens to start
         // RIGHT AFTER arm completes, layer 2 cleans up within milliseconds.
         NotchLogger.shared.log("info", "[hover-rec] start")
+        // Reset state used to gate aura colour transitions so the first
+        // partial-level event in this session reliably triggers the
+        // "listening → voiced" CSS class swap.
+        lastVoicedState = false
         pushMicState(on: true)
         // Show the bottom-right cancel affordance — quarter-circle with X
         // that scales toward the cursor as it nears the corner.
@@ -1134,10 +1164,18 @@ final class NotchController: ObservableObject {
         // Web side: open the live transcript bubble. Partials will stream
         // into it as Apple's recognizer updates its hypothesis.
         evalJS("window.__notchVoiceLiveStart && window.__notchVoiceLiveStart();")
+        // Wake up Silero VAD so barge-in (interrupting Jarvis mid-TTS) and
+        // snappy end-of-utterance flushing both work. The VAD module is
+        // loaded eagerly at notch boot but stays dormant until we start it
+        // here — keeps getUserMedia OFF until the user actually wants
+        // to talk. `start()` is idempotent so re-arming is safe.
+        evalJS("window.jarvisVAD && window.jarvisVAD.start && window.jarvisVAD.start();")
 
-        // Best-effort: live STT alongside the WAV capture. If Apple is
-        // unavailable or denied permission, we fall back silently to the
-        // whisper round-trip on the uploaded WAV (the existing path).
+        // STT is REQUIRED in the Apple-only policy: if transcriber.start fails
+        // (permission denied / .notDetermined), every utterance would be
+        // silently discarded later in stopStreamingVoice. Surface a clear
+        // error to the user via the peek and abort the arming flow instead
+        // of leaving an invisible "always-on but always-empty" mic.
         do {
             try transcriber.start(
                 onPartial: { [weak self] text in
@@ -1149,7 +1187,19 @@ final class NotchController: ObservableObject {
             )
             self.transcriberRunning = true
         } catch {
-            NotchLogger.shared.log("warn", "[hover-rec] transcriber unavailable: \(error.localizedDescription)")
+            let nsErr = error as NSError
+            NotchLogger.shared.log("warn", "[hover-rec] transcriber unavailable: \(nsErr.localizedDescription)")
+            if !isExpanded {
+                showMessagePeek(role: .assistant, text: "Riconoscimento vocale non disponibile (\(nsErr.code)). Vai in Impostazioni → Privacy.")
+            }
+            pushMicState(on: false)
+            inContinuousCall = false
+            stickyCall = false
+            hideCancelAffordance()
+            updateAffordanceVisibility()
+            evalJS("window.__notchVoiceLiveEnd && window.__notchVoiceLiveEnd();")
+            evalJS("window.jarvisVAD && window.jarvisVAD.pause && window.jarvisVAD.pause();")
+            return
         }
 
         do {
@@ -1181,6 +1231,8 @@ final class NotchController: ObservableObject {
             stickyCall = false
             hideCancelAffordance()
             updateAffordanceVisibility()
+            evalJS("window.__notchVoiceLiveEnd && window.__notchVoiceLiveEnd();")
+            evalJS("window.jarvisVAD && window.jarvisVAD.pause && window.jarvisVAD.pause();")
             if self.transcriberRunning { transcriber.cancel(); self.transcriberRunning = false }
         }
     }
@@ -1194,6 +1246,12 @@ final class NotchController: ObservableObject {
         pushMicState(on: false)
         hideCancelAffordance()
         evalJS("window.__notchVoiceLiveEnd && window.__notchVoiceLiveEnd();")
+        // Pause VAD now that the recorder isn't listening.
+        evalJS("window.jarvisVAD && window.jarvisVAD.pause && window.jarvisVAD.pause();")
+        // Hide the live-transcript peek now. If `andUpload` succeeds, the
+        // router will echo back `messageOut` which re-renders a normal
+        // (auto-dismissing) user peek — no double bubble.
+        dismissLiveTranscriptPeek()
         // Only ship the WAV if VAD actually saw voiced audio. A mouse-out
         // after 200 ms of pure room tone otherwise hits whisper-cli, which
         // loves hallucinating short common words ("grazie", "ok", "ciao")
@@ -1242,17 +1300,34 @@ final class NotchController: ObservableObject {
     /// Forward Apple's partial hypothesis to the JS side. The orb shows it
     /// in a "live transcript" user bubble that grows in place as Apple
     /// refines the recognition.
+    ///
+    /// In COMPACT mode the WKWebView is parked offscreen in `preloadWindow`
+    /// (see `preloadOffscreen()` and `compact()`), so the JS bubble would be
+    /// rendered into a window the user can't see. We mirror the partial into
+    /// the native `MessagePeekView` (NSPanel sotto la notch fisica) so the
+    /// user gets the live transcript even without expanding the panel.
     private func pushVoicePartial(text: String) {
         let escaped = jsString(text)
         evalJS("window.__notchVoicePartial && window.__notchVoicePartial(\(escaped));")
+        if !isExpanded {
+            showLiveTranscriptPeek(text: text)
+        }
     }
 
     /// Final transcript from Apple — clears the partial state. The actual
     /// "send to agent" still happens in `stopStreamingVoice` so we can
     /// pick between Apple text and whisper text in one place.
+    ///
+    /// In compact, also update the live peek with the final text so the
+    /// user sees the recognized utterance for a moment before the
+    /// `messageOut` echo arrives from the router with the same text
+    /// (which would re-render via `showMessagePeek(role: .user, …)`).
     private func pushVoiceFinal(text: String) {
         let escaped = jsString(text)
         evalJS("window.__notchVoiceFinal && window.__notchVoiceFinal(\(escaped));")
+        if !isExpanded {
+            showLiveTranscriptPeek(text: text)
+        }
     }
 
     /// POST the user's transcript to the same `/api/notch/send` endpoint
@@ -1408,21 +1483,33 @@ final class NotchController: ObservableObject {
         }
     }
 
+    /// Per-slot decay tasks. We keep one handle per channel index so that
+    /// rapid bumps (e.g. SSE messageChunk burst during streaming) cancel
+    /// the previous decay loop instead of stacking — without this, a
+    /// 30-iteration decay × N concurrent bumps fights itself: each loop
+    /// reads stale `channelLevels[i]` and sets a clamped value, so the
+    /// effective decay is wrong and the bar flickers.
+    private var channelDecayTasks: [Task<Void, Never>?] = [nil, nil, nil, nil]
+
     /// Inject activity into one of the four channel bars. Decays over ~2s.
     func bumpChannel(index: Int) {
         guard index >= 0 && index < channelLevels.count else { return }
         var next = channelLevels
         next[index] = min(1.0, next[index] + 0.75)
         channelLevels = next
-        // Decay task — if another bump comes first it just overrides.
+        // Cancel any in-flight decay for this slot so a single decay loop
+        // owns the channel until completion (or the next bump).
         let targetIndex = index
-        Task { @MainActor in
+        channelDecayTasks[targetIndex]?.cancel()
+        channelDecayTasks[targetIndex] = Task { @MainActor [weak self] in
             for _ in 0..<30 {
                 try? await Task.sleep(for: .milliseconds(66))
-                if channelLevels[targetIndex] <= 0 { return }
-                var decayed = channelLevels
+                if Task.isCancelled { return }
+                guard let self else { return }
+                if self.channelLevels[targetIndex] <= 0 { return }
+                var decayed = self.channelLevels
                 decayed[targetIndex] = max(0, decayed[targetIndex] - 0.045)
-                channelLevels = decayed
+                self.channelLevels = decayed
             }
         }
     }
@@ -1501,12 +1588,38 @@ final class NotchController: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         Task { @MainActor in
-            self.presentPeek(role: role, text: trimmed)
+            self.presentPeek(role: role, text: trimmed, autoDismiss: true)
         }
     }
 
+    /// Dedicated entry-point for the live STT bubble in compact mode.
+    /// Reuses the same NSPanel as `showMessagePeek` but DOES NOT schedule an
+    /// auto-dismiss task — partials would otherwise vanish if the user pauses
+    /// for >5 s. Dismissal is driven explicitly by `stopStreamingVoice` and
+    /// `expandWithFocus` (so opening the panel hands the live transcript over
+    /// to the in-webview `<LivePartial/>` without a duplicated bubble).
     @MainActor
-    private func presentPeek(role: PeekRole, text: String) {
+    func showLiveTranscriptPeek(text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        liveTranscriptActive = true
+        presentPeek(role: .user, text: trimmed, autoDismiss: false)
+    }
+
+    @MainActor
+    func dismissLiveTranscriptPeek() {
+        guard liveTranscriptActive else { return }
+        liveTranscriptActive = false
+        dismissPeek()
+    }
+
+    /// True while a live STT peek is on screen (compact-mode hover-record).
+    /// Used to (a) guard the auto-dismiss in `presentPeek` and (b) ensure
+    /// `expandWithFocus` and `stopStreamingVoice` clean it up.
+    private var liveTranscriptActive: Bool = false
+
+    @MainActor
+    private func presentPeek(role: PeekRole, text: String, autoDismiss: Bool = true) {
         let screen = targetScreen()
         if peekPanel == nil {
             let p = NSPanel(
@@ -1549,10 +1662,13 @@ final class NotchController: ObservableObject {
         peekView?.animateIn()
 
         peekDismissTask?.cancel()
-        peekDismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(5))
-            guard let self, !Task.isCancelled else { return }
-            self.dismissPeek()
+        peekDismissTask = nil
+        if autoDismiss {
+            peekDismissTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                guard let self, !Task.isCancelled else { return }
+                self.dismissPeek()
+            }
         }
     }
 
@@ -2384,7 +2500,10 @@ final class NotchEventBus {
     static let shared = NotchEventBus()
 
     private let url = URL(string: "http://localhost:3340/api/notch/stream")!
-    private let session = URLSession(configuration: .default)
+    /// Active SSE session. Created fresh per connect() because URLSession
+    /// strongly retains its delegate until `invalidateAndCancel()` is called
+    /// — without that, every reconnect would leak a session + its SSEDelegate.
+    private var currentSession: URLSession?
     private var task: URLSessionDataTask?
     private var delegate: SSEDelegate?
     private var handler: ((NotchEvent) -> Void)?
@@ -2396,7 +2515,14 @@ final class NotchEventBus {
     }
 
     private func connect() {
+        // Tear down the previous session BEFORE allocating a new one. The
+        // task `cancel()` alone is not enough — the URLSession still retains
+        // its delegate, and the delegate retains the closures, leaking on
+        // every reconnect (router restart, network flap).
+        currentSession?.invalidateAndCancel()
+        currentSession = nil
         task?.cancel()
+        task = nil
         let delegate = SSEDelegate { [weak self] line in
             Task { @MainActor in self?.parse(line: line) }
         } onClose: { [weak self] in
@@ -2404,6 +2530,7 @@ final class NotchEventBus {
         }
         self.delegate = delegate
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        currentSession = session
         var req = URLRequest(url: url)
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         req.timeoutInterval = 0  // keep open forever

@@ -22,7 +22,10 @@
  * call e il VAD resta morto fino al prossimo refresh.
  */
 
-const NATIVE_BRIDGE = window.webkit?.messageHandlers?.notch ?? null;
+// IMPORTANT: il bridge handler lato Swift è registrato con name "jarvis"
+// (vedi NotchWebBridge in NotchController.swift). Usare "notch" qui faceva
+// cadere TUTTI gli eventi VAD nel cestino → barge-in e fast-flush morti.
+const NATIVE_BRIDGE = window.webkit?.messageHandlers?.jarvis ?? null;
 const VAD_LOG = (...args) => console.debug("[vad]", ...args);
 
 function postNative(type, data) {
