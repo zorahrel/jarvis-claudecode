@@ -2,7 +2,7 @@ import type { IncomingMessage } from "../types";
 import { findRoute } from "./router";
 import { askClaude, sessionKey } from "./claude";
 import { canVoice, canVision, canVisionLocal } from "./capabilities";
-import { caption as visionCaption, query as visionQuery, isAvailable as visionAvailable } from "./vision-local";
+import { caption as visionCaption, query as visionQuery, isAvailable as visionAvailable, visionBackend } from "./vision-local";
 import { logger } from "./logger";
 import { checkIncomingRate } from "./rate-limiter";
 import { trackMessage, trackResponseTime, pushLog, broadcast, clientCount } from "../dashboard/server";
@@ -231,8 +231,10 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
           blocks.push(lines.join("\n"));
         }
         if (blocks.length > 0) {
-          messageForClaude += `\n\n[Local vision pre-pass (Moondream 2):\n${blocks.join("\n")}\n]`;
-          log.info({ key, images: blocks.length, ms: Date.now() - vlStart }, "vision-local pre-pass done");
+          const backend = visionBackend();
+          const label = backend === "cloud" ? "Moondream Cloud (M3)" : "Moondream local (M2)";
+          messageForClaude += `\n\n[Vision pre-pass (${label}):\n${blocks.join("\n")}\n]`;
+          log.info({ key, images: blocks.length, ms: Date.now() - vlStart, backend }, "vision-local pre-pass done");
         }
       } else {
         log.warn({ key }, "vision-local enabled but daemon not reachable on :2020");
