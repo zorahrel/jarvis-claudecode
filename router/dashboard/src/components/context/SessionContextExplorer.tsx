@@ -10,7 +10,7 @@ import { formatTokens } from './thresholds'
  * 8-category stacked bar. Reusable wherever a session is shown in the dashboard
  * (LocalSessionsSection, ContextTab, future Sessions page enrichments).
  *
- * Provides the "Esplora" experience for any session: click → see what's
+ * Provides the "Explore" experience for any session: click → see what's
  * inside the context window broken down by category, with MCP and CLAUDE.md
  * drill-downs.
  */
@@ -76,7 +76,7 @@ export function SessionContextExplorer({ sessionId, title, onClose }: Props) {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text-1)' }}>
-            🧠 Context explorer
+            Context explorer
           </h3>
           {title && (
             <span
@@ -118,12 +118,12 @@ export function SessionContextExplorer({ sessionId, title, onClose }: Props) {
             }}
           >
             <Loader2 size={14} className="animate-spin" />
-            Caricamento breakdown...
+            Loading breakdown...
           </div>
         )}
 
         {error && (
-          <div style={{ padding: 16, color: '#ef4444', fontSize: 13 }}>Errore: {error}</div>
+          <div style={{ padding: 16, color: '#ef4444', fontSize: 13 }}>Error: {error}</div>
         )}
 
         {data && (

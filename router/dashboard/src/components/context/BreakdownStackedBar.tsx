@@ -3,12 +3,12 @@ import { formatTokens } from './thresholds'
 
 const CATEGORY_LABELS: Record<string, string> = {
   system_preset: 'System preset',
-  builtin_tools: 'Tool integrati',
+  builtin_tools: 'Built-in tools',
   mcp_servers: 'MCP servers',
   skills_index: 'Skills index',
   claudemd_chain: 'CLAUDE.md chain',
   subagents: 'Subagents',
-  hooks_memory: 'Hooks/Memory',
+  hooks_memory: 'Hooks / memory',
   history: 'Conversation history',
 }
 
