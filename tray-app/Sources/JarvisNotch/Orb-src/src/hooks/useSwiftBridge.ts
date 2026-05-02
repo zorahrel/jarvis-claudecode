@@ -62,8 +62,16 @@ export function useSwiftBridge(): void {
       store.getState().setLivePartial("");
     };
 
-    // Mic state pulse (UI animation cue from Swift).
-    (window as any).__notchSetMicState = (_on: boolean) => { /* future: aura color */ };
+    // Mic state pulse from Swift. Two callsites:
+    //   - pushMicState(on:) sends literal 'on' / 'off' strings
+    //   - older callers send a boolean
+    // Normalize and mirror into the store so the call button reflects the
+    // actual recorder state (avoids click-out-of-sync after Swift refuses
+    // to arm or auto-times-out).
+    (window as any).__notchSetMicState = (raw: unknown) => {
+      const on = raw === true || raw === "on" || raw === 1;
+      store.getState().setInCall(on);
+    };
 
     // Hover-record grace window (Swift signals it's about to abort if user
     // doesn't return). For now, no-op — was only used for an explicit

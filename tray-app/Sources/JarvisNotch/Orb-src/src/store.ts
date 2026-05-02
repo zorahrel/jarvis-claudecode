@@ -10,6 +10,7 @@
  * confused, producing duplicate bubbles in some race conditions.
  */
 import { create } from "zustand";
+import { parseFooter } from "./footer";
 import type { AgentFooter, AgentState, Bubble, NotchPrefs } from "./types";
 
 interface NotchStore {
@@ -30,6 +31,12 @@ interface NotchStore {
   /** Bubble id whose audio is currently playing. Used to bind the live
    *  AUDIO chip to the correct bubble. */
   lastAssistantBubbleId: string | null;
+  /** Timestamp when the first text chunk landed in the current turn. Used
+   *  as anchor for the live TESTO chip. 0 when idle / pre-first-chunk. */
+  textStreamStartAt: number;
+  /** True while the sticky continuous-call mode is active (mic open).
+   *  Driven by the call-button click + Swift's __notchSetMicState pushback. */
+  inCall: boolean;
 
   // ── mutators ────────────────────────────────────────────────────────
   setState: (s: AgentState) => void;
@@ -52,6 +59,7 @@ interface NotchStore {
 
   setLivePartial: (text: string) => void;
   setMicLevel: (level: number) => void;
+  setInCall: (on: boolean) => void;
 
   setPrefs: (prefs: Partial<NotchPrefs>) => void;
   noteUserInput: (ts?: number) => void;
@@ -77,6 +85,8 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
   lastUserInputAt: 0,
   lastAudioStart: 0,
   lastAssistantBubbleId: null,
+  textStreamStartAt: 0,
+  inCall: false,
 
   setState: (s) => set({ state: s }),
 
@@ -109,6 +119,22 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
     if (!text) return;
     const cur = get();
     const id = cur.pendingId ?? cur.ensurePendingAssistant();
+    // First chunk of the turn:
+    //   - anchor TESTO live chip
+    //   - freeze ATTESA LLM (waitMs) on the bubble = LLM TTFT
+    if (cur.textStreamStartAt === 0 && cur.lastUserInputAt > 0) {
+      const now = Date.now();
+      const waitMs = now - cur.lastUserInputAt;
+      const validWait = waitMs >= 0 && waitMs < 60_000;
+      set((st) => ({
+        textStreamStartAt: now,
+        bubbles: st.bubbles.map((b) =>
+          b.id === id && b.waitMs == null && validWait
+            ? { ...b, waitMs }
+            : b,
+        ),
+      }));
+    }
     set((st) => ({
       bubbles: st.bubbles.map((b) => (b.id === id ? { ...b, text: b.text + text } : b)),
     }));
@@ -118,6 +144,27 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
     const cur = get();
     const id = cur.pendingId;
     const target = id ? cur.bubbles.find((b) => b.id === id) : null;
+
+    // Freeze "attesa" on finalize when nothing else froze it (TTS off +
+    // no streaming chunks path). If freezeWaitTimer ran on first chunk or
+    // audio.play, preserve that value.
+    const computeWaitMs = (existing: number | undefined): number | undefined => {
+      if (existing != null) return existing;
+      if (cur.lastUserInputAt <= 0) return undefined;
+      const d = Date.now() - cur.lastUserInputAt;
+      if (d < 0 || d > 60_000) return undefined;
+      return d;
+    };
+    // Freeze "testo" — duration of text streaming from first chunk to
+    // finalize. If no chunks ever arrived (textStreamStartAt == 0), the
+    // turn was zero-stream (atomic message.in) and we leave it undefined.
+    const computeTextStreamMs = (existing: number | undefined): number | undefined => {
+      if (existing != null) return existing;
+      if (cur.textStreamStartAt <= 0) return undefined;
+      const d = Date.now() - cur.textStreamStartAt;
+      if (d < 0 || d > 120_000) return undefined;
+      return d;
+    };
 
     // Decide whether to do client-side word-by-word reveal.
     // We do it ONLY if all of:
@@ -134,12 +181,23 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
     if (!target) {
       // No pending — the SSE state.change skipped. Append a fresh bubble.
       if (!text.trim()) return;
+      const waitMs = computeWaitMs(undefined);
+      const textStreamMs = computeTextStreamMs(undefined);
       set((st) => ({
         bubbles: [
           ...st.bubbles,
-          { id: nextId("a"), role: "assistant", text, ts: Date.now(), footer: footer ?? undefined },
+          {
+            id: nextId("a"),
+            role: "assistant",
+            text,
+            ts: Date.now(),
+            footer: footer ?? undefined,
+            waitMs,
+            textStreamMs,
+          },
         ],
         pendingId: null,
+        textStreamStartAt: 0,
       }));
       return;
     }
@@ -148,9 +206,19 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
       // Atomic finalize — chunks already filled the bubble OR text is short.
       set((st) => ({
         bubbles: st.bubbles.map((b) =>
-          b.id === id ? { ...b, text, pending: false, footer: footer ?? b.footer } : b,
+          b.id === id
+            ? {
+                ...b,
+                text,
+                pending: false,
+                footer: footer ?? b.footer,
+                waitMs: computeWaitMs(b.waitMs),
+                textStreamMs: computeTextStreamMs(b.textStreamMs),
+              }
+            : b,
         ),
         pendingId: null,
+        textStreamStartAt: 0,
       }));
       return;
     }
@@ -162,9 +230,19 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
     const targetId = id!;
     set((st) => ({
       bubbles: st.bubbles.map((b) =>
-        b.id === targetId ? { ...b, text: "", pending: false, footer: footer ?? b.footer } : b,
+        b.id === targetId
+          ? {
+              ...b,
+              text: "",
+              pending: false,
+              footer: footer ?? b.footer,
+              waitMs: computeWaitMs(b.waitMs),
+              textStreamMs: computeTextStreamMs(b.textStreamMs),
+            }
+          : b,
       ),
       pendingId: null,
+      textStreamStartAt: 0,
     }));
     const words = text.match(/\S+\s*/g) ?? [text];
     let i = 0;
@@ -192,12 +270,20 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
   },
 
   hydrateHistory: (items) => {
-    const bubbles = items.map((it, i) => ({
-      id: `h-${it.ts}-${i}`,
-      role: it.role === "agent" ? ("assistant" as const) : ("user" as const),
-      text: it.text,
-      ts: it.ts,
-    }));
+    const bubbles: Bubble[] = items.map((it, i) => {
+      const role = it.role === "agent" ? ("assistant" as const) : ("user" as const);
+      if (role === "assistant") {
+        const { clean, footer } = parseFooter(it.text);
+        return {
+          id: `h-${it.ts}-${i}`,
+          role,
+          text: clean,
+          ts: it.ts,
+          footer: footer ?? undefined,
+        };
+      }
+      return { id: `h-${it.ts}-${i}`, role, text: it.text, ts: it.ts };
+    });
     set({ bubbles, pendingId: null });
   },
 
@@ -205,6 +291,7 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
 
   setLivePartial: (text) => set({ livePartial: text }),
   setMicLevel: (level) => set({ micLevel: Math.max(0, Math.min(1, level)) }),
+  setInCall: (on) => set({ inCall: on }),
 
   setPrefs: (patch) => set((st) => ({ prefs: { ...st.prefs, ...patch } })),
 
@@ -212,14 +299,25 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
 
   noteAudioStart: () => {
     const cur = get();
-    // Bind to the most-recent assistant bubble (pending or finalized).
     const lastAsst = [...cur.bubbles].reverse().find((b) => b.role === "assistant");
-    set({
-      lastAudioStart: Date.now(),
+    const now = Date.now();
+    // Freeze ATTESA AUDIO (audioWaitMs) on the bound bubble: TTS
+    // synthesis+network lag from user input to first audio out.
+    const audioWaitMs =
+      cur.lastUserInputAt > 0 ? now - cur.lastUserInputAt : undefined;
+    const validWait =
+      audioWaitMs != null && audioWaitMs >= 0 && audioWaitMs < 60_000;
+    set((st) => ({
+      lastAudioStart: now,
       lastAssistantBubbleId: lastAsst?.id ?? null,
-    });
-    // Also freeze the WAIT chip on that bubble.
-    cur.freezeWaitTimer(Date.now());
+      bubbles: validWait && lastAsst
+        ? st.bubbles.map((b) =>
+            b.id === lastAsst.id && b.audioWaitMs == null
+              ? { ...b, audioWaitMs }
+              : b,
+          )
+        : st.bubbles,
+    }));
   },
 
   noteAudioEnd: () => {
@@ -229,31 +327,30 @@ export const useNotchStore = create<NotchStore>()((set, get) => ({
     set({ lastAudioStart: 0, lastAssistantBubbleId: null });
   },
 
-  freezeWaitTimer: (audioStartTs) => {
+  freezeWaitTimer: (eventTs) => {
     const cur = get();
     if (!cur.lastUserInputAt) return;
-    // Target: the pending assistant bubble if one exists, otherwise the
-    // most recent assistant bubble (audio.play arrives after message.in
-    // when LLM streaming is enabled, so pending is already finalized).
     const id = cur.pendingId
       ?? [...cur.bubbles].reverse().find((b) => b.role === "assistant")?.id;
     if (!id) return;
-    const waitMs = audioStartTs - cur.lastUserInputAt;
+    const waitMs = eventTs - cur.lastUserInputAt;
     if (waitMs < 0 || waitMs > 60_000) return; // sanity guard
     set((st) => ({
-      bubbles: st.bubbles.map((b) => (b.id === id ? { ...b, waitMs } : b)),
+      bubbles: st.bubbles.map((b) =>
+        // Don't overwrite — first event (chunk OR audio.play) wins.
+        b.id === id && b.waitMs == null ? { ...b, waitMs } : b,
+      ),
     }));
   },
 
   freezeAudioTimer: (audioEndTs, audioStartTs) => {
-    // Find the most recent assistant bubble that already has waitMs but
-    // not audioMs — that's the one whose audio just finished.
+    // Audio chip duration = playback only (audio-start → audio-end). The
+    // synthesis/network lag is on the separate "attesa" chip.
     set((st) => {
       let frozen = false;
       const bubbles = [...st.bubbles].reverse().map((b) => {
         if (frozen || b.role !== "assistant") return b;
         if (b.audioMs != null) return b;
-        if (b.waitMs == null) return b;
         frozen = true;
         return { ...b, audioMs: audioEndTs - audioStartTs };
       });

@@ -50,9 +50,15 @@ export interface Bubble {
   footer?: AgentFooter;
   /** True until the assistant text is finalized. */
   pending?: boolean;
-  /** WAIT timing chip (frozen value, ms). Set when audio.play arrives. */
+  /** ATTESA LLM (frozen, ms). user-input → first text chunk. LLM
+   *  time-to-first-token equivalent. */
   waitMs?: number;
-  /** AUDIO timing chip (frozen value, ms). Set when <audio> ends. */
+  /** TESTO (frozen, ms). first chunk → message.in. LLM stream duration. */
+  textStreamMs?: number;
+  /** ATTESA AUDIO (frozen, ms). user-input → audio.play. TTS synthesis
+   *  lag (separate phase from LLM lag, runs in parallel). */
+  audioWaitMs?: number;
+  /** AUDIO (frozen, ms). audio.play → <audio> ended. Playback duration. */
   audioMs?: number;
 }
 

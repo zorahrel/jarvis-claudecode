@@ -37,10 +37,21 @@ export function ChatLog() {
 
   const tail = bubbles.length > TAIL ? bubbles.slice(-TAIL) : bubbles;
 
+  // Find id of the latest assistant bubble in the visible tail. Used by
+  // <Bubble> to decide whether to render the live wait/audio counters
+  // (only on the most recent assistant turn — older ones stay frozen).
+  let latestAssistantId: string | null = null;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (tail[i].role === "assistant") {
+      latestAssistantId = tail[i].id;
+      break;
+    }
+  }
+
   return (
     <div className="chat-log" id="notch-log" ref={ref} onScroll={onScroll}>
       {tail.map((b) => (
-        <Bubble key={b.id} bubble={b} />
+        <Bubble key={b.id} bubble={b} isLatestAssistant={b.id === latestAssistantId} />
       ))}
       {livePartial && <LivePartial text={livePartial} />}
     </div>

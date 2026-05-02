@@ -194,10 +194,14 @@
       flex-shrink: 0;
       align-self: center;
     }
+    /* AUDIO playback (verde): audio.play → end. */
     .live-timer.audio { color: rgba(120, 230, 180, 0.85); background: rgba(120, 230, 180, 0.10); }
-    /* WAIT chip: tempo da reply complete a primo audio out (synthesis + network).
-       Arancio per distinguerlo dal verde dell'AUDIO (durata playback). */
+    /* ATTESA LLM (arancio): user-input → first chunk. LLM TTFT. */
     .live-timer.wait  { color: rgba(255, 184, 77, 0.95); background: rgba(255, 184, 77, 0.12); }
+    /* TESTO (ciano): first chunk → message.in. LLM stream duration. */
+    .live-timer.text  { color: rgba(120, 200, 230, 0.95); background: rgba(120, 200, 230, 0.12); }
+    /* ATTESA AUDIO (giallo): user-input → audio.play. TTS synth lag. */
+    .live-timer.audio-wait { color: rgba(230, 210, 110, 0.95); background: rgba(230, 210, 110, 0.12); }
     .live-timer.frozen::before { animation: none; opacity: 0.45; }
     .live-timer::before {
       content: '';
