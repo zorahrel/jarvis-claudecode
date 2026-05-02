@@ -1,0 +1,69 @@
+{
+  "mcpServers": {
+    "zenda": {
+      "command": "node",
+      "args": ["/Users/zorahrel/projects/zenda/mcp-server/dist/index.js"],
+      "transport": "stdio"
+    },
+    "exa": {
+      "command": "npx",
+      "args": ["-y", "exa-mcp-server"],
+      "transport": "stdio"
+    },
+    "vercel": {
+      "command": "npx",
+      "args": ["-y", "@vercel/mcp-adapter"],
+      "transport": "stdio"
+    },
+    "supabase": {
+      "command": "npx",
+      "args": ["-y", "@supabase/mcp-server-supabase"],
+      "transport": "stdio"
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "transport": "stdio"
+    },
+    "figma": {
+      "command": "npx",
+      "args": ["-y", "figma-mcp"],
+      "transport": "stdio"
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "transport": "stdio"
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "transport": "stdio"
+    },
+    "whatsapp": {
+      "command": "node",
+      "args": ["/Users/zorahrel/.claude/jarvis/router/src/mcp/whatsapp-server.js"],
+      "transport": "stdio"
+    },
+    "flights": {
+      "command": "npx",
+      "args": ["-y", "flights-mcp"],
+      "transport": "stdio"
+    },
+    "omega-memory": {
+      "command": "node",
+      "args": ["/Users/zorahrel/.claude/jarvis/memory/mcp-server/index.js"],
+      "transport": "stdio"
+    },
+    "tally": {
+      "command": "npx",
+      "args": ["-y", "tally-mcp"],
+      "transport": "stdio"
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp"],
+      "transport": "stdio"
+    }
+  }
+}
