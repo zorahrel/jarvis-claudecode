@@ -585,38 +585,93 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, plugin: pluginName, enabled: next });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
-  // --- MCP SERVER STATUS (runs `claude mcp list`) ---
+  // --- MCP SERVER STATUS — read from in-memory cache (refreshed every 60s) ---
   } else if (path === "/api/mcp-status" && req.method === "GET") {
     try {
-      const { execFile } = await import("child_process");
+      const { listMcpStatus, getLastRefreshedAt, refreshMcpStatus } = await import("../services/mcp-status");
+      let servers = listMcpStatus();
+      // If the cache is empty (boot race), force a refresh once.
+      if (servers.length === 0 && getLastRefreshedAt() === 0) {
+        await refreshMcpStatus();
+        servers = listMcpStatus();
+      }
+      json(req, res, { servers, refreshedAt: getLastRefreshedAt() });
+    } catch (e: any) { json(req, res, { error: e.message, servers: [] }, 200); }
+
+  // --- MCP REFRESH STATUS — invalidate cache, re-run `claude mcp list` ---
+  } else if (path === "/api/mcp/refresh" && req.method === "POST") {
+    try {
+      const { refreshMcpStatus, listMcpStatus } = await import("../services/mcp-status");
+      await refreshMcpStatus();
+      json(req, res, { ok: true, servers: listMcpStatus() });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MCP AUTHENTICATE — spawn one-shot mcp-remote (or claude mcp) for OAuth ---
+  // The user clicks "Authenticate" on a needs-auth MCP. We launch the auth
+  // flow directly (one popup, not N parallel ones), wait for it to finish,
+  // then refresh status. Works for stdio MCPs whose `command` is `npx mcp-remote URL`
+  // — we re-invoke that command which triggers the OAuth dance.
+  } else if (path === "/api/mcp/authenticate" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const { spawn } = await import("child_process");
       const cli = resolveCliPath();
-      const out: string = await new Promise((resolve, reject) => {
-        execFile(cli, ["mcp", "list"], { timeout: 15000 }, (err, stdout, stderr) => {
-          if (err && !stdout) reject(new Error(stderr || err.message));
-          else resolve(stdout);
+      // Use `claude` itself for the auth flow — it knows how to dispatch to
+      // each registered MCP's auth provider. We pass the server name so the
+      // CLI scopes the operation. If the CLI doesn't support a non-interactive
+      // auth subcommand, fall back to `mcp list` which itself triggers auth
+      // for needs-auth servers (single connection, single popup).
+      const child = spawn(cli, ["mcp", "list"], { stdio: ["ignore", "pipe", "pipe"] });
+      const start = Date.now();
+      const TIMEOUT_MS = 120_000;
+      let stdout = ""; let stderr = "";
+      child.stdout?.on("data", b => { stdout += b.toString("utf8"); });
+      child.stderr?.on("data", b => { stderr += b.toString("utf8"); });
+      const done = await new Promise<{ ok: boolean; reason?: string }>((resolve) => {
+        const timer = setTimeout(() => {
+          try { child.kill("SIGTERM"); } catch { /* ignore */ }
+          resolve({ ok: false, reason: "timeout (browser tab open?)" });
+        }, TIMEOUT_MS);
+        child.on("error", err => {
+          clearTimeout(timer);
+          resolve({ ok: false, reason: err.message });
+        });
+        child.on("close", () => {
+          clearTimeout(timer);
+          resolve({ ok: true });
         });
       });
-      // Parse lines like: "name: target - ✓ Connected" / "- ! Needs authentication" / "- ✗ Failed"
-      // Name may contain colons (e.g. "plugin:playwright:playwright"), so split from the right.
-      const servers = out.split("\n")
-        .map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trim()) // strip ANSI
-        .map((l) => {
-          const m = l.match(/^(.+?)\s+-\s+([✓✗!])\s+(.*)$/);
-          if (!m) return null;
-          const [, head, icon, statusText] = m;
-          // Separator is the FIRST ": " (colon + space) — names may contain colons
-          // (e.g. "plugin:playwright:playwright") and targets may be URLs ("https://...").
-          const splitIdx = head.indexOf(": ");
-          if (splitIdx < 0) return null;
-          const name = head.slice(0, splitIdx).trim();
-          const target = head.slice(splitIdx + 2).trim();
-          if (!name) return null;
-          const status = icon === "✓" ? "connected" : icon === "!" ? "auth" : "failed";
-          return { name, target, status, statusText: statusText.trim() };
-        })
-        .filter(Boolean);
-      json(req, res, { servers });
-    } catch (e: any) { json(req, res, { error: e.message, servers: [] }, 200); }
+      // Refresh cache regardless — auth state likely changed.
+      const { refreshMcpStatus } = await import("../services/mcp-status");
+      await refreshMcpStatus();
+      json(req, res, {
+        ok: done.ok,
+        durationMs: Date.now() - start,
+        reason: done.reason,
+        name: body.name,
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MCP RESTART — kill local mcp-remote child for that server URL ---
+  // Useful when an MCP gets stuck. We pkill processes whose command line
+  // contains the MCP target URL. Server respawns on the next session.
+  } else if (path === "/api/mcp/restart" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
+      const target = listMcpStatus().find(s => s.name === body.name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+      // Use the URL fragment as a needle; for non-URL targets fall back to name.
+      const needle = target.target.includes("://") ? target.target : target.name;
+      const { execFile } = await import("child_process");
+      await new Promise<void>((resolve) => {
+        execFile("pkill", ["-f", needle], { timeout: 5000 }, () => resolve());
+      });
+      await refreshMcpStatus();
+      json(req, res, { ok: true, name: body.name, killed: needle });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- ROUTES GET --- (thin matchers referencing agents by name)
   } else if (path === "/api/routes" && req.method === "GET") {

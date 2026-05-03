@@ -27,6 +27,7 @@ import type { AgentConfig } from "../types";
 import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
+import { getSkipSet as getMcpSkipSet, refreshMcpStatus } from "./mcp-status";
 import { buildMessagingMcps } from "../mcp";
 import { MEDIA_DIR } from "./media";
 import { issueToken, revokeToken } from "./notify-tokens";
@@ -567,19 +568,39 @@ function buildSdkOptions(opts: {
     : ["user", "project", "local"];
 
   // MCP servers: same logic as CLI buildSpawnArgs.
+  // We additionally drop servers that `claude mcp list` reports as needs-auth
+  // or failed — attaching them anyway just spawns mcp-remote children that
+  // pop OAuth dialogs the user never asked for. The user can re-attach via
+  // dashboard "Authenticate" (which calls refreshMcpStatus() afterwards).
+  const skip = getMcpSkipSet();
+  const filterAttachable = (input: Record<string, unknown>): Record<string, SdkMcpServerConfig> => {
+    const out: Record<string, SdkMcpServerConfig> = {};
+    for (const [name, cfg] of Object.entries(input)) {
+      if (skip.has(name)) continue;
+      out[name] = cfg as SdkMcpServerConfig;
+    }
+    return out;
+  };
+
   let mcpServers: Record<string, SdkMcpServerConfig> | undefined;
   if (opts.fullAccess) {
     const all = readMcpServers();
-    if (Object.keys(all).length > 0) mcpServers = all as Record<string, SdkMcpServerConfig>;
+    const usable = filterAttachable(all);
+    if (Object.keys(usable).length > 0) mcpServers = usable;
+    if (skip.size > 0) {
+      const skipped = Object.keys(all).filter(n => skip.has(n));
+      if (skipped.length > 0) log.debug({ skipped }, "Skipping unhealthy MCPs at session spawn");
+    }
   } else {
     const mcpToolNames = opts.tools.filter(t => t.startsWith("mcp:")).map(t => t.slice(4));
     if (mcpToolNames.length > 0) {
       const all = readMcpServers();
-      const filtered: Record<string, SdkMcpServerConfig> = {};
+      const filtered: Record<string, unknown> = {};
       for (const name of mcpToolNames) {
-        if (all[name]) filtered[name] = all[name] as SdkMcpServerConfig;
+        if (all[name]) filtered[name] = all[name];
       }
-      if (Object.keys(filtered).length > 0) mcpServers = filtered;
+      const usable = filterAttachable(filtered);
+      if (Object.keys(usable).length > 0) mcpServers = usable;
     }
   }
 
