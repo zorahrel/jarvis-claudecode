@@ -146,7 +146,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
 
   const getGroupInfo = tool(
     "whatsapp_get_group_info",
-    "Fetch full metadata for a specific WhatsApp group: name, description, all participants (JIDs + admin status), creation date. Works without prior message history.",
+    "Fetch full metadata for a specific WhatsApp group: name, description, all participants, admin status, creation date. Auto-resolves LID-anonymous participants (`…@lid`) to their phone-number JIDs (`…@s.whatsapp.net`) when WhatsApp has shared the mapping with the bot's account. LIDs that haven't yet been mapped come back as `phoneJid: null` — call `whatsapp_resolve_phone` if you have a phone number to look up the inverse direction.",
     {
       jid: z.string().describe("Group JID (`…@g.us`)."),
     },
@@ -158,14 +158,33 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
       const gate = whatsappJidAllowed(scope, cur, args.jid);
       if (!gate.allowed) return fail(gate.reason);
       try {
-        const s = sock as { groupMetadata: (jid: string) => Promise<{ id: string; subject?: string; subjectOwner?: string; subjectTime?: number; creation?: number; owner?: string; desc?: string; descOwner?: string; participants: Array<{ id: string; admin?: "admin" | "superadmin" | null; lid?: string }> }> };
+        const s = sock as {
+          groupMetadata: (jid: string) => Promise<{ id: string; subject?: string; subjectOwner?: string; subjectTime?: number; creation?: number; owner?: string; desc?: string; descOwner?: string; participants: Array<{ id: string; admin?: "admin" | "superadmin" | null; lid?: string }> }>;
+          signalRepository?: { lidMapping?: { getPNForLID: (lid: string) => Promise<string | null> } };
+        };
         const meta = await s.groupMetadata(args.jid);
-        const participants = meta.participants.map(p => ({
-          jid: p.id,
-          phone: p.id.split("@")[0]?.split(":")[0] ?? "",
-          admin: p.admin ?? null,
+        const lidStore = s.signalRepository?.lidMapping;
+        // Resolve LID participants to phone-number JIDs in parallel.
+        const participants = await Promise.all(meta.participants.map(async p => {
+          const isLid = p.id.endsWith("@lid");
+          let phoneJid: string | null = isLid ? null : p.id;
+          if (isLid && lidStore) {
+            try { phoneJid = await lidStore.getPNForLID(p.id); } catch { phoneJid = null; }
+          } else if (!isLid && p.lid) {
+            // Some Baileys versions return phone-JID as id and LID as separate field.
+            phoneJid = p.id;
+          }
+          const phone = phoneJid ? phoneJid.split("@")[0]?.split(":")[0] ?? null : null;
+          return {
+            participantJid: p.id,                 // raw — usually @lid these days
+            phoneJid: phoneJid,                   // resolved @s.whatsapp.net (or null if mapping unknown)
+            phone: phone,                         // bare digits, easier for the model to display
+            admin: p.admin ?? null,
+            isLid,
+          };
         }));
-        auditTool({ server: SERVER, tool: "whatsapp_get_group_info", sessionKey, args, ok: true, durationMs: Date.now() - start, resultSummary: `${participants.length} participants` });
+        const resolved = participants.filter(p => p.phoneJid).length;
+        auditTool({ server: SERVER, tool: "whatsapp_get_group_info", sessionKey, args, ok: true, durationMs: Date.now() - start, resultSummary: `${participants.length} participants, ${resolved} resolved` });
         return okJson({
           jid: meta.id,
           name: meta.subject ?? "(no name)",
@@ -173,11 +192,42 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
           owner: meta.owner,
           createdAt: meta.creation ? new Date(meta.creation * 1000).toISOString() : undefined,
           participantCount: participants.length,
+          participantsResolved: resolved,
           participants,
+          note: resolved < participants.length
+            ? "Some participants are LID-anonymized and the phone mapping isn't shared with this account. Try whatsapp_resolve_phone if you already know a phone number, or wait for live messages from the participant to flow through (Baileys learns mappings over time)."
+            : undefined,
         });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         auditTool({ server: SERVER, tool: "whatsapp_get_group_info", sessionKey, ok: false, durationMs: Date.now() - start, errorReason: reason });
+        return fail(reason);
+      }
+    },
+  );
+
+  const resolvePhone = tool(
+    "whatsapp_resolve_phone",
+    "Check whether a phone number has WhatsApp and return its JID (`…@s.whatsapp.net`). Use to translate user-supplied phone numbers (e.g. \"+39 333 1234567\") into a JID that can be passed to whatsapp_read_chat / whatsapp_send_message.",
+    {
+      phone: z.string().describe("Phone number in any format (E.164 with or without +, with or without spaces)."),
+    },
+    async (args) => {
+      const start = Date.now();
+      const sock = whatsappSocket();
+      if (!sock) return fail("WhatsApp socket unavailable");
+      const digits = args.phone.replace(/[^0-9]/g, "");
+      if (digits.length < 6) return fail(`phone "${args.phone}" doesn't look like a valid number`);
+      try {
+        const s = sock as { onWhatsApp: (...numbers: string[]) => Promise<Array<{ jid: string; exists: boolean }> | undefined> };
+        const result = await s.onWhatsApp(digits);
+        const hit = result?.[0];
+        auditTool({ server: SERVER, tool: "whatsapp_resolve_phone", sessionKey, args: { phone: digits }, ok: true, durationMs: Date.now() - start, resultSummary: hit?.exists ? hit.jid : "not registered" });
+        if (!hit || !hit.exists) return okJson({ phone: digits, exists: false });
+        return okJson({ phone: digits, exists: true, jid: hit.jid });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        auditTool({ server: SERVER, tool: "whatsapp_resolve_phone", sessionKey, ok: false, durationMs: Date.now() - start, errorReason: reason });
         return fail(reason);
       }
     },
@@ -285,7 +335,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
   );
 
-  const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats, listGroups, getGroupInfo];
+  const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats, listGroups, getGroupInfo, resolvePhone];
   if (canWrite) tools.push(sendMessage, react, backfill);
 
   return createSdkMcpServer({
