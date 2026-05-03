@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { navigate } from '../lib/url-state'
 import { usePolling } from '../hooks/usePolling'
 import { StatCard } from '../components/StatCard'
 import { PageHeader, SectionHeader } from '../components/ui/PageHeader'
@@ -92,7 +93,7 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
   const initial = parseInitialAnalyticsHash()
   const [days, setDays] = useState(initial.days)
   const [groupBy, setGroupBy] = useState<GroupBy>(initial.groupBy)
-  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash || window.location.search))
   const [routes, setRoutes] = useState<FullRoute[]>([])
 
   useEffect(() => {
@@ -100,9 +101,11 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
   }, [])
 
   useEffect(() => {
-    const onHash = () => setHashFilter(parseHashFilter(window.location.hash))
+    const onHash = () => setHashFilter(parseHashFilter(window.location.hash || window.location.search))
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => window.removeEventListener('popstate', onHash);
+      window.removeEventListener('hashchange', onHash)
   }, [])
 
   const clearHashFilter = () => {
@@ -435,7 +438,7 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
                       : null
                   const onRowClick = () => {
                     if (drillHref) {
-                      window.location.hash = drillHref
+                      navigate(drillHref)
                     }
                   }
                   return (
@@ -517,7 +520,7 @@ export function Analytics({ onToast: _onToast }: { onToast?: (msg: string, type:
                   return (
                     <tr
                       key={`${e.ts}-${i}`}
-                      onClick={() => { window.location.hash = rowHref }}
+                      onClick={() => { navigate(rowHref) }}
                       title={`Open sessions for ${e.route}`}
                       style={{
                         borderTop: '1px solid var(--border)',

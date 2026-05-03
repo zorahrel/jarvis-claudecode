@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
+import { navigate } from '../lib/url-state'
 import { Plus, Sparkles, LayoutGrid, Table2 } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -199,8 +200,8 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
     (name: string): AgentBaseline | undefined => baselines.find((b) => b.agent === name),
     [baselines],
   )
-  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
-  const [hashFocus, setHashFocus] = useState(() => parseHashFocus(window.location.hash))
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash || window.location.search))
+  const [hashFocus, setHashFocus] = useState(() => parseHashFocus(window.location.hash || window.location.search))
   const [detailAgent, setDetailAgent] = useState<string | null>(null)
   const [allRoutes, setAllRoutes] = useState<Array<{ index: number; channel: string; workspace: string; from: string; group: string | null }>>([])
 
@@ -241,11 +242,13 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
 
   useEffect(() => {
     const onHash = () => {
-      setHashFilter(parseHashFilter(window.location.hash))
-      setHashFocus(parseHashFocus(window.location.hash))
+      setHashFilter(parseHashFilter(window.location.hash || window.location.search))
+      setHashFocus(parseHashFocus(window.location.hash || window.location.search))
     }
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => window.removeEventListener('popstate', onHash);
+      window.removeEventListener('hashchange', onHash)
   }, [])
 
   // Auto-open detail panel when ?focus=<name>
@@ -746,7 +749,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         {routeLabels.length === 0 && <Badge tone="muted" size="xs">unused</Badge>}
                         {a.routes.length > 0 && (
                           <BadgeLink
-                            href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                             tone="neutral"
                             size="xs"
                             count={a.routes.length}
@@ -757,7 +760,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         )}
                         {sessions.length > 0 && (
                           <BadgeLink
-                            href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/sessions?filter=agent:${encodeURIComponent(a.name)}`}
                             tone="ok"
                             size="xs"
                             count={sessions.length}
@@ -768,7 +771,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         )}
                         {turns7d > 0 && (
                           <BadgeLink
-                            href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
                             tone="muted"
                             size="xs"
                             count={turns7d}
@@ -796,7 +799,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         {routeLabels.length > 0 ? routeLabels.map((label, i) => (
                           <BadgeLink
                             key={i}
-                            href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                             tone="accent"
                             size="xs"
                             label={label}
@@ -872,7 +875,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                   {hasFullAccess && <Badge tone="accent" size="xs">FULL</Badge>}
                   {a.routes.length > 0 && (
                     <BadgeLink
-                      href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                      href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                       tone="neutral"
                       size="xs"
                       count={a.routes.length}
@@ -882,7 +885,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                   )}
                   {sessions.length > 0 && (
                     <BadgeLink
-                      href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                      href={`/sessions?filter=agent:${encodeURIComponent(a.name)}`}
                       tone="ok"
                       size="xs"
                       count={sessions.length}
@@ -892,7 +895,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                   )}
                   {turns7d > 0 && (
                     <BadgeLink
-                      href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                      href={`/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
                       tone="muted"
                       size="xs"
                       count={turns7d}
@@ -1122,7 +1125,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <Button size="sm" onClick={() => { setDetailAgent(null); openToolsPicker(a.name, a.tools || []) }}>
                   Edit tools →
                 </Button>
-                <Button size="sm" onClick={() => { window.location.hash = `#/memory?agent=${encodeURIComponent(a.name)}` }}>
+                <Button size="sm" onClick={() => { navigate(`memory?agent=${encodeURIComponent(a.name)}`) }}>
                   View memory →
                 </Button>
               </div>
@@ -1178,21 +1181,21 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
 
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <BadgeLink
-                  href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                  href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                   tone="accent"
                   size="sm"
                   count={routesForAgent.length}
                   label="routes"
                 />
                 <BadgeLink
-                  href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                  href={`/sessions?filter=agent:${encodeURIComponent(a.name)}`}
                   tone={sessions.length > 0 ? 'ok' : 'muted'}
                   size="sm"
                   count={sessions.length}
                   label="sessions"
                 />
                 <BadgeLink
-                  href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                  href={`/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
                   tone="muted"
                   size="sm"
                   count={turns7d}

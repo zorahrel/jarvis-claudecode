@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
+import { navigate } from '../lib/url-state'
 import { Plus, RefreshCw } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -346,7 +347,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                     <Badge tone="accent" size="xs">{toolRoutesCount(t.id)} routes</Badge>
                     {(agentsByTool[t.id] || []).length > 0 && (
                       <BadgeLink
-                        href={`#/agents?filter=tool:${encodeURIComponent(t.id)}`}
+                        href={`/agents?filter=tool:${encodeURIComponent(t.id)}`}
                         tone="neutral"
                         size="xs"
                         count={agentsByTool[t.id].length}
@@ -361,7 +362,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                       return (
                         <BadgeLink
                           key={rIdx}
-                          href={`#/agents?focus=${encodeURIComponent(workspace || '')}`}
+                          href={`/agents?focus=${encodeURIComponent(workspace || '')}`}
                           tone={isJarvis ? 'jarvis' : 'muted'}
                           size="xs"
                           label={workspace || `#${rIdx}`}
@@ -469,7 +470,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                         padding="10px 12px"
                         onClick={() => {
                           setSelectedTool(null)
-                          window.location.hash = `#/agents?focus=${encodeURIComponent(route?.workspace || '')}`
+                          navigate(`agents?focus=${encodeURIComponent(route?.workspace || '')}`)
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
