@@ -1,7 +1,8 @@
 import type { IncomingMessage } from "../types";
 import { findRoute } from "./router";
 import { askClaude, sessionKey } from "./claude";
-import { canVoice, canVision } from "./capabilities";
+import { canVoice, canVision, canVisionLocal } from "./capabilities";
+import { caption as visionCaption, query as visionQuery, isAvailable as visionAvailable, visionBackend } from "./vision-local";
 import { logger } from "./logger";
 import { checkIncomingRate } from "./rate-limiter";
 import { trackMessage, trackResponseTime, pushLog, broadcast, clientCount } from "../dashboard/server";
@@ -195,6 +196,49 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     if (imagePaths.length > 0) {
       const pathList = imagePaths.map(p => `  ${p}`).join("\n");
       messageForClaude += `\n\n[${imagePaths.length} image${imagePaths.length > 1 ? "s" : ""} attached — view with Read tool]\n${pathList}`;
+    }
+
+    // Local vision pre-pass (Moondream Station, on-device).
+    // If `vision-local` is enabled AND there's at least one image, run a
+    // short caption locally and — only if the user wrote a message
+    // alongside the image — also run a targeted VQA query. Results are
+    // injected as text context so the upstream model sees the textual
+    // brief before doing its own reasoning. Cheap silent fallback if the
+    // daemon is down — the rest of the flow is unaffected.
+    const localVisionTargets = canVisionLocal(route.agent)
+      ? (msg.media ?? []).filter(m => m.type === "image" && m.localPath).map(m => m.localPath as string)
+      : [];
+    if (localVisionTargets.length > 0) {
+      const vlStart = Date.now();
+      if (await visionAvailable()) {
+        const userQuestion = fullText.trim();
+        const askQuery = userQuestion.length > 0;
+        const blocks: string[] = [];
+        for (const imgPath of localVisionTargets) {
+          const cap = await visionCaption(imgPath, "short", 20_000);
+          if ("error" in cap) {
+            log.warn({ key, imgPath, err: cap.error }, "vision-local caption failed");
+            continue;
+          }
+          const lines = [`- ${imgPath}`, `  caption: ${cap.caption}`];
+          if (askQuery) {
+            const q = await visionQuery(imgPath, userQuestion, 20_000);
+            if (!("error" in q)) {
+              lines.push(`  Q: ${userQuestion.slice(0, 200)}`);
+              lines.push(`  A: ${q.answer}`);
+            }
+          }
+          blocks.push(lines.join("\n"));
+        }
+        if (blocks.length > 0) {
+          const backend = visionBackend();
+          const label = backend === "cloud" ? "Moondream Cloud (M3)" : "Moondream local (M2)";
+          messageForClaude += `\n\n[Vision pre-pass (${label}):\n${blocks.join("\n")}\n]`;
+          log.info({ key, images: blocks.length, ms: Date.now() - vlStart, backend }, "vision-local pre-pass done");
+        }
+      } else {
+        log.warn({ key }, "vision-local enabled but daemon not reachable on :2020");
+      }
     }
 
     // Register job so we can notify the user if the router restarts mid-call

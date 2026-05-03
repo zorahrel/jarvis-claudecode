@@ -40,6 +40,8 @@
     <string>__NODE_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key>
     <string>__HOME__</string>
+    <key>NODE_OPTIONS</key>
+    <string>--max-old-space-size=8192</string>
   </dict>
 </dict>
 </plist>

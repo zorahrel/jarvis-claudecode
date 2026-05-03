@@ -1248,6 +1248,21 @@ export function getUsageStats(): Map<string, SessionStat> {
   return sessionStats;
 }
 
+/** Diagnostics for memory-leak forensics — counts of internal maps/queues. */
+export function getDiagnostics(): {
+  sessions: number;
+  queues: number;
+  sessionStats: number;
+  pendingSummaries: number;
+} {
+  return {
+    sessions: sessions.size,
+    queues: queues.size,
+    sessionStats: sessionStats.size,
+    pendingSummaries: pendingSummaries.size,
+  };
+}
+
 export function killProcessByKey(key: string): boolean {
   const s = sessions.get(key);
   if (!s) return false;

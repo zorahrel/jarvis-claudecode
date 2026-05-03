@@ -5,6 +5,25 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Fixed
+- **Router OOM crash loop.** The long-running router process was hitting V8's
+  default ~4GB heap after ~2h uptime, OOM-crashing, and getting restarted by
+  launchd — which then re-sent "recovery notice" messages on every restart,
+  appearing as a Telegram loop. The plist now sets
+  `NODE_OPTIONS=--max-old-space-size=8192` (8GB headroom) and `index.ts`
+  installs a memory guard that triggers a graceful `SIGTERM` (drain in-flight
+  calls + recovery notice + clean shutdown) when RSS exceeds 6GB, instead of
+  letting V8 OOM abruptly.
+
+### Added
+- **Router memory diagnostics.** Every ~10 min (and immediately above 2GB RSS)
+  the router logs a `memory snapshot` with `rssMB`, `heapUsedMB`, `heapTotalMB`,
+  `externalMB`, `arrayBuffersMB`, `uptimeSec`, plus `diag` counts of internal
+  maps (`sessions`, `queues`, `sessionStats`, `pendingSummaries`) for leak
+  forensics. At 3GB RSS the router writes a one-shot heap snapshot to
+  `~/.claude/jarvis/logs/heap-<ts>.heapsnapshot` (open in Chrome DevTools →
+  Memory → Load to identify retainers).
+
 ### Security
 - **Per-agent session isolation.** `sessionKey()` now embeds the resolved agent
   name (`channel:target:agent` instead of `channel:target`) so chats that match
