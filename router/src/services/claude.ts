@@ -172,6 +172,7 @@ function buildSafeEnv(
   }
   if (agentEnv) Object.assign(env, agentEnv);
   env.JARVIS_SPAWN = "1";
+  env.ENABLE_TOOL_SEARCH = "true"; // defer stdio MCP tool definitions — reduces baseline context
   if (opts?.isSubagent) env.JARVIS_IS_SUBAGENT = "1";
   if (opts?.notify && !opts.isSubagent) {
     env.JARVIS_SESSION_KEY = opts.notify.sessionKey;
@@ -383,17 +384,29 @@ async function reconnectStaleMcpForLiveSessions(): Promise<void> {
     do {
       fcacheRerun = false;
       const live = [...sessions.values()].filter((s) => s.alive && s.pendingResolve === null);
+      // Dedupe by MCP server name across this sweep — each session holds its own
+      // mcp-remote stdio connection, so a needs-auth state on one means it's
+      // probably needs-auth on all of them. Reconnecting per-session triggers
+      // one OAuth browser popup PER session — bad UX. Pick one session per
+      // server name and reconnect there; the others will pick up the refreshed
+      // token through fcache on their next status check (or on next user turn).
+      const seenServers = new Set<string>();
       for (const s of live) {
-        if (!s.alive) continue; // raced with killSession
+        if (!s.alive) continue;
         let stale: string[] = [];
         try {
           const status = await s.q.mcpServerStatus();
-          stale = status.filter((m) => m.status === "failed" || m.status === "needs-auth").map((m) => m.name);
+          // Only auto-reconnect `failed` (transient, recoverable). `needs-auth`
+          // requires the user to actually log in via /mcp — auto-reconnecting
+          // it just spawns OAuth popups the user didn't ask for.
+          stale = status.filter((m) => m.status === "failed").map((m) => m.name);
         } catch (e) {
           log.debug({ sessionKey: s.sessionKey, err: String(e) }, "mcpServerStatus failed; skipping reconnect for session");
           continue;
         }
         for (const name of stale) {
+          if (seenServers.has(name)) continue;
+          seenServers.add(name);
           try {
             await s.q.reconnectMcpServer(name);
             log.info({ sessionKey: s.sessionKey, mcp: name }, "MCP reconnected after fcache change");
@@ -1275,7 +1288,7 @@ async function askClaudeInternal(
         s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
       }
 
-      return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, images, opts?.onChunk);
+      return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, agent, images, opts?.onChunk);
     } catch (err: any) {
       const errMsg = err?.message ?? "";
       if (errMsg === "INIT_TIMEOUT") {
@@ -1324,6 +1337,7 @@ async function doSendWithTimeout(
   modelName: string,
   charsIn: number,
   startTime: number,
+  agent: AgentConfig,
   images?: ImageBlock[],
   onChunk?: (delta: string) => void,
 ): Promise<ClaudeResponse> {
@@ -1332,7 +1346,7 @@ async function doSendWithTimeout(
 
   if (s.needsContext) {
     s.needsContext = false;
-    const context = buildContextFromCache(key);
+    const context = buildContextFromCache(key, agent.contextLimits);
     if (context) {
       message = context + "\n" + message;
       log.info({ key, contextLen: context.length }, "Injected session context from cache");
