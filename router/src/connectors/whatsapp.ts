@@ -11,6 +11,7 @@ import { setContactName } from "../services/contact-names";
 import { getConfig } from "../services/config-loader";
 import { logger } from "../services/logger";
 import { processMedia, saveMedia, cleanupMedia } from "../services/media";
+import { pushMessage as pushWaHistory, pushBulk as pushWaHistoryBulk, type WAStoredMessage } from "../services/whatsapp-history";
 import { readFileSync, rmSync, existsSync } from "fs";
 import { basename, extname } from "path";
 import { EventEmitter } from "events";
@@ -73,6 +74,42 @@ function hasExplicitRoute(jid: string, isGroup: boolean): boolean {
 
 function isOwnerMessage(fromMe: boolean, senderPhone: string): boolean {
   return fromMe || senderPhone === getOwnerPhone();
+}
+
+/**
+ * Extract a minimal `WAStoredMessage` from a Baileys `WAMessage`. Returns null
+ * for status broadcasts and messages without a remoteJid (we can't index them).
+ */
+function toStoredMessage(waMsg: any): WAStoredMessage | null {
+  const jid = waMsg?.key?.remoteJid;
+  if (!jid || jid === "status@broadcast") return null;
+  const m = waMsg.message ?? {};
+  const text =
+    m.conversation ??
+    m.extendedTextMessage?.text ??
+    m.imageMessage?.caption ??
+    m.videoMessage?.caption ??
+    m.documentMessage?.caption ??
+    "";
+  let mediaType: WAStoredMessage["mediaType"] | undefined;
+  if (m.imageMessage) mediaType = "image";
+  else if (m.videoMessage) mediaType = "video";
+  else if (m.audioMessage) mediaType = m.audioMessage.ptt ? "voice" : "audio";
+  else if (m.documentMessage) mediaType = "document";
+  else if (m.stickerMessage) mediaType = "sticker";
+  const ts = typeof waMsg.messageTimestamp === "number"
+    ? waMsg.messageTimestamp
+    : Number(waMsg.messageTimestamp ?? 0);
+  return {
+    id: waMsg.key.id ?? "",
+    chatJid: jid,
+    fromJid: waMsg.key.participant ?? (waMsg.key.fromMe ? undefined : jid),
+    fromName: waMsg.pushName,
+    text: typeof text === "string" ? text : "",
+    ts,
+    fromMe: !!waMsg.key.fromMe,
+    mediaType,
+  };
 }
 
 // ============================================================
@@ -239,6 +276,15 @@ export class WhatsAppConnector implements Connector {
     });
 
     this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      // Capture into the WhatsApp history store for the in-process MCP. We do
+      // this for ALL upserts (live + backfill `notify` with requestId), so
+      // mcp/whatsapp.ts can serve historical reads without needing a separate
+      // CLI/auth/process. Bot's own outbound messages are also captured.
+      for (const waMsg of messages) {
+        const stored = toStoredMessage(waMsg);
+        if (stored) pushWaHistory(stored);
+      }
+
       if (type !== "notify" && type !== "append") return;
       for (const waMsg of messages) {
         try {
@@ -247,6 +293,21 @@ export class WhatsAppConnector implements Connector {
           log.error({ err, msgId: waMsg.key.id }, "Error processing WA message");
         }
       }
+    });
+
+    // Initial history sync after pair (and on reconnects when Baileys decides
+    // to re-sync). Up to ~14 days of past messages arrive in one shot —
+    // bulk-ingest into the store.
+    this.sock.ev.on("messaging-history.set", ({ messages, isLatest, progress }) => {
+      if (!messages || messages.length === 0) return;
+      const stored = messages
+        .map(toStoredMessage)
+        .filter((m): m is WAStoredMessage => m !== null);
+      pushWaHistoryBulk(stored);
+      log.info(
+        { count: stored.length, isLatest, progress },
+        "WhatsApp history sync ingested",
+      );
     });
   }
 

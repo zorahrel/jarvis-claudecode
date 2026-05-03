@@ -48,7 +48,8 @@ channels:
 - **Discord IDs** are 17-19 digit Snowflakes. Find them by enabling Developer
   Mode in Discord settings → right-click → Copy ID.
 - **WhatsApp JIDs** end in `@g.us` (group) or `@s.whatsapp.net` (DM). Find them
-  via `wacli chats list --query <name>`.
+  via the `whatsapp_list_chats` MCP tool, or look at `state/whatsapp-history/`
+  filenames after a few messages have been received.
 - **Telegram chat IDs** are negative for groups/supergroups. Find them by sending
   a message to the bot or via `getUpdates`.
 - Cross-channel scoping (allowedGuilds, allowedJids, etc) is configured per-agent

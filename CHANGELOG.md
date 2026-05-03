@@ -19,9 +19,12 @@ Dates are ISO (YYYY-MM-DD).
     REST API.
   - **WhatsApp** (`whatsapp` / `whatsapp:write` tools): `whatsapp_read_chat`,
     `whatsapp_search`, `whatsapp_list_chats`, `whatsapp_send_message`,
-    `whatsapp_react`, `whatsapp_backfill`. Deep history requires
-    `wacli` (`brew install steipete/tap/wacli` + `wacli auth` + `wacli sync
-    --follow`); write goes through the existing Baileys socket.
+    `whatsapp_react`, `whatsapp_backfill`. History captured from the **same
+    Baileys session** paired via the dashboard — `messaging-history.set`
+    (~14d on pair), `messages.upsert` (live, including bot's own outbound),
+    and `sock.fetchMessageHistory(...)` for on-demand backfill. Per-chat
+    JSONL store under `state/whatsapp-history/`. No second authentication,
+    no separate process.
   - **Telegram** (`telegram` / `telegram:write` tools): `telegram_read_chat`,
     `telegram_search`, `telegram_list_chats`, `telegram_send_message`. The
     bot API has no history endpoint, so we capture every received message into

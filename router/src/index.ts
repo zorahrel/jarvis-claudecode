@@ -14,7 +14,6 @@ import { logger } from "./services/logger";
 import { activeCount, activeJobs, loadPersistedJobs, clearPersistedJobs, type PendingJob } from "./services/pending-jobs";
 import { killAllProcesses } from "./services/claude";
 import { ensureHooksInstalled } from "./services/localSessions";
-import { probe as probeWacli } from "./services/wacli";
 
 const log = logger.child({ module: "main" });
 
@@ -169,9 +168,6 @@ async function main() {
   // Install jarvis-control status hooks for local session discovery.
   // Best-effort — failure just means the dashboard falls back to heuristic status.
   ensureHooksInstalled().catch((err) => log.warn({ err }, "hook install failed"));
-
-  // Probe wacli once at boot — drives availability of WhatsApp MCP read tools.
-  probeWacli().catch((err) => log.warn({ err: String(err) }, "wacli probe failed"));
 
   // Start dashboard
   startDashboard(3340);

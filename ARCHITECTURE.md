@@ -34,17 +34,17 @@ managed by the tray app if they provide a `launchd:` config.
 │   │   ├── mcp/              # In-process MCP servers (see "Messaging MCPs" below)
 │   │   │   ├── index.ts      # buildMessagingMcps() — agent-aware MCP factory
 │   │   │   ├── discord.ts    # discord.* tools (deep history via REST API)
-│   │   │   ├── whatsapp.ts   # whatsapp.* tools (deep history via wacli)
+│   │   │   ├── whatsapp.ts   # whatsapp.* tools (history via Baileys events + backfill)
 │   │   │   ├── telegram.ts   # telegram.* tools (ring-buffer history)
 │   │   │   ├── channels.ts   # channels.* — cross-channel registry
 │   │   │   └── _helpers.ts   # scope predicates + audit log
 │   │   ├── services/
-│   │   │   ├── claude.ts          # Persistent process manager + MCP wiring
-│   │   │   ├── handler.ts         # Message handler + media compose + nudge
-│   │   │   ├── connectors.ts      # Typed accessors for live connector instances
-│   │   │   ├── session-context.ts # Per-session conversation metadata for MCPs
-│   │   │   ├── message-buffer.ts  # Telegram ring buffer (persisted to state/)
-│   │   │   ├── wacli.ts           # wacli subprocess wrapper for WA history
+│   │   │   ├── claude.ts            # Persistent process manager + MCP wiring
+│   │   │   ├── handler.ts           # Message handler + media compose + nudge
+│   │   │   ├── connectors.ts        # Typed accessors for live connector instances
+│   │   │   ├── session-context.ts   # Per-session conversation metadata for MCPs
+│   │   │   ├── message-buffer.ts    # Telegram ring buffer (persisted to state/)
+│   │   │   ├── whatsapp-history.ts  # WA per-chat JSONL store fed by Baileys events
 │   │   │   ├── media.ts           # Whisper, vision, file extract
 │   │   │   ├── memory.ts          # ChromaDB + OMEGA client
 │   │   │   ├── router.ts          # Route matching
@@ -112,7 +112,12 @@ askClaude(agent, message, sessionKey)
     → audit log every call (writes at info, reads at debug)
 ```
 
-WhatsApp deep-history reads shell out to `wacli` (separate SQLite store).
+WhatsApp history is captured by `services/whatsapp-history.ts` from the live
+Baileys session — `messaging-history.set` (initial ~14d dump on pair),
+`messages.upsert` (live), and `sock.fetchMessageHistory()` for on-demand
+backfill. Persisted as per-chat JSONL under `state/whatsapp-history/`. No
+second authentication, no separate process.
+
 Telegram reads from `services/message-buffer.ts` (ring buffer persisted to
 `state/telegram-buffer.json`, populated by the connector on every received
 message during router uptime).
