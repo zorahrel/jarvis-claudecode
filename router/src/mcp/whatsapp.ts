@@ -108,6 +108,81 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
   );
 
+  const listGroups = tool(
+    "whatsapp_list_groups",
+    "List ALL WhatsApp groups the bot's account participates in, with name, JID, and participant count. Works regardless of message history — Baileys queries the server. Use this to resolve a group name (e.g. 'Armonia Campus') to a JID.",
+    {
+      query: z.string().optional().describe("Optional substring filter on group name."),
+    },
+    async (args) => {
+      const start = Date.now();
+      const sock = whatsappSocket();
+      if (!sock) return fail("WhatsApp socket unavailable (not paired or disconnected)");
+      try {
+        const s = sock as { groupFetchAllParticipating: () => Promise<Record<string, { id: string; subject?: string; participants?: Array<{ id: string }>; creation?: number; desc?: string }>> };
+        const all = await s.groupFetchAllParticipating();
+        const q = args.query?.toLowerCase();
+        const cur = currentJid();
+        const out = Object.values(all)
+          .filter(g => !q || (g.subject?.toLowerCase().includes(q) ?? false))
+          .filter(g => whatsappJidAllowed(scope, cur, g.id).allowed)
+          .map(g => ({
+            jid: g.id,
+            name: g.subject ?? "(no name)",
+            participantCount: g.participants?.length ?? 0,
+            createdAt: g.creation ? new Date(g.creation * 1000).toISOString() : undefined,
+            description: g.desc,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        auditTool({ server: SERVER, tool: "whatsapp_list_groups", sessionKey, args, ok: true, durationMs: Date.now() - start, resultSummary: `${out.length} groups` });
+        return okJson({ count: out.length, groups: out });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        auditTool({ server: SERVER, tool: "whatsapp_list_groups", sessionKey, ok: false, durationMs: Date.now() - start, errorReason: reason });
+        return fail(reason);
+      }
+    },
+  );
+
+  const getGroupInfo = tool(
+    "whatsapp_get_group_info",
+    "Fetch full metadata for a specific WhatsApp group: name, description, all participants (JIDs + admin status), creation date. Works without prior message history.",
+    {
+      jid: z.string().describe("Group JID (`…@g.us`)."),
+    },
+    async (args) => {
+      const start = Date.now();
+      const sock = whatsappSocket();
+      if (!sock) return fail("WhatsApp socket unavailable");
+      const cur = currentJid();
+      const gate = whatsappJidAllowed(scope, cur, args.jid);
+      if (!gate.allowed) return fail(gate.reason);
+      try {
+        const s = sock as { groupMetadata: (jid: string) => Promise<{ id: string; subject?: string; subjectOwner?: string; subjectTime?: number; creation?: number; owner?: string; desc?: string; descOwner?: string; participants: Array<{ id: string; admin?: "admin" | "superadmin" | null; lid?: string }> }> };
+        const meta = await s.groupMetadata(args.jid);
+        const participants = meta.participants.map(p => ({
+          jid: p.id,
+          phone: p.id.split("@")[0]?.split(":")[0] ?? "",
+          admin: p.admin ?? null,
+        }));
+        auditTool({ server: SERVER, tool: "whatsapp_get_group_info", sessionKey, args, ok: true, durationMs: Date.now() - start, resultSummary: `${participants.length} participants` });
+        return okJson({
+          jid: meta.id,
+          name: meta.subject ?? "(no name)",
+          description: meta.desc,
+          owner: meta.owner,
+          createdAt: meta.creation ? new Date(meta.creation * 1000).toISOString() : undefined,
+          participantCount: participants.length,
+          participants,
+        });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        auditTool({ server: SERVER, tool: "whatsapp_get_group_info", sessionKey, ok: false, durationMs: Date.now() - start, errorReason: reason });
+        return fail(reason);
+      }
+    },
+  );
+
   // ---------- WRITE ----------
 
   const sendMessage = tool(
@@ -210,7 +285,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
   );
 
-  const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats];
+  const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats, listGroups, getGroupInfo];
   if (canWrite) tools.push(sendMessage, react, backfill);
 
   return createSdkMcpServer({
