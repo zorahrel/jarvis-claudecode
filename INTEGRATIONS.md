@@ -8,18 +8,23 @@ no extra processes, no extra bot tokens, no new ports.
 
 ## Channel capability matrix
 
-| Channel  | Read history       | Search         | Send | React | Backend used                         |
-|----------|--------------------|----------------|------|-------|--------------------------------------|
-| Discord  | Deep (server API)  | Linear scan    | ✓    | ✓     | discord.js Client (existing)         |
-| WhatsApp | Deep (FTS5)        | Full-text      | ✓    | ✓     | wacli (SQLite store) + Baileys (live)|
-| Telegram | Router-uptime ring | Substring      | ✓    | —     | grammy bot + persisted ring buffer   |
-| Notch    | n/a (agent IS the conversation)                                                  |
+| Channel  | Read history             | Search       | Send | React | Backend                                            |
+|----------|--------------------------|--------------|------|-------|----------------------------------------------------|
+| Discord  | Deep (REST API)          | Linear scan  | ✓    | ✓     | discord.js Client (existing)                       |
+| WhatsApp | ~14d on pair + live + backfill | Substring | ✓    | ✓     | live Baileys events + JSONL store + fetchMessageHistory |
+| Telegram | Router-uptime ring       | Substring    | ✓    | —     | grammy bot + persisted ring buffer                 |
+| Notch    | n/a (agent IS the conversation)                                                                            |
 
 Discord history is fetched on-demand via the Discord REST API (paginated,
-unlimited depth). WhatsApp deep history requires `wacli` to be installed and
-synced. Telegram bot API has no history endpoint, so we capture every received
-message into a per-chat ring buffer (`state/telegram-buffer.json`); messages
-that arrived before this feature was deployed are unreachable.
+unlimited depth). **WhatsApp** uses the same Baileys session paired via the
+dashboard — no second authentication. The store is populated from three
+Baileys event sources: `messaging-history.set` (~14 days dump on pair),
+`messages.upsert` (live, including bot's own outbound), and
+`fetchMessageHistory(...)` (on-demand backfill via the `whatsapp_backfill`
+tool). Persisted as per-chat JSONL in `state/whatsapp-history/<sha1(jid)>.jsonl`.
+Telegram bot API has no history endpoint, so we capture every received message
+into a per-chat ring buffer (`state/telegram-buffer.json`); messages that
+arrived before the buffer existed are unreachable.
 
 ## Tool surface
 
@@ -40,16 +45,17 @@ Write tools (require `discord:write`):
 
 ### WhatsApp (`whatsapp` / `whatsapp:write`)
 
-Read tools (require `wacli` installed; see Setup below):
-- `whatsapp_read_chat` — last N messages from a chat.
-- `whatsapp_search` — FTS5 search over all chats (or one).
-- `whatsapp_list_chats` — known chats with optional name/number filter.
+Read tools:
+- `whatsapp_read_chat` — last N messages from a chat (paginated by `before`).
+- `whatsapp_search` — substring search over the local store (live + history-sync + backfill).
+- `whatsapp_list_chats` — known chats with optional name/JID filter.
 
 Write tools (require `whatsapp:write`):
 - `whatsapp_send_message` — text only (media-send via existing `sendFile` flow).
 - `whatsapp_react` — emoji reaction (empty string to remove).
-- `whatsapp_backfill` — pull deeper history into the local store; rate-limited
-  by wacli (your phone must be online).
+- `whatsapp_backfill` — kicks `sock.fetchMessageHistory(...)` to pull deeper
+  history. Results land asynchronously via `messages.upsert` — call
+  `whatsapp_read_chat` again after a short delay to see them.
 
 ### Telegram (`telegram` / `telegram:write`)
 
@@ -101,20 +107,18 @@ write tools refuse to send to chats other than the current one unless
 
 ## Setup
 
-### wacli (WhatsApp deep history + write)
+### WhatsApp pairing
 
-```sh
-brew install steipete/tap/wacli
-wacli auth                  # QR pair (separate from Baileys pairing)
-wacli sync --follow         # keep the local store in sync (run as launchd service)
-```
+Pair via the dashboard: **Channels → ⚙️** on the WhatsApp card → QR or 8-digit
+pairing code. The same Baileys session that handles routing also feeds the
+MCP's history store — no second authentication.
 
-The router probes `wacli` at boot. If it's missing, WhatsApp read tools
-return a structured error with the install hint; write tools still work via
-Baileys.
+The store starts populating automatically:
+- On pair: ~14 days of history come in via `messaging-history.set`.
+- During uptime: every received/sent message via `messages.upsert`.
+- On demand: call `whatsapp_backfill` to pull deeper history.
 
-To run `wacli sync` as a launchd service, add a ServiceLaunchd in `config.yaml`
-under `services:` (see ARCHITECTURE.md).
+Files live under `state/whatsapp-history/<sha1(jid)>.jsonl` (one file per chat).
 
 ### Channel registry
 
@@ -127,10 +131,10 @@ The MCP reloads on file change (mtime-cached) — no restart required.
 
 ## Failure modes (graceful)
 
-- **Connector disconnected** (e.g. WhatsApp not paired) → write tools return
-  `"WhatsApp socket unavailable"`; the agent can still read via wacli.
-- **wacli missing** → read tools return install hint; agent can still send via
-  Baileys.
+- **WhatsApp not paired** → read returns empty (store has nothing); write
+  returns `"WhatsApp socket unavailable"`. Pair via dashboard.
+- **Backfill without anchor** → first send/receive a message in the chat so
+  there's a reference point, then retry `whatsapp_backfill`.
 - **Allow-list mismatch** → tool returns `"jid X is not in allowedJids"` —
   agent can call `channels_list_known` to discover what's permitted.
 - **Cross-chat write attempted** → tool returns `"set allowCrossChatWrite:
