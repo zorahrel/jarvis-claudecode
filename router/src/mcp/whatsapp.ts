@@ -23,6 +23,8 @@ import type { AgentConfig } from "../types";
 import { whatsappSocketApi } from "../services/connectors";
 import { getSessionContext } from "../services/session-context";
 import * as wa from "../services/whatsapp-history";
+import { downloadMediaMessage } from "@whiskeysockets/baileys";
+import { saveMedia, processMedia } from "../services/media";
 import {
   ok, okJson, fail, whatsappJidAllowed, crossChatWriteAllowed, auditTool,
 } from "./_helpers";
@@ -227,6 +229,91 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
   );
 
+  const downloadMedia = tool(
+    "whatsapp_download_message_media",
+    "Download the media (image/video/audio/voice/document) attached to a stored WhatsApp message. Decrypts via the live Baileys session and writes the file to the shared media directory. Returns the local path so the agent can Read/Bash it.",
+    {
+      jid: z.string().describe("Chat JID where the message lives."),
+      message_id: z.string().describe("Message ID."),
+    },
+    async (args) => {
+      const start = Date.now();
+      const cur = currentJid();
+      const gate = whatsappJidAllowed(scope, cur, args.jid);
+      if (!gate.allowed) return fail(gate.reason);
+      try {
+        const stored = await wa.findMessage(args.jid, args.message_id);
+        if (!stored) return fail(`message ${args.message_id} not in local store for ${args.jid}`);
+        if (!stored.mediaProto || !stored.mediaType) return fail(`message ${args.message_id} has no media (text-only)`);
+        const sock = whatsappSocketApi();
+        if (!sock) return fail("WhatsApp socket unavailable (not paired)");
+        // Reconstruct a minimal WAMessage shape that downloadMediaMessage understands.
+        const reconstructed = {
+          key: { id: stored.id, remoteJid: stored.chatJid, fromMe: stored.fromMe, participant: stored.participant },
+          message: stored.mediaProto as Record<string, unknown>,
+          messageTimestamp: stored.ts,
+          pushName: stored.fromName,
+        };
+        // downloadMediaMessage needs the live socket as opts.reuploadRequest.
+        // Cast to any here — the structural API type doesn't expose the full
+        // socket surface, but Baileys accepts the original WASocket.
+        const buffer = await downloadMediaMessage(reconstructed as Parameters<typeof downloadMediaMessage>[0], "buffer", {}) as Buffer;
+        const ext = stored.mediaType === "voice" || stored.mediaType === "audio" ? "ogg"
+          : stored.mediaType === "image" ? "jpg"
+          : stored.mediaType === "video" ? "mp4"
+          : "bin";
+        const filename = `wa-${stored.id}.${ext}`;
+        const localPath = saveMedia(buffer, filename);
+        auditTool({ server: SERVER, tool: "whatsapp_download_message_media", sessionKey, args, ok: true, durationMs: Date.now() - start, resultSummary: localPath });
+        return okJson({ localPath, mediaType: stored.mediaType, sizeBytes: buffer.length });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        auditTool({ server: SERVER, tool: "whatsapp_download_message_media", sessionKey, ok: false, durationMs: Date.now() - start, errorReason: reason });
+        return fail(reason);
+      }
+    },
+  );
+
+  const transcribe = tool(
+    "whatsapp_transcribe_message",
+    "Convenience tool: download a stored WhatsApp voice/audio message AND run whisper-cli on it in one shot. Returns the transcription. Use whatsapp_download_message_media if you only need the file (e.g. for image OCR or document extraction).",
+    {
+      jid: z.string(),
+      message_id: z.string(),
+    },
+    async (args) => {
+      const start = Date.now();
+      const cur = currentJid();
+      const gate = whatsappJidAllowed(scope, cur, args.jid);
+      if (!gate.allowed) return fail(gate.reason);
+      try {
+        const stored = await wa.findMessage(args.jid, args.message_id);
+        if (!stored) return fail(`message ${args.message_id} not in local store`);
+        if (stored.mediaType !== "voice" && stored.mediaType !== "audio") {
+          return fail(`message has mediaType=${stored.mediaType ?? "none"}, expected voice/audio. Use whatsapp_download_message_media for other media types.`);
+        }
+        if (!stored.mediaProto) return fail("message proto not cached (older than this feature)");
+        const sock = whatsappSocketApi();
+        if (!sock) return fail("WhatsApp socket unavailable");
+        const reconstructed = {
+          key: { id: stored.id, remoteJid: stored.chatJid, fromMe: stored.fromMe, participant: stored.participant },
+          message: stored.mediaProto as Record<string, unknown>,
+          messageTimestamp: stored.ts,
+          pushName: stored.fromName,
+        };
+        const buffer = await downloadMediaMessage(reconstructed as Parameters<typeof downloadMediaMessage>[0], "buffer", {}) as Buffer;
+        const localPath = saveMedia(buffer, `wa-${stored.id}.ogg`);
+        const text = await processMedia("voice", localPath);
+        auditTool({ server: SERVER, tool: "whatsapp_transcribe_message", sessionKey, args, ok: true, durationMs: Date.now() - start, resultSummary: `${text?.length ?? 0} chars` });
+        return okJson({ messageId: stored.id, jid: stored.chatJid, fromName: stored.fromName, ts: stored.ts, transcript: text ?? "" });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        auditTool({ server: SERVER, tool: "whatsapp_transcribe_message", sessionKey, ok: false, durationMs: Date.now() - start, errorReason: reason });
+        return fail(reason);
+      }
+    },
+  );
+
   // ---------- WRITE ----------
 
   const sendMessage = tool(
@@ -365,7 +452,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
   );
 
-  const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats, listGroups, getGroupInfo, resolvePhone];
+  const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats, listGroups, getGroupInfo, resolvePhone, downloadMedia, transcribe];
   if (canWrite) tools.push(sendMessage, sendPoll, react, backfill);
 
   return createSdkMcpServer({

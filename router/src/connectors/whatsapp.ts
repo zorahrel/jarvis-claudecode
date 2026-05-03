@@ -109,6 +109,9 @@ function toStoredMessage(waMsg: any): WAStoredMessage | null {
     ts,
     fromMe: !!waMsg.key.fromMe,
     mediaType,
+    // Persist encrypted media proto so the MCP can download/transcribe later
+    // even if the message wasn't routed to an agent at receive time.
+    ...(mediaType ? { mediaProto: m, participant: waMsg.key.participant ?? undefined } : {}),
   };
 }
 
