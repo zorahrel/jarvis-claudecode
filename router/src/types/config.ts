@@ -48,6 +48,14 @@ export interface ChannelScope {
   allowCrossChatWrite?: boolean;
 }
 
+/** Token/context budget controls per agent */
+export interface ContextLimits {
+  /** Max chars of session history injected on session resume. Default 8000. */
+  sessionCacheMaxChars?: number;
+  /** Max exchanges injected on session resume. Default 10. */
+  sessionCacheMaxExchanges?: number;
+}
+
 /** Agent configuration (from agents/<name>/agent.yaml + workspace auto-resolved). */
 export interface AgentConfig {
   /** Agent name (from folder). Injected at load time, not present in agent.yaml. */
@@ -68,6 +76,8 @@ export interface AgentConfig {
   fullAccess?: boolean;
   /** Inherit ~/.claude/ user-scope settings (CLAUDE.md, hooks, skills). Default true. Set false for external/client agents that must not see the user's global config. */
   inheritUserScope?: boolean;
+  /** Context/token budget controls. Tune per-agent to reduce token usage. */
+  contextLimits?: ContextLimits;
   /** Per-channel scoping for messaging MCPs. */
   discord?: ChannelScope;
   whatsapp?: ChannelScope;
@@ -171,6 +181,21 @@ export interface ServiceDef {
   launchd?: ServiceLaunchd;
 }
 
+/** Router-level MCP behavior overrides */
+export interface McpRouterConfig {
+  /**
+   * MCP server names to NEVER attach to spawned SDK sessions, even when an
+   * agent has `fullAccess: true`. Useful for OAuth-heavy remotes (zenda, tally)
+   * that aggressively retry refresh and pop browser dialogs in tight loops
+   * across multiple parallel sessions. The agent loses access to those tools
+   * but the user stops seeing unsolicited OAuth tabs.
+   *
+   * The CLI and dashboard `claude mcp list` still see these servers — only
+   * router-spawned sessions skip them.
+   */
+  skip?: string[];
+}
+
 /** Top-level config */
 export interface Config {
   jarvis?: JarvisConfig;
@@ -180,4 +205,5 @@ export interface Config {
   crons?: CronJob[];
   rateLimits?: RateLimits;
   services?: ServiceDef[];
+  mcp?: McpRouterConfig;
 }
