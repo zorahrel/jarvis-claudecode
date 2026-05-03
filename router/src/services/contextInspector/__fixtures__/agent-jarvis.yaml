@@ -1,0 +1,10 @@
+model: opus
+effort: high
+fullAccess: true
+inheritUserScope: true
+tools:
+  - vision
+  - voice
+  - documents
+  - fileAccess:full
+  - memory:global

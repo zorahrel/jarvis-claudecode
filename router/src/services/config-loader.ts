@@ -46,6 +46,12 @@ function loadAgentRegistry(): Record<string, AgentConfig> {
         effort: parsed.effort,
         fullAccess: parsed.fullAccess,
         inheritUserScope: parsed.inheritUserScope,
+        // Per-channel scoping for in-process messaging MCPs (mcp/{discord,whatsapp,telegram}).
+        // We pass the whole sub-object through; consumers (mcp/_helpers.ts) read
+        // the fields they care about (allowedGuilds, allowedJids, allowCrossChatWrite, …).
+        discord: parsed.discord,
+        whatsapp: parsed.whatsapp,
+        telegram: parsed.telegram,
       };
       registry[name] = agent;
     } catch (err) {

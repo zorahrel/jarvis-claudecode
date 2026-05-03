@@ -13,6 +13,10 @@ agents/
 
 # Runtime data
 memory/
+state/
+**/moondream-env/
+**/*-venv/
+**/__pycache__/
 media/
 logs/
 data/
@@ -36,6 +40,9 @@ stats.json
 
 # Build artifacts
 tray-app/.build/
+# Bundle output of make-app.sh — rebuilt locally with `./make-app.sh`,
+# never source. Was accidentally committed in 1b8274b; cleaned up here.
+tray-app/build/
 
 # Local Claude settings (never commit)
 .claude/settings.local.json

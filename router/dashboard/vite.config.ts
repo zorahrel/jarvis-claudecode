@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:3340',
+      '/notch': 'http://localhost:3340',
     },
   },
   build: {

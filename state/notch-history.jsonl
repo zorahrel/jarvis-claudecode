@@ -1,0 +1,4 @@
+{"id":"nh-moni2jl6-ssyrm4","ts":1777675460010,"role":"user","from":"notch","text":"fai una frase di 30 parole sul mare in italiano"}
+{"id":"nh-moni2lrd-5e2px3","ts":1777675462825,"role":"agent","from":"notch","text":"Il mare danza sotto il sole, produce suoni affascinanti, ospita vita incredibile, genera tempeste maestose, guarisce l'anima stanca e ci ricorda quanto siamo piccoli di fronte alla grandezza del creato.\n\n[t 2.8s = llm 2.8s | tok 43.8k>335 | notch/claude-haiku-4-5-20251001]"}
+{"id":"nh-monl42t3-4b97e8","ts":1777680570422,"role":"user","from":"notch-voice","text":"Come va?"}
+{"id":"nh-monl47x3-wj5qcd","ts":1777680577047,"role":"agent","from":"notch","text":"Tutto quieto. Router stabile, notch responsivo, nessun alert. La voice è pulita e latency OK dal test che hai appena fatto. C'è qualcosa di specifico che devi controllare?\n\n[t 6.6s = llm 6.6s | tok 41.3k>245 | notch/claude-haiku-4-5-20251001]"}

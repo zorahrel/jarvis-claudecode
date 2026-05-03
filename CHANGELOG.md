@@ -5,6 +5,47 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Added
+- **Messaging MCPs for Discord, WhatsApp, Telegram + cross-channel registry.**
+  Agents can now read and write conversations through tool calls instead of
+  relying on connector-injected prompt context. Each MCP is in-process (no
+  extra bot tokens, no extra processes) and reuses the existing connector
+  handles. New file `INTEGRATIONS.md` documents the channel matrix, tool
+  surface, and security model.
+  - **Discord** (`discord` / `discord:write` tools): `discord_read_channel`,
+    `discord_search_channel`, `discord_get_message`, `discord_list_channels`,
+    `discord_list_members`, `discord_send_message`, `discord_react`,
+    `discord_edit_own`, `discord_delete_own`. Deep history via the Discord
+    REST API.
+  - **WhatsApp** (`whatsapp` / `whatsapp:write` tools): `whatsapp_read_chat`,
+    `whatsapp_search`, `whatsapp_list_chats`, `whatsapp_send_message`,
+    `whatsapp_react`, `whatsapp_backfill`. History captured from the **same
+    Baileys session** paired via the dashboard — `messaging-history.set`
+    (~14d on pair), `messages.upsert` (live, including bot's own outbound),
+    and `sock.fetchMessageHistory(...)` for on-demand backfill. Per-chat
+    JSONL store under `state/whatsapp-history/`. No second authentication,
+    no separate process.
+  - **Telegram** (`telegram` / `telegram:write` tools): `telegram_read_chat`,
+    `telegram_search`, `telegram_list_chats`, `telegram_send_message`. The
+    bot API has no history endpoint, so we capture every received message into
+    a per-chat ring buffer (max 200 msgs × 500 chats, persisted to
+    `state/telegram-buffer.json`). Pre-deploy history is unreachable.
+  - **Channels registry** (`channels` tool): `channels_list_known`,
+    `channels_resolve` resolve a human name like "Moonstone Ops" to the right
+    channel/JID/chat ID. Curate the list in
+    `~/.claude/jarvis/memory/channels.md` (template at
+    `router/memory-channels.example.md`).
+  - **Per-route security**: `agent.yaml` now accepts `discord`/`whatsapp`/
+    `telegram` blocks with `allowedGuilds`/`allowedChannels`/`allowedJids`/
+    `allowedChats`/`denyChannels`/`denyJids`/`denyChats`/
+    `allowCrossChatWrite`. Default safe: only the current conversation is
+    reachable when no allow-list is set. Every tool call is audit-logged
+    (writes at `info`, reads at `debug`).
+  - **System-prompt nudge**: when an agent has a messaging MCP enabled, the
+    user prompt is prefixed with a one-line `[Messaging context: …]` block
+    naming the current channel and pointing the model at the right tool
+    before it asks for clarification.
+
 ### Security
 - **Per-agent session isolation.** `sessionKey()` now embeds the resolved agent
   name (`channel:target:agent` instead of `channel:target`) so chats that match

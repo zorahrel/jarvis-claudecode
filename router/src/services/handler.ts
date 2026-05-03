@@ -1,7 +1,8 @@
 import type { IncomingMessage } from "../types";
 import { findRoute } from "./router";
 import { askClaude, sessionKey } from "./claude";
-import { canVoice, canVision } from "./capabilities";
+import { canVoice, canVision, canVisionLocal } from "./capabilities";
+import { caption as visionCaption, query as visionQuery, isAvailable as visionAvailable, visionBackend } from "./vision-local";
 import { logger } from "./logger";
 import { checkIncomingRate } from "./rate-limiter";
 import { trackMessage, trackResponseTime, pushLog, broadcast, clientCount } from "../dashboard/server";
@@ -18,6 +19,11 @@ import { recordCost } from "./cost-tracker";
 import { startJob, endJob, type PendingChannel } from "./pending-jobs";
 import { randomUUID } from "crypto";
 import type { MessageTimings } from "../types/message";
+import { setSessionContext, gcSessionContexts } from "./session-context";
+import {
+  canDiscord, canWhatsapp, canTelegram, canChannels,
+  canDiscordWrite, canWhatsappWrite, canTelegramWrite,
+} from "./capabilities";
 
 /**
  * Human-readable relative time label for a quoted message timestamp.
@@ -33,6 +39,53 @@ function relativeTime(fromEpoch: number, nowEpoch = Date.now() / 1000): string {
   const days = Math.round(diff / 86400);
   if (days === 1) return "(ieri)";
   return `(${days}g fa)`;
+}
+
+/**
+ * Build a short messaging-context nudge prepended to the user prompt when the
+ * agent has the corresponding channel MCP enabled. Pays a fixed ~50-100 token
+ * tax per turn, only on channels where the tool is present, and only enough to
+ * orient the model on (a) where the conversation is and (b) which tools to use
+ * before asking for clarification.
+ */
+function buildMessagingNudge(msg: IncomingMessage, agent: import("../types").AgentConfig | undefined): string | null {
+  if (!agent) return null;
+  const cc = msg.channelContext;
+  if (!cc) return null;
+  const hasDiscord = canDiscord(agent);
+  const hasWhatsapp = canWhatsapp(agent);
+  const hasTelegram = canTelegram(agent);
+  const writeHint = (chan: "discord" | "whatsapp" | "telegram", canW: boolean) =>
+    canW ? `, ${chan}_send_message to reply` : "";
+
+  if (cc.discord && hasDiscord) {
+    const guildPart = cc.discord.guildName
+      ? `guild=${cc.discord.guildName} channel=${cc.discord.channelName ?? cc.discord.channelId}`
+      : `DM channel=${cc.discord.channelId}`;
+    return `[Messaging context: Discord ${guildPart}, from=@${cc.discord.authorName ?? cc.discord.authorId}. ` +
+      `Use discord_read_channel to load surrounding messages before asking for clarification` +
+      `${writeHint("discord", canDiscordWrite(agent))}.]`;
+  }
+  if (cc.whatsapp && hasWhatsapp) {
+    const where = cc.whatsapp.isGroup
+      ? `group=${cc.whatsapp.groupName ?? cc.whatsapp.jid}`
+      : `DM jid=${cc.whatsapp.jid}`;
+    return `[Messaging context: WhatsApp ${where}, from=${cc.whatsapp.senderName ?? cc.whatsapp.senderJid}. ` +
+      `Use whatsapp_read_chat / whatsapp_search to look up history${writeHint("whatsapp", canWhatsappWrite(agent))}.]`;
+  }
+  if (cc.telegram && hasTelegram) {
+    const where = cc.telegram.chatType === "private"
+      ? `DM chat=${cc.telegram.chatId}`
+      : `${cc.telegram.chatType}=${cc.telegram.chatTitle ?? cc.telegram.chatId}`;
+    return `[Messaging context: Telegram ${where}, from=@${cc.telegram.fromUsername ?? cc.telegram.fromId}. ` +
+      `Use telegram_read_chat / telegram_search to load buffered history` +
+      `${writeHint("telegram", canTelegramWrite(agent))}. Note: only messages received during router uptime are available.]`;
+  }
+  // Channels-registry only (no channel context) — still useful?
+  if (canChannels(agent)) {
+    return `[Use channels_resolve / channels_list_known to map human names → channel IDs.]`;
+  }
+  return null;
 }
 
 /** Compose full message text including quoted messages and media transcriptions */
@@ -148,7 +201,35 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   const route = { agent } as { agent: typeof agent; action?: undefined };
 
   const agentName = basename(route.agent.workspace);
-  const key = sessionKey(msg.channel, msg.from, msg.group, agentName);
+  // Include modelOverride in the session key so swapping models from the
+  // notch toolbar spawns a fresh SDK session with the new model. Without
+  // this, the cached session on the previous model is reused and the
+  // footer keeps reporting the old model id.
+  const baseKey = sessionKey(msg.channel, msg.from, msg.group, agentName);
+  const key = msg.modelOverride ? `${baseKey}:m=${msg.modelOverride}` : baseKey;
+
+  // When the notch toolbar selects a non-default model, clone the agent
+  // with the override so `askClaude` actually spawns the SDK on that
+  // model (the session key alone wasn't enough — without the cloned agent,
+  // the footer kept reporting whatever model the agent's YAML defaulted
+  // to). Cheap shallow copy since we only mutate `model`.
+  const effectiveAgent = msg.modelOverride
+    ? { ...route.agent, model: msg.modelOverride }
+    : route.agent;
+  route.agent = effectiveAgent;
+
+  // Populate the per-session conversation context consumed by in-process
+  // messaging MCPs (router/src/mcp/*). Done before composing the prompt so
+  // tool calls during this turn always see the *current* conversation.
+  if (msg.channelContext) {
+    const cc = msg.channelContext;
+    setSessionContext(key, {
+      ...(cc.discord ? { discord: { ...cc.discord, lastMessageId: cc.discord.messageId, lastMessageTs: msg.timestamp } } : {}),
+      ...(cc.whatsapp ? { whatsapp: { ...cc.whatsapp, lastMessageId: cc.whatsapp.messageId, lastMessageTs: msg.timestamp } } : {}),
+      ...(cc.telegram ? { telegram: { ...cc.telegram, lastMessageId: cc.telegram.messageId, lastMessageTs: msg.timestamp } } : {}),
+    });
+    gcSessionContexts();
+  }
 
   // Initialize timings (media phase already populated by connector if present)
   const timings: MessageTimings = msg.timings ?? { received: Date.now() };
@@ -197,6 +278,55 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
       messageForClaude += `\n\n[${imagePaths.length} image${imagePaths.length > 1 ? "s" : ""} attached — view with Read tool]\n${pathList}`;
     }
 
+    // Messaging-MCP nudge: when the agent has channel tools and the user's
+    // request likely needs surrounding context (group chat, mention with no
+    // explicit reply), tell the model where it is and which tools to reach for.
+    const ctxNudge = buildMessagingNudge(msg, route.agent);
+    if (ctxNudge) messageForClaude = `${ctxNudge}\n\n${messageForClaude}`;
+
+    // Local vision pre-pass (Moondream Station, on-device).
+    // If `vision-local` is enabled AND there's at least one image, run a
+    // short caption locally and — only if the user wrote a message
+    // alongside the image — also run a targeted VQA query. Results are
+    // injected as text context so the upstream model sees the textual
+    // brief before doing its own reasoning. Cheap silent fallback if the
+    // daemon is down — the rest of the flow is unaffected.
+    const localVisionTargets = canVisionLocal(route.agent)
+      ? (msg.media ?? []).filter(m => m.type === "image" && m.localPath).map(m => m.localPath as string)
+      : [];
+    if (localVisionTargets.length > 0) {
+      const vlStart = Date.now();
+      if (await visionAvailable()) {
+        const userQuestion = fullText.trim();
+        const askQuery = userQuestion.length > 0;
+        const blocks: string[] = [];
+        for (const imgPath of localVisionTargets) {
+          const cap = await visionCaption(imgPath, "short", 20_000);
+          if ("error" in cap) {
+            log.warn({ key, imgPath, err: cap.error }, "vision-local caption failed");
+            continue;
+          }
+          const lines = [`- ${imgPath}`, `  caption: ${cap.caption}`];
+          if (askQuery) {
+            const q = await visionQuery(imgPath, userQuestion, 20_000);
+            if (!("error" in q)) {
+              lines.push(`  Q: ${userQuestion.slice(0, 200)}`);
+              lines.push(`  A: ${q.answer}`);
+            }
+          }
+          blocks.push(lines.join("\n"));
+        }
+        if (blocks.length > 0) {
+          const backend = visionBackend();
+          const label = backend === "cloud" ? "Moondream Cloud (M3)" : "Moondream local (M2)";
+          messageForClaude += `\n\n[Vision pre-pass (${label}):\n${blocks.join("\n")}\n]`;
+          log.info({ key, images: blocks.length, ms: Date.now() - vlStart, backend }, "vision-local pre-pass done");
+        }
+      } else {
+        log.warn({ key }, "vision-local enabled but daemon not reachable on :2020");
+      }
+    }
+
     // Register job so we can notify the user if the router restarts mid-call
     const jobId = randomUUID();
     const replyTarget = msg.replyTarget;
@@ -227,8 +357,9 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
         },
       });
     }
-    const response = await askClaude(route.agent, messageForClaude, key)
-      .finally(() => endJob(jobId));
+    const response = await askClaude(route.agent, messageForClaude, key, undefined, {
+      onChunk: msg.onChunk,
+    }).finally(() => endJob(jobId));
     timings.llmEnd = Date.now();
     trackMessage(msg.channel);
 

@@ -27,6 +27,7 @@ import type { AgentConfig } from "../types";
 import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
 import { readMcpServers } from "./config-loader";
+import { buildMessagingMcps } from "../mcp";
 import { MEDIA_DIR } from "./media";
 import { issueToken, revokeToken } from "./notify-tokens";
 import { resetNotifyBudget, hasNotifyBudget, consumeNotifyBudget } from "./rate-limiter";
@@ -41,6 +42,17 @@ import {
 } from "./task-notification";
 import { getDeliveryFn } from "./cron";
 import { formatForChannel } from "./formatting";
+import { execFile as execFileCb } from "child_process";
+import { promisify } from "util";
+import {
+  recordTaskProgress,
+  recordTurnResult,
+  clearTaskProgress,
+  writeSessionSidecar,
+  removeSessionSidecar,
+} from "./contextInspector/index.js";
+
+const execFile = promisify(execFileCb);
 
 const log = logger.child({ module: "claude" });
 
@@ -115,6 +127,12 @@ export interface ProcessInfo {
 }
 
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+// First-event timeout: if the SDK subprocess doesn't emit ANY event within
+// this window after the first sendMessage, assume MCP init or model spin-up
+// is wedged and kill the session so the caller can retry on a fresh spawn.
+// Without this guard a stuck spawn ate the full MESSAGE_TIMEOUT_MS (30 min)
+// of silence before the user got an error.
+const FIRST_EVENT_TIMEOUT_MS = 90 * 1000;
 const MAX_LIFETIME_MS = 2 * 60 * 60 * 1000;
 const MESSAGE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -295,6 +313,14 @@ interface SdkSession {
   consumer: Promise<void>;
   pendingResolve: ((r: TurnResult) => void) | null;
   pendingReject: ((e: Error) => void) | null;
+  /**
+   * Optional per-turn callback fired for every assistant text DELTA as it
+   * arrives from the SDK. Used by streaming-TTS callers (notch connector
+   * with `JARVIS_TTS_LLM_STREAM=1`) to feed the Cartesia WS pipeline before
+   * the full reply is ready. Cleared when the turn resolves/rejects so it
+   * never leaks across turns. NOT invoked for tool_use, only `block.text`.
+   */
+  pendingOnChunk?: ((delta: string) => void) | null;
   /** Files created by Write/Edit during the current turn. */
   pendingFiles: string[];
   /** Text accumulated from assistant text blocks during the current turn. */
@@ -309,6 +335,11 @@ interface SdkSession {
   inheritUserScope: boolean;
   totalInputTokens: number;
   compactionCount: number;
+  /** True after the SDK subprocess emits its first event (system init,
+   *  assistant chunk, etc.). Used to detect wedged spawns. */
+  firstEventReceived: boolean;
+  /** Active first-event watchdog timer; cleared on first event or kill. */
+  firstEventTimer: NodeJS.Timeout | null;
   lastSummary?: string;
   notifiedTaskIds?: Set<string>;
   bgToolUseStarts?: Map<string, { startedAt: number; kind: string }>;
@@ -408,6 +439,98 @@ function startFcacheWatcher(): void {
 
 startFcacheWatcher();
 
+// ─── Context Inspector — sidecar lifecycle ───────────────────────────────────
+// Per-PID JSON files at ~/.claude/jarvis/active-sessions/<pid>.json link a
+// spawned Claude SDK process to its router sessionKey. discovery.ts reads
+// these to enrich LocalSession with sessionKey/agent/fullAccess fields.
+//
+// Why sidecar (not env-var-via-ps): cleaner filesystem read, no shell parsing
+// fragility, survives executable-name variation across SDK process variants.
+// MAJOR 5 fix from the plan-checker revision.
+
+/** sessionKey -> Set of child PIDs we've registered sidecar files for. */
+const sidecarPidsBySession = new Map<string, Set<number>>();
+
+/**
+ * Find direct child PIDs of the router process that look like Claude CLI
+ * processes. Mirrors the heuristic in localSessions/discovery.ts.
+ */
+async function findChildClaudePids(): Promise<number[]> {
+  try {
+    const { stdout } = await execFile("ps", ["-axo", "pid=,ppid=,args="], {
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const myPid = process.pid;
+    const pids: number[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const m = trimmed.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (!m) continue;
+      const pid = parseInt(m[1], 10);
+      const ppid = parseInt(m[2], 10);
+      const args = m[3];
+      if (ppid !== myPid) continue;
+      // Skip Electron / Claude.app GUI processes
+      if (/Claude\.app\//.test(args) || /Electron/.test(args)) continue;
+      // Match Claude CLI signatures (same pattern as discovery.ts isClaudeCliProcess)
+      if (
+        /(^|\/)claude($|\s)/.test(args) ||
+        /@anthropic-ai\/claude-code\//.test(args) ||
+        /\/claude-code\/.*cli\.(m?js|cjs)/.test(args)
+      ) {
+        pids.push(pid);
+      }
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Register sidecar files for all Claude child processes belonging to this
+ * session. Idempotent — re-registering a known PID is a no-op.
+ * Called on the FIRST task_progress event (proves SDK process is alive +
+ * discoverable via `ps`).
+ */
+async function registerSessionSidecars(s: SdkSession): Promise<void> {
+  const pids = await findChildClaudePids();
+  if (pids.length === 0) return;
+  let known = sidecarPidsBySession.get(s.sessionKey);
+  if (!known) {
+    known = new Set();
+    sidecarPidsBySession.set(s.sessionKey, known);
+  }
+  const parsed = parseSessionKey(s.sessionKey);
+  const agentName = parsed?.agent ?? "unknown";
+  for (const pid of pids) {
+    if (known.has(pid)) continue;
+    known.add(pid);
+    await writeSessionSidecar({
+      pid,
+      sessionKey: s.sessionKey,
+      agent: agentName,
+      workspace: s.workspace,
+      model: s.model,
+      resolvedModel: s.resolvedModel,
+      fullAccess: s.fullAccess,
+      inheritUserScope: s.inheritUserScope,
+      spawnedAt: Date.now(),
+    });
+  }
+}
+
+/** Remove all sidecar files for a session — called from killSession. */
+async function unregisterSessionSidecars(sessionKey: string): Promise<void> {
+  const known = sidecarPidsBySession.get(sessionKey);
+  if (!known) return;
+  for (const pid of known) {
+    await removeSessionSidecar(pid);
+  }
+  sidecarPidsBySession.delete(sessionKey);
+}
+
 // --- Build SDK Options from agent config ---
 function buildSdkOptions(opts: {
   model: string;
@@ -419,6 +542,10 @@ function buildSdkOptions(opts: {
   inheritUserScope?: boolean;
   isSubagent?: boolean;
   notify?: NotifyEnvContext;
+  /** Full agent config (passed through for in-process messaging MCPs). */
+  agent?: AgentConfig;
+  /** Session key (passed through for in-process messaging MCPs). */
+  sessionKey?: string;
 }): SdkOptions {
   const isReadonly = !opts.fullAccess && opts.tools.includes("fileAccess:readonly") && !opts.tools.includes("fileAccess:full");
   const permissionMode: "acceptEdits" | "bypassPermissions" = isReadonly ? "acceptEdits" : "bypassPermissions";
@@ -440,6 +567,16 @@ function buildSdkOptions(opts: {
         if (all[name]) filtered[name] = all[name] as SdkMcpServerConfig;
       }
       if (Object.keys(filtered).length > 0) mcpServers = filtered;
+    }
+  }
+
+  // In-process messaging MCPs (Discord/WhatsApp/Telegram/Channels). Built only
+  // when the agent has the corresponding tool. Subagents inherit nothing here —
+  // they're a separate spawn with their own toolset.
+  if (opts.agent && opts.sessionKey && !opts.isSubagent) {
+    const messagingMcps = buildMessagingMcps({ agent: opts.agent, sessionKey: opts.sessionKey });
+    if (Object.keys(messagingMcps).length > 0) {
+      mcpServers = { ...(mcpServers ?? {}), ...messagingMcps };
     }
   }
 
@@ -473,6 +610,13 @@ function buildSdkOptions(opts: {
     settingSources,
     systemPrompt,
     strictMcpConfig: true,
+    // Enable token-level delta streaming. Without this, the SDK delivers
+    // each turn's reply as one or two `assistant` events with the whole
+    // text already concatenated → notch chat fills "tutto in un pezzo".
+    // With it, we receive `stream_event` messages carrying
+    // `content_block_delta` (BetaTextDelta) chunks and can pipe them to
+    // the notch SSE display + Cartesia WS streaming session token-by-token.
+    includePartialMessages: true,
     env: buildSafeEnv(opts.agentEnv, { isSubagent: opts.isSubagent, notify: opts.notify }),
     ...(opts.effort ? { effort: opts.effort } : {}),
     ...(mcpServers ? { mcpServers } : {}),
@@ -583,6 +727,7 @@ function spawnSession(
   agentEnv?: Record<string, string>,
   inheritUserScope?: boolean,
   isSubagent?: boolean,
+  agent?: AgentConfig,
 ): SdkSession {
   let notifyToken: string | null = null;
   let notify: NotifyEnvContext | undefined;
@@ -596,6 +741,7 @@ function spawnSession(
 
   const sdkOpts = buildSdkOptions({
     model, tools, workspace, effort, fullAccess, agentEnv, inheritUserScope, isSubagent, notify,
+    agent, sessionKey: key,
   });
 
   const pushable = makePushable<SDKUserMessage>();
@@ -626,6 +772,8 @@ function spawnSession(
     inheritUserScope: inheritUserScope !== false,
     totalInputTokens: 0,
     compactionCount: 0,
+    firstEventReceived: false,
+    firstEventTimer: null,
     pid: null,
   };
 
@@ -634,9 +782,44 @@ function spawnSession(
       for await (const ev of q) {
         if (!s.alive) break;
         const e = ev as any;
+        if (!s.firstEventReceived) {
+          s.firstEventReceived = true;
+          if (s.firstEventTimer) { clearTimeout(s.firstEventTimer); s.firstEventTimer = null; }
+        }
         if (!s.resolvedModel) {
           const m = e.model ?? e.message?.model;
           if (typeof m === "string" && m.startsWith("claude-")) s.resolvedModel = m;
+        }
+
+        // ─── Context Inspector live signals ───────────────────────────────
+        // BOTH events feed the live-progress map:
+        //  - task_progress: running totalTokens (every step within a turn)
+        //  - result: per-field usage breakdown (one per turn, needed for cost)
+        // BLOCKER 1 fix from plan-checker: result tap MUST exist or cost calc
+        // is always undefined for router-spawned sessions.
+        if (e?.type === "system" && e?.subtype === "task_progress") {
+          const total = e?.usage?.total_tokens;
+          if (typeof total === "number" && total >= 0) {
+            recordTaskProgress(s.sessionKey, total);
+          }
+          // Opportunistic sidecar registration — first task_progress means
+          // the SDK process is alive and discoverable via `ps`.
+          if (!sidecarPidsBySession.has(s.sessionKey)) {
+            registerSessionSidecars(s).catch((err) => {
+              log.debug({ err: String(err), sessionKey: s.sessionKey }, "registerSessionSidecars failed (best-effort)");
+            });
+          }
+        }
+        if (e?.type === "result" && e?.usage) {
+          const u = e.usage;
+          if (typeof u.input_tokens === "number" && typeof u.output_tokens === "number") {
+            recordTurnResult(s.sessionKey, {
+              input_tokens: u.input_tokens ?? 0,
+              output_tokens: u.output_tokens ?? 0,
+              cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+              cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+            });
+          }
         }
 
         // Typed SDK error on the assistant message — surface it as the
@@ -646,7 +829,7 @@ function spawnSession(
         if (e.type === "assistant" && typeof e.error === "string") {
           if (s.pendingReject) {
             const reject = s.pendingReject;
-            s.pendingResolve = null;
+            s.pendingResolve = null; s.pendingOnChunk = null;
             s.pendingReject = null;
             const errName = e.error === "rate_limit" ? "RATE_LIMIT" : `SDK_ERROR_${e.error}`;
             reject(new Error(errName));
@@ -654,7 +837,31 @@ function spawnSession(
           continue;
         }
 
-        // Assistant message: collect text + track tool_use (Write/Edit + bg starts)
+        // Token-level streaming via includePartialMessages=true. The SDK
+        // wraps Anthropic's BetaRawMessageStreamEvent inside an
+        // SDKPartialAssistantMessage. We only fire the chunk callback for
+        // text deltas — tool_use deltas, message metadata, signature blocks
+        // etc. don't belong in the TTS / chat-display path.
+        if (e.type === "stream_event") {
+          const ev = (e as any).event;
+          if (
+            ev?.type === "content_block_delta" &&
+            ev?.delta?.type === "text_delta" &&
+            typeof ev.delta.text === "string" &&
+            ev.delta.text.length > 0 &&
+            s.pendingOnChunk
+          ) {
+            try { s.pendingOnChunk(ev.delta.text); }
+            catch (err) { log.warn({ err, key: s.sessionKey }, "pendingOnChunk threw (stream)"); }
+          }
+          continue;
+        }
+
+        // Assistant message: collect text + track tool_use (Write/Edit + bg starts).
+        // We do NOT fire pendingOnChunk here when partial-message streaming is
+        // active — the deltas have already been delivered above. Falling back
+        // to firing on the full block.text would emit duplicate text into
+        // Cartesia / the chat display.
         if (e.type === "assistant" && Array.isArray(e.message?.content)) {
           for (const block of e.message.content) {
             if (!block || typeof block !== "object") continue;
@@ -686,7 +893,7 @@ function spawnSession(
         // text.
         if (e.type === "result" && e.subtype && e.subtype !== "success" && s.pendingReject) {
           const reject = s.pendingReject;
-          s.pendingResolve = null;
+          s.pendingResolve = null; s.pendingOnChunk = null;
           s.pendingReject = null;
           const errs = Array.isArray(e.errors) ? e.errors.join("; ") : "";
           reject(new Error(`SDK_RESULT_${e.subtype}${errs ? ": " + errs.slice(0, 200) : ""}`));
@@ -705,7 +912,7 @@ function spawnSession(
           s.consecutiveTimeouts = 0;
           const resolve = s.pendingResolve;
           const files = [...s.pendingFiles];
-          s.pendingResolve = null;
+          s.pendingResolve = null; s.pendingOnChunk = null;
           s.pendingReject = null;
           s.pendingFiles = [];
           s.currentText = "";
@@ -726,7 +933,7 @@ function spawnSession(
       log.error({ err: err?.message, key: s.sessionKey }, "SDK consumer error");
       if (s.pendingReject) {
         const reject = s.pendingReject;
-        s.pendingResolve = null;
+        s.pendingResolve = null; s.pendingOnChunk = null;
         s.pendingReject = null;
         reject(err instanceof Error ? err : new Error(String(err)));
       }
@@ -747,17 +954,23 @@ function spawnSession(
 function cleanupTimers(s: SdkSession): void {
   if (s.inactivityTimer) { clearTimeout(s.inactivityTimer); s.inactivityTimer = null; }
   if (s.lifetimeTimer) { clearTimeout(s.lifetimeTimer); s.lifetimeTimer = null; }
+  if (s.firstEventTimer) { clearTimeout(s.firstEventTimer); s.firstEventTimer = null; }
 }
 
 function killSession(s: SdkSession): void {
   s.alive = false;
   cleanupTimers(s);
+  // Context Inspector cleanup: drop live progress + sidecar files for this session.
+  clearTaskProgress(s.sessionKey);
+  unregisterSessionSidecars(s.sessionKey).catch((err) => {
+    log.debug({ err: String(err), sessionKey: s.sessionKey }, "unregisterSessionSidecars failed (best-effort)");
+  });
   // Reject a pending caller now — otherwise an external kill (lifetime timer,
   // killProcessByKey, killAllProcesses) leaves askClaude waiting up to
   // MESSAGE_TIMEOUT_MS for a result that will never arrive.
   if (s.pendingReject) {
     const reject = s.pendingReject;
-    s.pendingResolve = null;
+    s.pendingResolve = null; s.pendingOnChunk = null;
     s.pendingReject = null;
     reject(new Error("PROCESS_DIED"));
   }
@@ -785,6 +998,7 @@ function getOrCreateSession(
   tools: string[] = [], effort?: "low" | "medium" | "high" | "max",
   fullAccess?: boolean, agentEnv?: Record<string, string>,
   inheritUserScope?: boolean, isSubagent?: boolean,
+  agent?: AgentConfig,
 ): SdkSession {
   const existing = sessions.get(key);
   if (existing && existing.alive) {
@@ -817,7 +1031,7 @@ function getOrCreateSession(
   const mcpCount = tools.filter(t => t.startsWith("mcp:")).length;
   log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false, isSubagent: !!isSubagent }, "Spawning new SDK session");
 
-  const s = spawnSession(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent);
+  const s = spawnSession(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent, agent);
   const pending = pendingSummaries.get(key);
   if (pending) s.compactionCount = pending.compactionCount;
   sessions.set(key, s);
@@ -828,6 +1042,7 @@ function sendMessage(
   s: SdkSession,
   message: string,
   images?: ImageBlock[],
+  onChunk?: (delta: string) => void,
 ): Promise<TurnResult> {
   return new Promise((resolve, reject) => {
     if (!s.alive) {
@@ -847,7 +1062,31 @@ function sendMessage(
     }
     s.pendingResolve = resolve;
     s.pendingReject = reject;
+    s.pendingOnChunk = onChunk ?? null;
     s.lastActivity = Date.now();
+
+    // Arm a first-event watchdog only on the first turn of a new SDK
+    // subprocess. If the spawn is wedged (e.g. a stdio MCP that never
+    // completes its init handshake), tear it down quickly so the caller
+    // can fall back / retry instead of waiting MESSAGE_TIMEOUT_MS.
+    if (!s.firstEventReceived && !s.firstEventTimer) {
+      s.firstEventTimer = setTimeout(() => {
+        s.firstEventTimer = null;
+        if (s.firstEventReceived || !s.alive) return;
+        log.warn({ key: s.sessionKey, model: s.model }, "SDK first-event timeout — killing wedged spawn");
+        // Reject with a distinct error so askClaudeInternal can retry the
+        // SAME model on a fresh spawn instead of advancing to fallbacks
+        // (silently downgrading opus → haiku is unacceptable).
+        if (s.pendingReject) {
+          const reject = s.pendingReject;
+          s.pendingResolve = null; s.pendingOnChunk = null;
+          s.pendingReject = null;
+          reject(new Error("INIT_TIMEOUT"));
+        }
+        killSession(s);
+        sessions.delete(s.sessionKey);
+      }, FIRST_EVENT_TIMEOUT_MS);
+    }
 
     let content: any;
     if (images && images.length > 0) {
@@ -970,7 +1209,17 @@ export async function askClaude(
   message: string,
   key: string,
   images?: ImageBlock[],
-  opts?: { isSubagent?: boolean },
+  opts?: {
+    isSubagent?: boolean;
+    /**
+     * Per-turn assistant text DELTA callback. Fires for every text block as it
+     * arrives from the SDK, before the full reply is ready. Used by streaming
+     * TTS callers (notch connector with `JARVIS_TTS_LLM_STREAM=1`) to feed the
+     * Cartesia WS pipeline incrementally. Errors thrown by the callback are
+     * caught and logged — they never break turn handling.
+     */
+    onChunk?: (delta: string) => void;
+  },
 ): Promise<ClaudeResponse> {
   const prev = queues.get(key) ?? Promise.resolve();
   let resolveQueue!: () => void;
@@ -990,7 +1239,7 @@ async function askClaudeInternal(
   message: string,
   key: string,
   images?: ImageBlock[],
-  opts?: { isSubagent?: boolean },
+  opts?: { isSubagent?: boolean; onChunk?: (delta: string) => void },
 ): Promise<ClaudeResponse> {
   const models = [agent.model, ...(agent.fallbacks ?? [])].filter(Boolean) as string[];
   if (models.length === 0) models.push("opus");
@@ -998,16 +1247,22 @@ async function askClaudeInternal(
   const envContext = loadEnvContext(agent.env);
   const fullMessage = envContext ? `${envContext}\n\n${message}` : message;
 
+  // Per-spawn init-timeout retry budget: a wedged MCP init can happen on a
+  // fresh spawn, but a SECOND wedge in the same call almost certainly means
+  // a real environmental problem — surface it to the user instead of looping.
+  let initTimeoutRetries = 0;
+  const MAX_INIT_TIMEOUT_RETRIES = 1;
+
   for (let i = 0; i < models.length; i++) {
     const model = resolveModel(models[i]);
     try {
       const tools = agent.tools ?? [];
-      let s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+      let s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
 
       if (s.model !== model) {
         killSession(s);
         sessions.delete(key);
-        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
       }
 
       if (s.alive && s.totalInputTokens > 0 && shouldCompact(s.totalInputTokens, s.model)) {
@@ -1017,12 +1272,24 @@ async function askClaudeInternal(
         } else {
           await compactSession(s, key);
         }
-        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent);
+        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
       }
 
-      return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, images);
+      return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, images, opts?.onChunk);
     } catch (err: any) {
       const errMsg = err?.message ?? "";
+      if (errMsg === "INIT_TIMEOUT") {
+        const s = sessions.get(key);
+        if (s) { killSession(s); sessions.delete(key); }
+        if (initTimeoutRetries < MAX_INIT_TIMEOUT_RETRIES) {
+          initTimeoutRetries++;
+          log.warn({ key, model, attempt: initTimeoutRetries }, "Init timeout — retrying same model on fresh spawn (no fallback)");
+          i--; // retry same model index
+          continue;
+        }
+        log.error({ key, model }, "Init timeout persisted after retry — surfacing to caller");
+        throw new Error(`Lo spawn di ${model} è bloccato all'init (probabile MCP wedged). Riprova tra poco — non sto facendo fallback automatico a un modello più debole.`);
+      }
       if (errMsg === "TIMEOUT") {
         log.warn({ key, model }, "Message timed out (sdk)");
         const s = sessions.get(key);
@@ -1058,6 +1325,7 @@ async function doSendWithTimeout(
   charsIn: number,
   startTime: number,
   images?: ImageBlock[],
+  onChunk?: (delta: string) => void,
 ): Promise<ClaudeResponse> {
   let message = inputMessage;
   log.info({ key, model: s.model, alive: s.alive, hasImages: !!images?.length }, "Sending message to SDK session");
@@ -1082,12 +1350,12 @@ async function doSendWithTimeout(
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(() => {
       s.consecutiveTimeouts++;
-      if (s.pendingReject) { s.pendingResolve = null; s.pendingReject = null; }
+      if (s.pendingReject) { s.pendingResolve = null; s.pendingOnChunk = null; s.pendingReject = null; }
       reject(new Error("TIMEOUT"));
     }, MESSAGE_TIMEOUT_MS);
   });
 
-  const result = await Promise.race([sendMessage(s, message, images), timeoutPromise]);
+  const result = await Promise.race([sendMessage(s, message, images, onChunk), timeoutPromise]);
 
   resetInactivityTimer(key, s);
   trackUsage(key, charsIn, result.text.length, Date.now() - startTime, {
@@ -1299,4 +1567,39 @@ export function getProcesses(): ProcessInfo[] {
  *  with the CLI dispatcher's public surface (used by dashboard diagnostic). */
 export function resolveCliPath(): string {
   return "(sdk: bundled cli.js)";
+}
+
+// ─── Context Inspector — read-only metadata exports for the API layer ───────
+
+/**
+ * Read-only access to a router-spawned session's metadata for the API layer.
+ * Returns null if no session by that key (session has been killed or never existed).
+ */
+export function getSessionMetadata(sessionKey: string): {
+  workspace: string;
+  model: string;
+  resolvedModel: string | null;
+  fullAccess: boolean;
+  inheritUserScope: boolean;
+  totalInputTokens: number;
+  compactionCount: number;
+  alive: boolean;
+} | null {
+  const s = sessions.get(sessionKey);
+  if (!s) return null;
+  return {
+    workspace: s.workspace,
+    model: s.model,
+    resolvedModel: s.resolvedModel,
+    fullAccess: s.fullAccess,
+    inheritUserScope: s.inheritUserScope,
+    totalInputTokens: s.totalInputTokens,
+    compactionCount: s.compactionCount,
+    alive: s.alive,
+  };
+}
+
+/** List all live router session keys (used by the cruft endpoint + dashboard). */
+export function listSessionKeys(): string[] {
+  return [...sessions.keys()];
 }

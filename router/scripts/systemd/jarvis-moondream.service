@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis Moondream Station local-vision inference server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.claude/jarvis/router
+ExecStart=__HOME__/.claude/jarvis/router/scripts/moondream-env/bin/python -u scripts/moondream-server.py
+Restart=always
+RestartSec=2
+Environment=MOONDREAM_MODEL=moondream-2
+Environment=MOONDREAM_PORT=2020
+Environment=MOONDREAM_HOST=127.0.0.1
+Environment=MOONDREAM_TIMEOUT=180
+Environment=HF_TOKEN=skip
+StandardOutput=append:__HOME__/.claude/jarvis/logs/moondream.log
+StandardError=append:__HOME__/.claude/jarvis/logs/moondream.err.log
+
+[Install]
+WantedBy=default.target

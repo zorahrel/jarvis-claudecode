@@ -30,14 +30,25 @@ managed by the tray app if they provide a `launchd:` config.
 ├── router/                    # Main router
 │   ├── src/
 │   │   ├── index.ts          # Entry point
-│   │   ├── connectors/       # TG, WA, Discord
+│   │   ├── connectors/       # TG, WA, Discord (each exposes static getInstance() for MCPs)
+│   │   ├── mcp/              # In-process MCP servers (see "Messaging MCPs" below)
+│   │   │   ├── index.ts      # buildMessagingMcps() — agent-aware MCP factory
+│   │   │   ├── discord.ts    # discord.* tools (deep history via REST API)
+│   │   │   ├── whatsapp.ts   # whatsapp.* tools (history via Baileys events + backfill)
+│   │   │   ├── telegram.ts   # telegram.* tools (ring-buffer history)
+│   │   │   ├── channels.ts   # channels.* — cross-channel registry
+│   │   │   └── _helpers.ts   # scope predicates + audit log
 │   │   ├── services/
-│   │   │   ├── claude.ts     # Persistent process manager
-│   │   │   ├── handler.ts    # Message handler + media compose
-│   │   │   ├── media.ts      # Whisper, vision, file extract
-│   │   │   ├── memory.ts     # ChromaDB + OMEGA client
-│   │   │   ├── router.ts     # Route matching
-│   │   │   ├── services.ts   # Service registry + launchd plist builder
+│   │   │   ├── claude.ts            # Persistent process manager + MCP wiring
+│   │   │   ├── handler.ts           # Message handler + media compose + nudge
+│   │   │   ├── connectors.ts        # Typed accessors for live connector instances
+│   │   │   ├── session-context.ts   # Per-session conversation metadata for MCPs
+│   │   │   ├── message-buffer.ts    # Telegram ring buffer (persisted to state/)
+│   │   │   ├── whatsapp-history.ts  # WA per-chat JSONL store fed by Baileys events
+│   │   │   ├── media.ts           # Whisper, vision, file extract
+│   │   │   ├── memory.ts          # ChromaDB + OMEGA client
+│   │   │   ├── router.ts          # Route matching
+│   │   │   ├── services.ts        # Service registry + launchd plist builder
 │   │   │   ├── config-loader.ts
 │   │   │   └── logger.ts
 │   │   ├── dashboard/
@@ -72,8 +83,44 @@ Routes are evaluated in order: first match wins. Include a catch-all
 ### Capabilities per route
 ```
 vision, voice, email, calendar, subagents, fileAccess,
-webSearch, memory, documents, config, launchAgents, mcp
+webSearch, memory, documents, config, launchAgents, mcp,
+discord, discord:write, whatsapp, whatsapp:write,
+telegram, telegram:write, channels
 ```
+
+## Messaging MCPs (in-process)
+
+Each connector also exposes its conversation surface as an MCP server inside
+the router process. Tool calls reuse the live `discord.js` / Baileys / `grammy`
+handles via `services/connectors.ts` — no extra processes, no extra bot tokens,
+no extra ports. See `INTEGRATIONS.md` for the full tool matrix and security
+model.
+
+```
+askClaude(agent, message, sessionKey)
+  → buildSdkOptions({ ..., agent, sessionKey })
+    → buildMessagingMcps({ agent, sessionKey })
+      → if (agent has 'discord'    tool) createDiscordMcp(...)
+      → if (agent has 'whatsapp'   tool) createWhatsappMcp(...)
+      → if (agent has 'telegram'   tool) createTelegramMcp(...)
+      → if (agent has 'channels'   tool) createChannelsMcp(...)
+    → SDK attaches MCPs alongside external (~/.claude.json) MCPs
+  → tools close over (agent.scope, sessionKey)
+    → at call time read services/session-context.ts for current channel/JID
+    → enforce per-route allowedGuilds / allowedJids / denyChannels
+    → enforce crossChatWriteAllowed for write tools
+    → audit log every call (writes at info, reads at debug)
+```
+
+WhatsApp history is captured by `services/whatsapp-history.ts` from the live
+Baileys session — `messaging-history.set` (initial ~14d dump on pair),
+`messages.upsert` (live), and `sock.fetchMessageHistory()` for on-demand
+backfill. Persisted as per-chat JSONL under `state/whatsapp-history/`. No
+second authentication, no separate process.
+
+Telegram reads from `services/message-buffer.ts` (ring buffer persisted to
+`state/telegram-buffer.json`, populated by the connector on every received
+message during router uptime).
 
 ## Media Pipeline
 ```
