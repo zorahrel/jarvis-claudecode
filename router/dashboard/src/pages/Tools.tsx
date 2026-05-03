@@ -93,6 +93,43 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
 
   useEffect(() => { loadMcpStatus() }, [loadMcpStatus])
 
+  // Per-server action state — disable button + show spinner while in flight.
+  const [mcpActionInflight, setMcpActionInflight] = useState<Record<string, "auth" | "restart" | null>>({})
+
+  const authenticateMcp = useCallback(async (name: string) => {
+    setMcpActionInflight(prev => ({ ...prev, [name]: "auth" }))
+    try {
+      const r = await apiFetch<{ ok: boolean; reason?: string }>("/api/mcp/authenticate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      })
+      onToast?.(r.ok ? `${name}: authenticated` : `${name}: ${r.reason ?? "auth failed"}`, r.ok ? "success" : "error")
+    } catch (e: any) {
+      onToast?.(`${name}: ${e?.message ?? "auth failed"}`, "error")
+    } finally {
+      setMcpActionInflight(prev => ({ ...prev, [name]: null }))
+      loadMcpStatus()
+    }
+  }, [loadMcpStatus, onToast])
+
+  const restartMcp = useCallback(async (name: string) => {
+    setMcpActionInflight(prev => ({ ...prev, [name]: "restart" }))
+    try {
+      const r = await apiFetch<{ ok: boolean; killed?: string; error?: string }>("/api/mcp/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      })
+      onToast?.(r.ok ? `${name}: restarted (killed ${r.killed})` : `${name}: ${r.error ?? "restart failed"}`, r.ok ? "success" : "error")
+    } catch (e: any) {
+      onToast?.(`${name}: ${e?.message ?? "restart failed"}`, "error")
+    } finally {
+      setMcpActionInflight(prev => ({ ...prev, [name]: null }))
+      loadMcpStatus()
+    }
+  }, [loadMcpStatus, onToast])
+
   // Email/Calendar account management
   const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([])
   const [addAccountOpen, setAddAccountOpen] = useState(false)
@@ -277,6 +314,34 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                     </div>
                   ) : null}
 
+                  {cat === 'MCP' && (() => {
+                    const serverName = t.id.replace(/^mcp:/, '')
+                    const st = mcpStatus[serverName]
+                    if (!st || st.status === 'connected') return null
+                    const inflight = mcpActionInflight[serverName]
+                    return (
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }} onClick={e => e.stopPropagation()}>
+                        {st.status === 'auth' && (
+                          <Button
+                            size="xs"
+                            variant="primary"
+                            disabled={!!inflight}
+                            onClick={() => authenticateMcp(serverName)}
+                          >
+                            {inflight === 'auth' ? 'Authenticating…' : 'Authenticate'}
+                          </Button>
+                        )}
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          disabled={!!inflight}
+                          onClick={() => restartMcp(serverName)}
+                        >
+                          {inflight === 'restart' ? 'Restarting…' : 'Restart'}
+                        </Button>
+                      </div>
+                    )
+                  })()}
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                     <Badge tone="accent" size="xs">{toolRoutesCount(t.id)} routes</Badge>
                     {(agentsByTool[t.id] || []).length > 0 && (

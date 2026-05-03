@@ -14,6 +14,7 @@ import { logger } from "./services/logger";
 import { activeCount, activeJobs, loadPersistedJobs, clearPersistedJobs, type PendingJob } from "./services/pending-jobs";
 import { killAllProcesses } from "./services/claude";
 import { ensureHooksInstalled } from "./services/localSessions";
+import { startMcpStatusWatcher } from "./services/mcp-status";
 
 const log = logger.child({ module: "main" });
 
@@ -168,6 +169,11 @@ async function main() {
   // Install jarvis-control status hooks for local session discovery.
   // Best-effort — failure just means the dashboard falls back to heuristic status.
   ensureHooksInstalled().catch((err) => log.warn({ err }, "hook install failed"));
+
+  // Cache MCP server health (claude mcp list) so buildSdkOptions can skip
+  // needs-auth / failed servers BEFORE spawning sessions, avoiding OAuth
+  // popup loops. Refreshes every 60s + on-demand from dashboard endpoints.
+  startMcpStatusWatcher();
 
   // Start dashboard
   startDashboard(3340);
