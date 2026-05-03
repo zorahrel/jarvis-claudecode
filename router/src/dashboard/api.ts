@@ -615,40 +615,84 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     try {
       const body = await parseBody(req) as { name?: string };
       if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
+      const target = listMcpStatus().find(s => s.name === body.name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+
+      // Two stores must be in sync for the SDK-spawned mcp-remote to find a
+      // valid token: claude's own fcache + mcp-remote's `~/.mcp-auth/`. The
+      // dashboard's previous "click to auth" path only triggered claude's
+      // half. Spawn `npx mcp-remote URL` directly so it writes to its own
+      // store, which is what the SDK will read on the next session spawn.
+      // Only works for stdio entries whose command is `npx mcp-remote URL`.
+      const m = target.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
+      if (!m) {
+        return json(req, res, {
+          ok: false,
+          reason: `not an mcp-remote-based server (target: ${target.target}). For non-OAuth servers run \`claude mcp\` interactively.`,
+        });
+      }
+      const url = m[1];
       const { spawn } = await import("child_process");
-      const cli = resolveCliPath();
-      // Use `claude` itself for the auth flow — it knows how to dispatch to
-      // each registered MCP's auth provider. We pass the server name so the
-      // CLI scopes the operation. If the CLI doesn't support a non-interactive
-      // auth subcommand, fall back to `mcp list` which itself triggers auth
-      // for needs-auth servers (single connection, single popup).
-      const child = spawn(cli, ["mcp", "list"], { stdio: ["ignore", "pipe", "pipe"] });
-      const start = Date.now();
-      const TIMEOUT_MS = 120_000;
-      let stdout = ""; let stderr = "";
-      child.stdout?.on("data", b => { stdout += b.toString("utf8"); });
-      child.stderr?.on("data", b => { stderr += b.toString("utf8"); });
-      const done = await new Promise<{ ok: boolean; reason?: string }>((resolve) => {
-        const timer = setTimeout(() => {
-          try { child.kill("SIGTERM"); } catch { /* ignore */ }
-          resolve({ ok: false, reason: "timeout (browser tab open?)" });
-        }, TIMEOUT_MS);
-        child.on("error", err => {
-          clearTimeout(timer);
-          resolve({ ok: false, reason: err.message });
-        });
-        child.on("close", () => {
-          clearTimeout(timer);
-          resolve({ ok: true });
-        });
+
+      // mcp-remote in stdio mode runs forever; we keep it alive long enough for
+      // the user to complete OAuth in the browser tab, then kill it. Tokens are
+      // persisted to ~/.mcp-auth/ as soon as OAuth completes, so a kill after
+      // that point is safe.
+      const child = spawn("npx", ["mcp-remote", url], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
       });
-      // Refresh cache regardless — auth state likely changed.
-      const { refreshMcpStatus } = await import("../services/mcp-status");
+      const start = Date.now();
+      const TIMEOUT_MS = 180_000; // 3 min — enough to log in slowly
+      let stderrBuf = "";
+      child.stdout?.on("data", () => { /* drain */ });
+      child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
+
+      // Watch ~/.mcp-auth/mcp-remote-*/ for a fresh tokens.json — that's the
+      // signal that OAuth completed. Polls every 1s; gives up at TIMEOUT_MS.
+      const { readdirSync, statSync } = await import("fs");
+      const { join } = await import("path");
+      const HOME = process.env.HOME ?? "";
+      const authRoot = join(HOME, ".mcp-auth");
+      const baselineMtimes = new Map<string, number>();
+      try {
+        for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+          for (const f of readdirSync(join(authRoot, verDir))) {
+            if (f.endsWith("_tokens.json")) {
+              try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const tokenAppeared = await new Promise<boolean>((resolve) => {
+        const deadline = Date.now() + TIMEOUT_MS;
+        const interval = setInterval(() => {
+          if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
+          try {
+            for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+              for (const f of readdirSync(join(authRoot, verDir))) {
+                if (!f.endsWith("_tokens.json")) continue;
+                const key = `${verDir}/${f}`;
+                const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
+                const baseline = baselineMtimes.get(key);
+                if (baseline === undefined || mtime > baseline) {
+                  clearInterval(interval); resolve(true); return;
+                }
+              }
+            }
+          } catch { /* ignore */ }
+        }, 1000);
+        child.on("close", () => { clearInterval(interval); resolve(false); });
+      });
+
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
       await refreshMcpStatus();
       json(req, res, {
-        ok: done.ok,
+        ok: tokenAppeared,
+        reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
         durationMs: Date.now() - start,
-        reason: done.reason,
         name: body.name,
       });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
