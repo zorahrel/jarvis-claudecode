@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from 'react'
+import { navigate } from '../lib/url-state'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
 import { DrillDownCard } from '../components/DrillDownCard'
@@ -69,7 +70,7 @@ export function Overview(_props: { onToast: (msg: string, type: 'success' | 'err
   const rt = responseTimes || { recent: [], avgWallMs: 0, avgApiMs: 0, count1h: 0, sparkline: '' }
 
   const openSession = (key: string) => {
-    window.location.hash = `#/sessions?filter=key:${encodeURIComponent(key)}`
+    navigate(`sessions?filter=key:${encodeURIComponent(key)}`)
   }
 
   return (
@@ -221,7 +222,7 @@ export function Overview(_props: { onToast: (msg: string, type: 'success' | 'err
           title="Active Sessions"
           count={processes.length > 0 ? processes.length : undefined}
           action={
-            <a href="#sessions" style={{ fontSize: 12, color: 'var(--accent-bright)', textDecoration: 'none' }}>
+            <a href="/sessions" style={{ fontSize: 12, color: 'var(--accent-bright)', textDecoration: 'none' }}>
               View all →
             </a>
           }
@@ -237,7 +238,7 @@ export function Overview(_props: { onToast: (msg: string, type: 'success' | 'err
             footer={
               processes.length > 5 ? (
                 <a
-                  href="#sessions"
+                  href="/sessions"
                   style={{
                     display: 'block',
                     padding: '8px 14px',
@@ -263,7 +264,7 @@ export function Overview(_props: { onToast: (msg: string, type: 'success' | 'err
             title="CLI Sessions"
             count={data.cliSessions.length}
             action={
-              <a href="#sessions" style={{ fontSize: 12, color: 'var(--accent-bright)', textDecoration: 'none' }}>
+              <a href="/sessions" style={{ fontSize: 12, color: 'var(--accent-bright)', textDecoration: 'none' }}>
                 View all →
               </a>
             }

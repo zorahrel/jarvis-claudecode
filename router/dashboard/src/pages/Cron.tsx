@@ -366,7 +366,7 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                   {cs.delivery && (
                     <Tooltip content={`Target: ${cs.delivery.channel} → ${cs.delivery.target}`} placement="top">
                       <a
-                        href={`#/channels?focus=${encodeURIComponent(cs.delivery.channel)}`}
+                        href={`/channels?focus=${encodeURIComponent(cs.delivery.channel)}`}
                         onClick={(e) => e.stopPropagation()}
                         style={{
                           fontSize: 10,
@@ -476,7 +476,7 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                         <dt style={dt}>Target</dt>
                         <dd style={dd}>
                           <a
-                            href={`#/channels?focus=${encodeURIComponent(cronPanelData.delivery.channel)}`}
+                            href={`/channels?focus=${encodeURIComponent(cronPanelData.delivery.channel)}`}
                             style={{ color: 'var(--accent-bright)', textDecoration: 'none' }}
                           >
                             {cronPanelData.delivery.channel}

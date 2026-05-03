@@ -274,15 +274,34 @@ export function getRouteTools(routeIdx: number): string[] {
   return route?.agent?.tools ?? [];
 }
 
-/** Build a map: toolId → routeIndices that use it */
+/** Build a map: toolId → routeIndices that use it.
+ *  Routes whose agent has `fullAccess: true` count as users of EVERY MCP
+ *  in `~/.claude.json` (the SDK auto-attaches them at session spawn) and
+ *  every memory/email/calendar/etc tool they're allowed. We expand them
+ *  here so the dashboard's "N routes use this" badge is honest — otherwise
+ *  shared resources like `mcp:zenda` show "0 routes" even though jarvis
+ *  (fullAccess) actually pulls them in.
+ */
 export function getToolRouteMap(): Record<string, number[]> {
   const config = getConfig();
+  const allMcpNames = Object.keys(readMcpServers()).map(n => `mcp:${n}`);
   const map: Record<string, number[]> = {};
   for (let i = 0; i < config.routes.length; i++) {
-    const tools = config.routes[i]?.agent?.tools ?? [];
+    const route = config.routes[i];
+    const agent = route?.agent;
+    const tools = agent?.tools ?? [];
+    const fullAccess = agent?.fullAccess === true;
+    // Always credit explicitly-listed tools.
     for (const t of tools) {
       if (!map[t]) map[t] = [];
-      map[t].push(i);
+      if (!map[t].includes(i)) map[t].push(i);
+    }
+    // fullAccess routes implicitly use every external MCP.
+    if (fullAccess) {
+      for (const mcpToolId of allMcpNames) {
+        if (!map[mcpToolId]) map[mcpToolId] = [];
+        if (!map[mcpToolId].includes(i)) map[mcpToolId].push(i);
+      }
     }
   }
   return map;
