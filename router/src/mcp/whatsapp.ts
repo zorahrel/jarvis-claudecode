@@ -268,6 +268,48 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
   );
 
+  const sendPoll = tool(
+    "whatsapp_send_poll",
+    "Send a native WhatsApp poll to a chat. Recipients vote by tapping options in the WhatsApp UI. Defaults to the current chat.",
+    {
+      jid: z.string().optional().describe("Chat JID; defaults to current chat."),
+      question: z.string().min(1).max(255).describe("Poll question / title."),
+      options: z.array(z.string().min(1).max(100)).min(2).max(12).describe("Poll options (2-12)."),
+      multi_select: z.boolean().default(false).describe("Allow multiple selections per voter."),
+    },
+    async (args) => {
+      const start = Date.now();
+      if (!canWrite) return fail("write requires `whatsapp:write` tool");
+      const sock = whatsappSocket();
+      if (!sock) return fail("WhatsApp socket unavailable");
+      const cur = currentJid();
+      const jid = args.jid ?? cur;
+      if (!jid) return fail("no jid and no current WhatsApp chat");
+      const scopeGate = whatsappJidAllowed(scope, cur, jid);
+      if (!scopeGate.allowed) return fail(scopeGate.reason);
+      const xGate = crossChatWriteAllowed(scope, cur, jid);
+      if (!xGate.allowed) return fail(xGate.reason);
+      try {
+        const s = sock as { sendMessage: (jid: string, content: { poll: { name: string; values: string[]; selectableCount: number } }) => Promise<{ key?: { id?: string } } | undefined> };
+        const sent = await s.sendMessage(jid, {
+          poll: {
+            name: args.question,
+            values: args.options,
+            // 0 = unlimited (multi-choice); 1 = single-choice
+            selectableCount: args.multi_select ? 0 : 1,
+          },
+        });
+        const id = sent?.key?.id ?? "";
+        auditTool({ server: SERVER, tool: "whatsapp_send_poll", sessionKey, args: { jid, question: args.question, options: args.options.length, multi: args.multi_select }, ok: true, durationMs: Date.now() - start, isWrite: true, resultSummary: id });
+        return ok(`Sent poll ${id} to ${jid} with ${args.options.length} options`);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        auditTool({ server: SERVER, tool: "whatsapp_send_poll", sessionKey, ok: false, durationMs: Date.now() - start, isWrite: true, errorReason: reason });
+        return fail(reason);
+      }
+    },
+  );
+
   const react = tool(
     "whatsapp_react",
     "Add a reaction emoji to a WhatsApp message. Send empty string to remove.",
@@ -336,7 +378,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
   );
 
   const tools: Array<SdkMcpToolDefinition<any>> = [readChat, search, listChats, listGroups, getGroupInfo, resolvePhone];
-  if (canWrite) tools.push(sendMessage, react, backfill);
+  if (canWrite) tools.push(sendMessage, sendPoll, react, backfill);
 
   return createSdkMcpServer({
     name: SERVER,
