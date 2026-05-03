@@ -13,6 +13,10 @@ agents/
 
 # Runtime data
 memory/
+state/
+**/moondream-env/
+**/*-venv/
+**/__pycache__/
 media/
 logs/
 data/
