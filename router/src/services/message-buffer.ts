@@ -12,14 +12,10 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
 import { logger } from "./logger";
+import { STATE_DIR, TELEGRAM_BUFFER_FILE as BUFFER_FILE } from "./paths";
 
 const log = logger.child({ module: "message-buffer" });
-
-const HOME = process.env.HOME ?? "";
-const STATE_DIR = join(HOME, ".claude/jarvis/state");
-const BUFFER_FILE = join(STATE_DIR, "telegram-buffer.json");
 const MAX_PER_CHAT = 200;
 const MAX_CHATS = 500;
 const PERSIST_DEBOUNCE_MS = 2000;

@@ -20,7 +20,7 @@
 import { z } from "zod";
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance, type SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentConfig } from "../types";
-import { whatsappSocket } from "../services/connectors";
+import { whatsappSocketApi } from "../services/connectors";
 import { getSessionContext } from "../services/session-context";
 import * as wa from "../services/whatsapp-history";
 import {
@@ -116,11 +116,10 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
     async (args) => {
       const start = Date.now();
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable (not paired or disconnected)");
       try {
-        const s = sock as { groupFetchAllParticipating: () => Promise<Record<string, { id: string; subject?: string; participants?: Array<{ id: string }>; creation?: number; desc?: string }>> };
-        const all = await s.groupFetchAllParticipating();
+        const all = await sock.groupFetchAllParticipating();
         const q = args.query?.toLowerCase();
         const cur = currentJid();
         const out = Object.values(all)
@@ -152,18 +151,14 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
     async (args) => {
       const start = Date.now();
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable");
       const cur = currentJid();
       const gate = whatsappJidAllowed(scope, cur, args.jid);
       if (!gate.allowed) return fail(gate.reason);
       try {
-        const s = sock as {
-          groupMetadata: (jid: string) => Promise<{ id: string; subject?: string; subjectOwner?: string; subjectTime?: number; creation?: number; owner?: string; desc?: string; descOwner?: string; participants: Array<{ id: string; admin?: "admin" | "superadmin" | null; lid?: string }> }>;
-          signalRepository?: { lidMapping?: { getPNForLID: (lid: string) => Promise<string | null> } };
-        };
-        const meta = await s.groupMetadata(args.jid);
-        const lidStore = s.signalRepository?.lidMapping;
+        const meta = await sock.groupMetadata(args.jid);
+        const lidStore = sock.signalRepository?.lidMapping;
         // Resolve LID participants to phone-number JIDs in parallel.
         const participants = await Promise.all(meta.participants.map(async p => {
           const isLid = p.id.endsWith("@lid");
@@ -214,13 +209,12 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     },
     async (args) => {
       const start = Date.now();
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable");
       const digits = args.phone.replace(/[^0-9]/g, "");
       if (digits.length < 6) return fail(`phone "${args.phone}" doesn't look like a valid number`);
       try {
-        const s = sock as { onWhatsApp: (...numbers: string[]) => Promise<Array<{ jid: string; exists: boolean }> | undefined> };
-        const result = await s.onWhatsApp(digits);
+        const result = await sock.onWhatsApp(digits);
         const hit = result?.[0];
         auditTool({ server: SERVER, tool: "whatsapp_resolve_phone", sessionKey, args: { phone: digits }, ok: true, durationMs: Date.now() - start, resultSummary: hit?.exists ? hit.jid : "not registered" });
         if (!hit || !hit.exists) return okJson({ phone: digits, exists: false });
@@ -245,7 +239,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     async (args) => {
       const start = Date.now();
       if (!canWrite) return fail("write requires `whatsapp:write` tool");
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable (not paired or disconnected)");
       const cur = currentJid();
       const jid = args.jid ?? cur;
@@ -255,8 +249,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
       const xGate = crossChatWriteAllowed(scope, cur, jid);
       if (!xGate.allowed) return fail(xGate.reason);
       try {
-        const s = sock as { sendMessage: (jid: string, content: { text: string }) => Promise<{ key?: { id?: string } } | undefined> };
-        const sent = await s.sendMessage(jid, { text: args.content });
+        const sent = await sock.sendMessage(jid, { text: args.content });
         const id = sent?.key?.id ?? "";
         auditTool({ server: SERVER, tool: "whatsapp_send_message", sessionKey, args: { jid, length: args.content.length }, ok: true, durationMs: Date.now() - start, isWrite: true, resultSummary: id });
         return ok(`Sent message ${id} to ${jid}`);
@@ -280,7 +273,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     async (args) => {
       const start = Date.now();
       if (!canWrite) return fail("write requires `whatsapp:write` tool");
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable");
       const cur = currentJid();
       const jid = args.jid ?? cur;
@@ -290,8 +283,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
       const xGate = crossChatWriteAllowed(scope, cur, jid);
       if (!xGate.allowed) return fail(xGate.reason);
       try {
-        const s = sock as { sendMessage: (jid: string, content: { poll: { name: string; values: string[]; selectableCount: number } }) => Promise<{ key?: { id?: string } } | undefined> };
-        const sent = await s.sendMessage(jid, {
+        const sent = await sock.sendMessage(jid, {
           poll: {
             name: args.question,
             values: args.options,
@@ -321,14 +313,13 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     async (args) => {
       const start = Date.now();
       if (!canWrite) return fail("write requires `whatsapp:write` tool");
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable");
       const cur = currentJid();
       const gate = whatsappJidAllowed(scope, cur, args.jid);
       if (!gate.allowed) return fail(gate.reason);
       try {
-        const s = sock as { sendMessage: (jid: string, content: { react: { text: string; key: { id: string; fromMe?: boolean; remoteJid?: string } } }) => Promise<unknown> };
-        await s.sendMessage(args.jid, { react: { text: args.emoji, key: { id: args.message_id, remoteJid: args.jid, fromMe: false } } });
+        await sock.sendMessage(args.jid, { react: { text: args.emoji, key: { id: args.message_id, remoteJid: args.jid, fromMe: false } } });
         auditTool({ server: SERVER, tool: "whatsapp_react", sessionKey, args, ok: true, durationMs: Date.now() - start, isWrite: true });
         return ok(`reacted ${args.emoji || "(none)"} on ${args.message_id}`);
       } catch (err) {
@@ -349,7 +340,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
     async (args) => {
       const start = Date.now();
       if (!canWrite) return fail("backfill requires `whatsapp:write` tool (it talks to WhatsApp servers)");
-      const sock = whatsappSocket();
+      const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable");
       const cur = currentJid();
       const gate = whatsappJidAllowed(scope, cur, args.jid);
@@ -359,10 +350,7 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
         if (!oldest || !oldest.id) {
           return fail("no anchor message — receive or send at least one message in this chat first, then retry backfill");
         }
-        const s = sock as {
-          fetchMessageHistory: (count: number, oldestKey: { id: string; remoteJid: string; fromMe: boolean }, oldestTs: number) => Promise<string>;
-        };
-        const requestId = await s.fetchMessageHistory(
+        const requestId = await sock.fetchMessageHistory(
           args.count,
           { id: oldest.id, remoteJid: args.jid, fromMe: oldest.fromMe },
           oldest.ts,
