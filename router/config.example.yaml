@@ -127,6 +127,21 @@ users:
   #   ids:
   #     whatsapp: "+1234567891"
 
+# ─── MCP overrides (optional) ────────────────────────────────
+# Servers listed under `skip` are NEVER attached to spawned SDK sessions —
+# even if an agent has `fullAccess: true`. Useful for OAuth-based remotes
+# whose `mcp-remote` wrapper pops browser tabs in tight loops across
+# parallel sessions. The agent loses access to those tools, but the user
+# stops getting unsolicited OAuth dialogs.
+#
+# Tradeoff: skipped MCPs are unreachable from any router-spawned agent.
+# The CLI (`claude`) and dashboard `claude mcp list` still see them.
+#
+# mcp:
+#   skip:
+#     - zenda
+#     - tally
+
 # ─── Services (optional) ─────────────────────────────────────
 # Extra services shown in the dashboard service ribbon and optionally
 # managed by the tray app (start/stop/restart via launchd).

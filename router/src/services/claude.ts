@@ -26,7 +26,7 @@ import {
 import type { AgentConfig } from "../types";
 import { logger } from "./logger";
 import { buildContextFromCache } from "./session-cache";
-import { readMcpServers } from "./config-loader";
+import { readMcpServers, getConfig } from "./config-loader";
 import { getSkipSet as getMcpSkipSet, refreshMcpStatus } from "./mcp-status";
 import { buildMessagingMcps } from "../mcp";
 import { MEDIA_DIR } from "./media";
@@ -572,7 +572,14 @@ function buildSdkOptions(opts: {
   // or failed — attaching them anyway just spawns mcp-remote children that
   // pop OAuth dialogs the user never asked for. The user can re-attach via
   // dashboard "Authenticate" (which calls refreshMcpStatus() afterwards).
+  // Plus the user-supplied skip list from config.yaml `mcp.skip` — for
+  // OAuth-heavy remotes that pop dialogs even when `connected` (each new
+  // SDK session spawns its own mcp-remote stdio process).
   const skip = getMcpSkipSet();
+  try {
+    const userSkip = (getConfig() as { mcp?: { skip?: string[] } }).mcp?.skip ?? [];
+    for (const name of userSkip) skip.add(name);
+  } catch { /* config not loaded yet — ignore */ }
   const filterAttachable = (input: Record<string, unknown>): Record<string, SdkMcpServerConfig> => {
     const out: Record<string, SdkMcpServerConfig> = {};
     for (const [name, cfg] of Object.entries(input)) {
