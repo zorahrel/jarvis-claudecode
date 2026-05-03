@@ -37,6 +37,41 @@ export interface MessageTimings {
   sendEnd?: number;
 }
 
+/**
+ * Per-channel conversation metadata that connectors hand to the handler so it
+ * can populate the per-session context map consumed by in-process MCPs.
+ *
+ * Keep small — just identity + display names. Larger-state belongs in
+ * services/session-context.ts and is keyed by sessionKey.
+ */
+export interface ChannelContext {
+  discord?: {
+    guildId: string | null;
+    guildName?: string;
+    channelId: string;
+    channelName?: string;
+    authorId?: string;
+    authorName?: string;
+    messageId?: string;
+  };
+  whatsapp?: {
+    jid: string;
+    isGroup: boolean;
+    groupName?: string;
+    senderJid?: string;
+    senderName?: string;
+    messageId?: string;
+  };
+  telegram?: {
+    chatId: string;
+    chatType: "private" | "group" | "supergroup" | "channel";
+    chatTitle?: string;
+    fromId?: string;
+    fromUsername?: string;
+    messageId?: number;
+  };
+}
+
 /** Incoming message from any channel */
 export interface IncomingMessage {
   channel: Channel;
@@ -47,6 +82,8 @@ export interface IncomingMessage {
   /** Platform-specific identifier for async replies (telegram chat_id, whatsapp jid, discord channel.id).
    *  Used when we need to send a follow-up after the original context is gone (e.g. recovery notices after a crash). */
   replyTarget?: string;
+  /** Channel-specific conversation context handed to in-process messaging MCPs. */
+  channelContext?: ChannelContext;
   /** The message text */
   text: string;
   /** Original message timestamp */
