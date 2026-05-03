@@ -15,6 +15,7 @@ import { activeCount, activeJobs, loadPersistedJobs, clearPersistedJobs, type Pe
 import { killAllProcesses } from "./services/claude";
 import { ensureHooksInstalled } from "./services/localSessions";
 import { startMcpStatusWatcher } from "./services/mcp-status";
+import { cleanupOrphanMcpLocks } from "./services/mcp-auth-cleanup";
 
 const log = logger.child({ module: "main" });
 
@@ -169,6 +170,14 @@ async function main() {
   // Install jarvis-control status hooks for local session discovery.
   // Best-effort — failure just means the dashboard falls back to heuristic status.
   ensureHooksInstalled().catch((err) => log.warn({ err }, "hook install failed"));
+
+  // Sweep orphan mcp-remote lock files left over from previous runs. These
+  // confuse fresh mcp-remote instances into popping unsolicited OAuth
+  // dialogs even when tokens are valid. Cheap, idempotent, completely safe.
+  try {
+    const r = cleanupOrphanMcpLocks();
+    if (r.removed > 0) log.info({ ...r }, "Cleaned orphan mcp-remote locks");
+  } catch (err) { log.warn({ err: String(err) }, "mcp-auth cleanup failed"); }
 
   // Cache MCP server health (claude mcp list) so buildSdkOptions can skip
   // needs-auth / failed servers BEFORE spawning sessions, avoiding OAuth
