@@ -26,11 +26,10 @@ import { createInterface } from "readline";
 import { join } from "path";
 import { createHash } from "crypto";
 import { logger } from "./logger";
+import { WHATSAPP_HISTORY_DIR as STATE_DIR } from "./paths";
 
 const log = logger.child({ module: "whatsapp-history" });
 
-const HOME = process.env.HOME ?? "";
-const STATE_DIR = join(HOME, ".claude/jarvis/state/whatsapp-history");
 mkdirSync(STATE_DIR, { recursive: true });
 
 const MAX_PER_CHAT = 500;
