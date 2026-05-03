@@ -52,6 +52,15 @@ export interface WAStoredMessage {
   fromMe: boolean;
   /** Media kind, when present. */
   mediaType?: "image" | "video" | "audio" | "voice" | "document" | "sticker";
+  /**
+   * Encrypted Baileys message proto for media-bearing messages.
+   * Contains the URL + decryption keys we need to feed `downloadMediaMessage()`
+   * later (e.g. to transcribe a voice note that was never directly routed to
+   * an agent). Not present for text-only messages.
+   */
+  mediaProto?: unknown;
+  /** Original participant JID for group messages — needed to reconstruct WAMessage.key. */
+  participant?: string;
 }
 
 // In-memory window per chat (most recent MAX_PER_CHAT entries).
@@ -204,4 +213,10 @@ export async function listChats(opts: { query?: string; limit?: number } = {}): 
 export async function oldestMessage(jid: string): Promise<WAStoredMessage | null> {
   const arr = await ensureLoaded(jid);
   return arr.length > 0 ? arr[0]! : null;
+}
+
+/** Look up a single stored message by chat JID + message id. Used by MCP transcribe/download tools. */
+export async function findMessage(jid: string, id: string): Promise<WAStoredMessage | null> {
+  const arr = await ensureLoaded(jid);
+  return arr.find(m => m.id === id) ?? null;
 }
