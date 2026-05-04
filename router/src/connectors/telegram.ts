@@ -2,8 +2,9 @@ import { Bot, InputFile } from "grammy";
 import type { Connector } from "./base";
 import type { IncomingMessage, MediaAttachment, QuotedMessage, Config } from "../types";
 import type { MessageTimings } from "../types/message";
-import { findRoute } from "../services/router";
+import { findRoute, getFullAgent } from "../services/router";
 import { handleMessage, splitMessage } from "../services/handler";
+import { getConfig } from "../services/config-loader";
 import { canVoice, canVision } from "../services/capabilities";
 import { setContactName } from "../services/contact-names";
 import { logger } from "../services/logger";
@@ -13,6 +14,25 @@ import { loadSlashCommands, pickMenuCommands, rewriteIncomingSlash, handleRouter
 import { basename } from "path";
 
 const log = logger.child({ module: "telegram" });
+
+/**
+ * Owner-only @jarvis one-shot detector. Mirrors the WhatsApp pattern: in any
+ * Telegram chat — including groups not routed to jarvis — an owner whose
+ * Telegram numeric user id is in `jarvis.telegramOwners` can invoke the full
+ * agent by mentioning `@jarvis` (or starting a message with `jarvis `). Each
+ * invocation is one-shot (no session continuity) so the override never
+ * "leaks" persistent state into a non-jarvis chat.
+ */
+function isJarvisInvocation(text: string): boolean {
+  const l = text.toLowerCase();
+  return l.includes("@jarvis") || l.startsWith("jarvis ");
+}
+
+function isTelegramOwner(userId: string | undefined): boolean {
+  if (!userId) return false;
+  const owners = (getConfig() as { jarvis?: { telegramOwners?: string[] } }).jarvis?.telegramOwners ?? [];
+  return owners.map(String).includes(userId);
+}
 
 export class TelegramConnector implements Connector {
   readonly channel = "telegram" as const;
@@ -89,8 +109,21 @@ export class TelegramConnector implements Connector {
         timestamp: 0,
         reply: async () => {},
       };
+      // Owner-only @jarvis one-shot: bypass route and use the full agent. We
+      // resolve this BEFORE deriving voice/vision capabilities so media on a
+      // group not routed to jarvis still gets processed when the owner
+      // explicitly invokes @jarvis there.
+      const senderId = ctx.from ? String(ctx.from.id) : undefined;
+      const jarvisOneShot =
+        !!text && isJarvisInvocation(text) && isTelegramOwner(senderId);
+      if (jarvisOneShot) {
+        log.info({ chatId, senderId, chatType: ctx.chat.type }, "@jarvis one-shot (owner, full agent)");
+      } else if (text && isJarvisInvocation(text) && !isTelegramOwner(senderId)) {
+        log.debug({ chatId, senderId }, "@jarvis invoked by non-owner — ignoring override");
+      }
+
       const previewRoute = findRoute(previewMsg);
-      const agent = previewRoute?.agent;
+      const agent = jarvisOneShot ? getFullAgent() : previewRoute?.agent;
       const hasVoice = canVoice(agent);
       const hasVision = canVision(agent);
 
@@ -222,6 +255,8 @@ export class TelegramConnector implements Connector {
         media: media.length > 0 ? media : undefined,
         quotedMessage,
         timings,
+        // Owner-only @jarvis one-shot: bypass route matching in handler.
+        ...(jarvisOneShot ? { agentOverride: getFullAgent() } : {}),
         channelContext: {
           telegram: {
             chatId: String(chatId),

@@ -17,7 +17,7 @@ import { telegramBot } from "../services/connectors";
 import { getSessionContext } from "../services/session-context";
 import { readTelegram, listTelegramChats, searchTelegram } from "../services/message-buffer";
 import {
-  ok, okJson, fail, telegramChatAllowed, crossChatWriteAllowed, auditTool,
+  ok, okJson, fail, telegramChatAllowed, crossChatWriteAllowed, selfChatGuard, auditTool,
 } from "./_helpers";
 
 interface CreateOpts {
@@ -101,9 +101,9 @@ export function createTelegramMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
 
   const sendMessage = tool(
     "telegram_send_message",
-    "Send a Telegram message. Defaults to the current chat. Sending elsewhere requires `allowCrossChatWrite: true` in agent.yaml.",
+    "Send a Telegram message to a DIFFERENT chat. Requires `chat_id` and `allowCrossChatWrite: true` in agent.yaml. To reply to the user in the current chat, just emit your plain text answer — do not call this tool.",
     {
-      chat_id: z.string().optional(),
+      chat_id: z.string(),
       content: z.string().min(1).max(4096),
     },
     async (args) => {
@@ -112,8 +112,12 @@ export function createTelegramMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
       const bot = telegramBot();
       if (!bot) return fail("Telegram bot unavailable");
       const cur = currentChatId();
-      const chatId = args.chat_id ?? cur;
-      if (!chatId) return fail("no chat_id and no current Telegram chat");
+      const chatId = args.chat_id;
+      const selfGate = selfChatGuard(cur, chatId);
+      if (!selfGate.allowed) {
+        auditTool({ server: SERVER, tool: "telegram_send_message", sessionKey, args: { chatId }, ok: false, durationMs: Date.now() - start, isWrite: true, errorReason: selfGate.reason });
+        return fail(selfGate.reason);
+      }
       const scopeGate = telegramChatAllowed(scope, cur, chatId);
       if (!scopeGate.allowed) return fail(scopeGate.reason);
       const xGate = crossChatWriteAllowed(scope, cur, chatId);
