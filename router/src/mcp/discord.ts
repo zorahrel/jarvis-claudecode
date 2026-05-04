@@ -17,7 +17,7 @@ import type { AgentConfig } from "../types";
 import { discordClient } from "../services/connectors";
 import { getSessionContext } from "../services/session-context";
 import {
-  ok, okJson, fail, discordChannelAllowed, crossChatWriteAllowed, auditTool,
+  ok, okJson, fail, discordChannelAllowed, crossChatWriteAllowed, selfChatGuard, auditTool,
 } from "./_helpers";
 
 interface CreateOpts {
@@ -283,9 +283,9 @@ export function createDiscordMcp(opts: CreateOpts): McpSdkServerConfigWithInstan
 
   const sendMessage = tool(
     "discord_send_message",
-    "Send a message to a Discord channel. Defaults to the current channel; sending elsewhere requires `allowCrossChatWrite: true` in agent.yaml.",
+    "Send a message to a DIFFERENT Discord channel. Requires `channel_id` and `allowCrossChatWrite: true` in agent.yaml. To reply to the user in the current channel, just emit your plain text answer — do not call this tool.",
     {
-      channel_id: z.string().optional().describe("Channel ID; defaults to the current channel."),
+      channel_id: z.string().describe("Target channel ID. Must differ from the current channel."),
       content: z.string().min(1).max(2000).describe("Message content (max 2000 chars per Discord)."),
       reply_to: z.string().optional().describe("Message ID to reply to."),
     },
@@ -295,8 +295,12 @@ export function createDiscordMcp(opts: CreateOpts): McpSdkServerConfigWithInstan
       const client = discordClient();
       if (!client) return fail("Discord client unavailable");
       const current = getCurrent();
-      const channelId = args.channel_id ?? current?.channelId;
-      if (!channelId) return fail("no channel_id and no current Discord channel");
+      const channelId = args.channel_id;
+      const selfGate = selfChatGuard(current?.channelId ?? null, channelId);
+      if (!selfGate.allowed) {
+        auditTool({ server: SERVER, tool: "discord_send_message", sessionKey, args: { channelId }, ok: false, durationMs: Date.now() - start, isWrite: true, errorReason: selfGate.reason });
+        return fail(selfGate.reason);
+      }
 
       try {
         const ch = fetchableChannel(await client.channels.fetch(channelId));

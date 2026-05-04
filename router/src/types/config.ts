@@ -155,6 +155,12 @@ export interface RateLimits {
 export interface JarvisConfig {
   allowedCallers?: string[];
   alwaysReplyGroups?: string[];
+  /**
+   * Telegram numeric user IDs allowed to one-shot the full agent via `@jarvis`
+   * mention from any chat (including groups not routed to jarvis). Mirrors the
+   * WhatsApp `allowedCallers[0]` owner pattern. Find your ID via @userinfobot.
+   */
+  telegramOwners?: string[];
 }
 
 /** Launchd configuration for a user-defined service (optional — tray can manage it) */

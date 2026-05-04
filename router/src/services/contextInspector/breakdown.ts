@@ -20,6 +20,9 @@ import { expandClaudeMdChain, type ChainEntry } from "./claudeMdChain.js";
 export const SYSTEM_PRESET_TOKENS = 4000; // 3-5k midpoint
 export const BUILTIN_TOOLS_TOKENS = 6500; // 5-8k midpoint
 export const MCP_AVG_TOKENS_PER_SERVER = 1000; // small=400, medium=1200, large=3000 — avg
+// When ENABLE_TOOL_SEARCH is active, stdio servers are deferred (not loaded upfront).
+// The whole stdio group is replaced by a single ~200-token search_tools meta-tool.
+export const MCP_TOOL_SEARCH_META_TOKENS = 200;
 export const SKILLS_INDEX_DEFAULT_TOKENS = 3000; // jarvis-marketplace + user + plugin + gsd:* (~2.5k alone)
 export const SUBAGENTS_INDEX_TOKENS = 1000; // 18 GSD * ~50 tokens index entry
 export const HOOKS_MEMORY_AVG_TOKENS = 800; // OMEGA inject 0.5-2k midpoint
@@ -144,15 +147,24 @@ export async function calculateBreakdown(
       .map((t) => t.slice(4));
     loadedServerNames = requestedFromTools.filter((n) => allServerNames.includes(n));
   }
-  const mcpDetails: McpServerDetail[] = loadedServerNames.map((name) => ({
-    name,
-    transport: inferTransport(mcpServersConfig[name]!),
-    toolsEstimate: 8,
-    tokens: MCP_AVG_TOKENS_PER_SERVER,
-  }));
+  // ENABLE_TOOL_SEARCH defers stdio servers — they cost ~0 upfront, replaced by
+  // a single search_tools meta-tool (~200 tok). HTTP servers still load upfront.
+  const mcpDetails: McpServerDetail[] = loadedServerNames.map((name) => {
+    const transport = inferTransport(mcpServersConfig[name]!);
+    const deferred = transport === "stdio"; // ENABLE_TOOL_SEARCH always set by router
+    return {
+      name,
+      transport,
+      toolsEstimate: deferred ? 0 : 8,
+      tokens: deferred ? 0 : MCP_AVG_TOKENS_PER_SERVER,
+    };
+  });
+  const stdioCount = mcpDetails.filter((d) => d.transport === "stdio").length;
+  const httpTokens = mcpDetails.filter((d) => d.transport !== "stdio").reduce((s, d) => s + d.tokens, 0);
+  const mcpTotalTokens = httpTokens + (stdioCount > 0 ? MCP_TOOL_SEARCH_META_TOKENS : 0);
   const mcpServers: CategoryResult = {
     category: "mcp_servers",
-    tokens: mcpDetails.length * MCP_AVG_TOKENS_PER_SERVER,
+    tokens: mcpTotalTokens,
     details: mcpDetails,
   };
 

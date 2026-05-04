@@ -26,7 +26,7 @@ import * as wa from "../services/whatsapp-history";
 import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import { saveMedia, processMedia } from "../services/media";
 import {
-  ok, okJson, fail, whatsappJidAllowed, crossChatWriteAllowed, auditTool,
+  ok, okJson, fail, whatsappJidAllowed, crossChatWriteAllowed, selfChatGuard, auditTool,
 } from "./_helpers";
 
 interface CreateOpts {
@@ -318,9 +318,9 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
 
   const sendMessage = tool(
     "whatsapp_send_message",
-    "Send a WhatsApp message. Defaults to the current chat. Sending elsewhere requires `allowCrossChatWrite: true` in agent.yaml and the JID in `allowedJids` (or no allow-list configured).",
+    "Send a WhatsApp message to a DIFFERENT chat. Requires `jid` and `allowCrossChatWrite: true` in agent.yaml. To reply to the user in the current chat, just emit your plain text answer — do not call this tool.",
     {
-      jid: z.string().optional().describe("Chat JID; defaults to the current chat."),
+      jid: z.string().describe("Target chat JID. Must differ from the current chat."),
       content: z.string().min(1).max(4096),
     },
     async (args) => {
@@ -329,8 +329,12 @@ export function createWhatsappMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
       const sock = whatsappSocketApi();
       if (!sock) return fail("WhatsApp socket unavailable (not paired or disconnected)");
       const cur = currentJid();
-      const jid = args.jid ?? cur;
-      if (!jid) return fail("no jid and no current WhatsApp chat");
+      const jid = args.jid;
+      const selfGate = selfChatGuard(cur, jid);
+      if (!selfGate.allowed) {
+        auditTool({ server: SERVER, tool: "whatsapp_send_message", sessionKey, args: { jid }, ok: false, durationMs: Date.now() - start, isWrite: true, errorReason: selfGate.reason });
+        return fail(selfGate.reason);
+      }
       const scopeGate = whatsappJidAllowed(scope, cur, jid);
       if (!scopeGate.allowed) return fail(scopeGate.reason);
       const xGate = crossChatWriteAllowed(scope, cur, jid);

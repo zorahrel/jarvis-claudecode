@@ -106,6 +106,30 @@ export function telegramChatAllowed(
 }
 
 /**
+ * Reject sends targeting the current conversation. The agent's plain text
+ * output is already relayed back to the originating chat by the channel
+ * connector — calling a *send* tool for the same chat duplicates the message
+ * (the tool's `sendMessage` plus the agent's terminal text). This guard
+ * enforces "send tools = cross-chat only" and teaches the model the right
+ * pattern via a clear error.
+ *
+ * Returns `allowed: false` only when both targets are non-null and equal.
+ * Falsy currentTarget (e.g. notch sessions, cron, no-channel) are passthrough.
+ */
+export function selfChatGuard(
+  currentTarget: string | null,
+  newTarget: string,
+): { allowed: true } | { allowed: false; reason: string } {
+  if (!currentTarget) return { allowed: true };
+  if (currentTarget !== newTarget) return { allowed: true };
+  return {
+    allowed: false,
+    reason:
+      "target equals the current conversation — reply with your plain text output instead; this send tool is for cross-chat sends only",
+  };
+}
+
+/**
  * Cross-chat write predicate. Even when read scope allows a target chat, write
  * tools default to "current conversation only" — `allowCrossChatWrite: true`
  * is the explicit opt-in.
