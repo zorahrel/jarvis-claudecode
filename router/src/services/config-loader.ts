@@ -46,6 +46,8 @@ function loadAgentRegistry(): Record<string, AgentConfig> {
         effort: parsed.effort,
         fullAccess: parsed.fullAccess,
         inheritUserScope: parsed.inheritUserScope,
+        inactivityTimeoutMin: parsed.inactivityTimeoutMin,
+        keepWarm: parsed.keepWarm,
         // Per-channel scoping for in-process messaging MCPs (mcp/{discord,whatsapp,telegram}).
         // We pass the whole sub-object through; consumers (mcp/_helpers.ts) read
         // the fields they care about (allowedGuilds, allowedJids, allowCrossChatWrite, …).

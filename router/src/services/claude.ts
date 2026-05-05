@@ -127,7 +127,7 @@ export interface ProcessInfo {
   lastSummaryPreview?: string;
 }
 
-const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 // First-event timeout: if the SDK subprocess doesn't emit ANY event within
 // this window after the first sendMessage, assume MCP init or model spin-up
 // is wedged and kill the session so the caller can retry on a fresh spawn.
@@ -328,6 +328,10 @@ interface SdkSession {
   /** Text accumulated from assistant text blocks during the current turn. */
   currentText: string;
   needsContext: boolean;
+  inactivityTimeoutMs: number;
+  keepWarm: boolean;
+  /** Stored at spawn time to allow keep-warm respawn without re-fetching agent config. */
+  agentConfig: AgentConfig | null;
   inactivityTimer: NodeJS.Timeout | null;
   lifetimeTimer: NodeJS.Timeout | null;
   notifyToken: string | null;
@@ -465,11 +469,19 @@ startFcacheWatcher();
 /** sessionKey -> Set of child PIDs we've registered sidecar files for. */
 const sidecarPidsBySession = new Map<string, Set<number>>();
 
+// ps output is expensive (~200-400ms on macOS with many processes). Cache for 5s
+// so rapid successive sidecar registrations on session start don't re-invoke ps
+// per session.
+let psCache: { pids: number[]; ts: number } | null = null;
+const PS_CACHE_TTL_MS = 5000;
+
 /**
  * Find direct child PIDs of the router process that look like Claude CLI
  * processes. Mirrors the heuristic in localSessions/discovery.ts.
  */
 async function findChildClaudePids(): Promise<number[]> {
+  const now = Date.now();
+  if (psCache && now - psCache.ts < PS_CACHE_TTL_MS) return psCache.pids;
   try {
     const { stdout } = await execFile("ps", ["-axo", "pid=,ppid=,args="], {
       maxBuffer: 4 * 1024 * 1024,
@@ -496,6 +508,7 @@ async function findChildClaudePids(): Promise<number[]> {
         pids.push(pid);
       }
     }
+    psCache = { pids, ts: Date.now() };
     return pids;
   } catch {
     return [];
@@ -769,6 +782,7 @@ function spawnSession(
   inheritUserScope?: boolean,
   isSubagent?: boolean,
   agent?: AgentConfig,
+  inactivityTimeoutMs?: number,
 ): SdkSession {
   let notifyToken: string | null = null;
   let notify: NotifyEnvContext | undefined;
@@ -805,6 +819,9 @@ function spawnSession(
     pendingFiles: [],
     currentText: "",
     needsContext: true,
+    inactivityTimeoutMs: inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS,
+    keepWarm: agent?.keepWarm === true,
+    agentConfig: agent ?? null,
     inactivityTimer: null,
     lifetimeTimer: null,
     notifyToken,
@@ -1028,10 +1045,26 @@ function killSession(s: SdkSession): void {
 function resetInactivityTimer(key: string, s: SdkSession): void {
   if (s.inactivityTimer) clearTimeout(s.inactivityTimer);
   s.inactivityTimer = setTimeout(() => {
-    log.info({ key }, "Inactivity timeout, killing session");
+    log.info({ key, inactivityTimeoutMs: s.inactivityTimeoutMs, keepWarm: s.keepWarm }, "Inactivity timeout, killing session");
+    const keepWarm = s.keepWarm;
+    const agentConfig = s.agentConfig;
     killSession(s);
     sessions.delete(key);
-  }, INACTIVITY_TIMEOUT_MS);
+    // For keep-warm agents, immediately respawn a fresh idle session so the
+    // next real message never hits a cold start, regardless of when it arrives.
+    if (keepWarm && agentConfig) {
+      log.info({ key }, "keep-warm: respawning idle session");
+      const model = resolveModel(agentConfig.model ?? "opus");
+      const timeoutMs = s.inactivityTimeoutMs;
+      const fresh = spawnSession(
+        key, model, agentConfig.workspace, agentConfig.tools ?? [],
+        agentConfig.effort, agentConfig.fullAccess, agentConfig.env,
+        agentConfig.inheritUserScope, false, agentConfig, timeoutMs,
+      );
+      sessions.set(key, fresh);
+      resetInactivityTimer(key, fresh);
+    }
+  }, s.inactivityTimeoutMs);
 }
 
 function getOrCreateSession(
@@ -1040,6 +1073,7 @@ function getOrCreateSession(
   fullAccess?: boolean, agentEnv?: Record<string, string>,
   inheritUserScope?: boolean, isSubagent?: boolean,
   agent?: AgentConfig,
+  inactivityTimeoutMs?: number,
 ): SdkSession {
   const existing = sessions.get(key);
   if (existing && existing.alive) {
@@ -1072,7 +1106,7 @@ function getOrCreateSession(
   const mcpCount = tools.filter(t => t.startsWith("mcp:")).length;
   log.info({ key, model, workspace, toolCount: tools.length, mcpCount, fullAccess: !!fullAccess, inheritUserScope: inheritUserScope !== false, isSubagent: !!isSubagent }, "Spawning new SDK session");
 
-  const s = spawnSession(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent, agent);
+  const s = spawnSession(key, model, workspace, tools, effort, fullAccess, agentEnv, inheritUserScope, isSubagent, agent, inactivityTimeoutMs);
   const pending = pendingSummaries.get(key);
   if (pending) s.compactionCount = pending.compactionCount;
   sessions.set(key, s);
@@ -1294,16 +1328,18 @@ async function askClaudeInternal(
   let initTimeoutRetries = 0;
   const MAX_INIT_TIMEOUT_RETRIES = 1;
 
+  const inactivityTimeoutMs = (agent.inactivityTimeoutMin ?? 15) * 60 * 1000;
+
   for (let i = 0; i < models.length; i++) {
     const model = resolveModel(models[i]);
     try {
       const tools = agent.tools ?? [];
-      let s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
+      let s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent, inactivityTimeoutMs);
 
       if (s.model !== model) {
         killSession(s);
         sessions.delete(key);
-        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
+        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent, inactivityTimeoutMs);
       }
 
       if (s.alive && s.totalInputTokens > 0 && shouldCompact(s.totalInputTokens, s.model)) {
@@ -1313,7 +1349,7 @@ async function askClaudeInternal(
         } else {
           await compactSession(s, key);
         }
-        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent);
+        s = getOrCreateSession(key, model, agent.workspace, tools, agent.effort, agent.fullAccess, agent.env, agent.inheritUserScope, opts?.isSubagent, agent, inactivityTimeoutMs);
       }
 
       return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, agent, images, opts?.onChunk);
@@ -1580,7 +1616,7 @@ export function getProcesses(): ProcessInfo[] {
       needsContext: s.needsContext,
       createdAt: s.createdAt,
       lastMessageAt: s.lastActivity,
-      inactivityExpiresAt: s.lastActivity + INACTIVITY_TIMEOUT_MS,
+      inactivityExpiresAt: s.lastActivity + s.inactivityTimeoutMs,
       lifetimeExpiresAt: s.createdAt + MAX_LIFETIME_MS,
       messageCount: stats.messages,
       consecutiveTimeouts: s.consecutiveTimeouts,
@@ -1610,6 +1646,15 @@ export function getProcesses(): ProcessInfo[] {
 export function resolveCliPath(): string {
   return "(sdk: bundled cli.js)";
 }
+
+/**
+ * No-op kept for API compatibility. keepWarm works via auto-respawn on
+ * inactivity timeout — the first message still cold-starts, but once a
+ * session exists for a key it is immediately re-created when it expires,
+ * so all subsequent messages are warm. There is no useful pre-warm without
+ * knowing the real session key (channel:target:agent) ahead of time.
+ */
+export function preWarmAgents(_agentRegistry: Record<string, AgentConfig>): void {}
 
 // ─── Context Inspector — read-only metadata exports for the API layer ───────
 

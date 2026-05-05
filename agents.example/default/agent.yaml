@@ -39,6 +39,16 @@ tools:
   # - mcp:github
   # - mcp:context7
 
+# Inactivity timeout in minutes. Session is killed if idle for this long.
+# Default: 15. Use lower values for cron/one-shot agents, higher for heavy use.
+# inactivityTimeoutMin: 15
+
+# Keep-warm: after the first message, auto-respawn the session when it expires
+# so subsequent messages never hit cold-start latency. The first message still
+# cold-starts (session key isn't known until a real message arrives).
+# Use for personal/high-traffic agents. Costs one idle process while router runs.
+# keepWarm: false
+
 # Custom environment variables for this agent's Claude Code process
 # env:
 #   CUSTOM_VAR: value

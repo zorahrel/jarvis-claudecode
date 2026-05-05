@@ -78,6 +78,10 @@ export interface AgentConfig {
   inheritUserScope?: boolean;
   /** Context/token budget controls. Tune per-agent to reduce token usage. */
   contextLimits?: ContextLimits;
+  /** Inactivity timeout in minutes before the session is killed. Default 15. */
+  inactivityTimeoutMin?: number;
+  /** When true, spawn the session at router startup so the first message has zero cold-start latency. */
+  keepWarm?: boolean;
   /** Per-channel scoping for messaging MCPs. */
   discord?: ChannelScope;
   whatsapp?: ChannelScope;
