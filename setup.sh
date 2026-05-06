@@ -154,6 +154,44 @@ fi
 
 deactivate
 
+# --- 3b. Moondream Station venv (local vision, MLX/Apple Silicon) -----------
+# Separate venv from omega-env because Moondream Station pulls a heavyweight
+# transformers + torch + mlx stack and we want crash isolation. Pin
+# transformers <5 because moondream-2 hub code references attributes
+# (all_tied_weights_keys) that were removed in transformers 5.x.
+step "Setting up Moondream Station local-vision server"
+MD_VENV="$SCRIPTS/moondream-env"
+if [ ! -d "$MD_VENV" ]; then
+  if command -v python3.12 >/dev/null 2>&1; then
+    python3.12 -m venv "$MD_VENV"
+    ok "created venv at router/scripts/moondream-env (python 3.12)"
+  else
+    warn "python 3.12 not found — Moondream Station requires it; skipping vision setup"
+    MD_VENV=""
+  fi
+else
+  skip "moondream-env already exists"
+fi
+
+if [ -n "$MD_VENV" ] && [ -x "$MD_VENV/bin/pip" ]; then
+  # shellcheck disable=SC1091
+  source "$MD_VENV/bin/activate"
+  if ! python -c "import moondream_station" 2>/dev/null; then
+    info "installing moondream-station + runtime deps (≈2 min)"
+    pip install --quiet --upgrade pip
+    pip install --quiet \
+      moondream-station \
+      "transformers>=4.56,<5.0" \
+      pydantic packaging fastapi uvicorn requests
+    ok "moondream-station installed"
+  else
+    skip "moondream-station already installed"
+  fi
+  deactivate
+
+  info "first boot of com.jarvis.moondream will download Moondream 2 (~1-2 GB)"
+fi
+
 # --- 4. Config files ---------------------------------------------------------
 step "Creating config files"
 if [ -f "$ROUTER/.env" ]; then
@@ -268,7 +306,7 @@ elif [ "$PLATFORM" = "Darwin" ]; then
   LA_DIR="$HOME/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
 
-  for svc in chroma omega router; do
+  for svc in chroma omega moondream router; do
     template="$SCRIPTS/com.jarvis.${svc}.plist.example"
     target="$LA_DIR/com.jarvis.${svc}.plist"
     if [ ! -f "$template" ]; then
@@ -291,7 +329,7 @@ elif [ "$PLATFORM" = "Linux" ]; then
   else
     UNIT_DIR="$HOME/.config/systemd/user"
     mkdir -p "$UNIT_DIR"
-    for svc in chroma omega router; do
+    for svc in chroma omega moondream router; do
       template="$SCRIPTS/systemd/jarvis-${svc}.service"
       target="$UNIT_DIR/jarvis-${svc}.service"
       if [ ! -f "$template" ]; then
@@ -301,7 +339,7 @@ elif [ "$PLATFORM" = "Linux" ]; then
       ok "wrote $target"
     done
     systemctl --user daemon-reload
-    for svc in chroma omega router; do
+    for svc in chroma omega moondream router; do
       if [ -f "$UNIT_DIR/jarvis-${svc}.service" ]; then
         systemctl --user enable --now "jarvis-${svc}.service" 2>&1 \
           | sed 's/^/    /' || true
@@ -339,9 +377,10 @@ if [ "$SERVICES_INSTALLED" = "1" ]; then
   cat <<EOF
 
 ${BOLD}All services are running and auto-start at login:${RESET}
-  ${DIM}ChromaDB (docs)          :3342${RESET}
-  ${DIM}OMEGA    (conversation)  :3343${RESET}
-  ${DIM}Router   (bots + web UI) :3340 / :3341${RESET}
+  ${DIM}ChromaDB  (docs)          :3342${RESET}
+  ${DIM}OMEGA     (conversation)  :3343${RESET}
+  ${DIM}Moondream (local vision)  :2020${RESET}
+  ${DIM}Router    (bots + web UI) :3340 / :3341${RESET}
 
   Logs:     ${DIM}~/.claude/jarvis/logs/${RESET}
   Manage:   ${BLUE}${MANAGE_CMD}${RESET}

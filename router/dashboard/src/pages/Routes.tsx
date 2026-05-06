@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
+import { navigate } from '../lib/url-state'
 import { Plus } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -83,14 +84,16 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
   const [processes, setProcesses] = useState<ProcessSession[]>([])
   const [saving, setSaving] = useState(false)
   const [turnsByAgent7d, setTurnsByAgent7d] = useState<Record<string, number>>({})
-  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash || window.location.search))
 
   const routes = data || []
 
   useEffect(() => {
-    const onHash = () => setHashFilter(parseHashFilter(window.location.hash))
+    const onHash = () => setHashFilter(parseHashFilter(window.location.hash || window.location.search))
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => window.removeEventListener('popstate', onHash);
+      window.removeEventListener('hashchange', onHash)
   }, [])
 
   useEffect(() => {
@@ -236,11 +239,11 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
   }
 
   const goToAgent = (name: string) => {
-    window.location.hash = `#/agents?focus=${encodeURIComponent(name)}`
+    navigate(`agents?focus=${encodeURIComponent(name)}`)
   }
 
   const goToChannel = (name: string) => {
-    window.location.hash = `#/channels?focus=${encodeURIComponent(name)}`
+    navigate(`channels?focus=${encodeURIComponent(name)}`)
   }
 
   const placeholderFrom = form.channel === 'whatsapp' ? '+1234567890'
@@ -378,7 +381,7 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 {sessions.length > 0 && (
                   <BadgeLink
-                    href={`#/sessions?filter=route:${idx}`}
+                    href={`/sessions?filter=route:${idx}`}
                     tone="ok"
                     size="xs"
                     count={sessions.length}
@@ -389,7 +392,7 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
                 )}
                 {turns7d > 0 && (
                   <BadgeLink
-                    href={`#/analytics?groupBy=route&period=7d&filter=route:${idx}`}
+                    href={`/analytics?groupBy=route&period=7d&filter=route:${idx}`}
                     tone="muted"
                     size="xs"
                     count={turns7d}
@@ -430,7 +433,7 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
 
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               <BadgeLink
-                href={`#/sessions?filter=route:${detailIndex}`}
+                href={`/sessions?filter=route:${detailIndex}`}
                 tone="accent"
                 size="sm"
                 count={routeActiveSessions(detailRoute).length}
@@ -438,7 +441,7 @@ export function Routes({ onToast }: { onToast: (msg: string, type: 'success' | '
                 title="Open this route in the Sessions page"
               />
               <BadgeLink
-                href={`#/analytics?groupBy=route&period=7d&filter=route:${detailIndex}`}
+                href={`/analytics?groupBy=route&period=7d&filter=route:${detailIndex}`}
                 tone="muted"
                 size="sm"
                 count={turnsByAgent7d[detailRoute.workspace] || 0}

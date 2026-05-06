@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ExternalLink, FolderOpen, Terminal as TerminalIcon, GitPullRequest, Code2, LayoutDashboard, RefreshCw } from 'lucide-react'
+import { ExternalLink, FolderOpen, Terminal as TerminalIcon, GitPullRequest, Code2, LayoutDashboard, RefreshCw, Brain } from 'lucide-react'
+import { SessionContextExplorer } from './context/SessionContextExplorer'
+import { formatTokens, colorForThreshold } from './context/thresholds'
 import { api } from '../api/client'
 import type { LocalSession, OpenTargetId, TargetAvailability } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -87,6 +89,7 @@ function LocalSessionCard({
 }) {
   const [targets, setTargets] = useState<TargetAvailability[] | null>(null)
   const [busy, setBusy] = useState<OpenTargetId | null>(null)
+  const [explorerOpen, setExplorerOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -136,6 +139,22 @@ function LocalSessionCard({
         >
           {session.repoName}
         </span>
+        {typeof session.liveTokens === 'number' && session.liveTokens > 0 && (
+          <span
+            title={`${session.liveTokens.toLocaleString()} token su ${(session.contextWindow ?? 200000).toLocaleString()} window`}
+            style={{
+              fontSize: 10,
+              fontFamily: 'var(--mono)',
+              padding: '2px 6px',
+              borderRadius: 999,
+              background: colorForThreshold((session.liveTokens ?? 0) / (session.contextWindow ?? 200000)),
+              color: '#fff',
+              fontWeight: 600,
+            }}
+          >
+            {formatTokens(session.liveTokens)}
+          </span>
+        )}
         <span style={{ fontSize: 10, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>pid {session.pid}</span>
       </div>
 
@@ -186,6 +205,16 @@ function LocalSessionCard({
       </div>
 
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {session.sessionId && (
+          <Tooltip content="Explore context: 8-category breakdown, MCP, CLAUDE.md chain" placement="top">
+            <span>
+              <Button size="xs" variant="ghost" onClick={() => setExplorerOpen(true)}>
+                <Brain size={12} />
+                <span style={{ marginLeft: 4 }}>Explore</span>
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         {(targets ?? []).map((t) => (
           <Tooltip key={t.id} content={t.available ? `Open in ${t.label}` : t.reason || 'unavailable'} placement="top">
             <span>
@@ -204,6 +233,14 @@ function LocalSessionCard({
           </Tooltip>
         ))}
       </div>
+
+      {explorerOpen && session.sessionId && (
+        <SessionContextExplorer
+          sessionId={session.sessionId}
+          title={`${session.repoName}${session.agent ? ` · ${session.agent}` : ''}`}
+          onClose={() => setExplorerOpen(false)}
+        />
+      )}
     </div>
   )
 }

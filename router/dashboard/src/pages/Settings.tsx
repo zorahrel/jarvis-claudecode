@@ -85,11 +85,11 @@ export function Settings({ onToast }: { onToast: (msg: string, type: 'success' |
       />
 
       <InfoBox title="Where to find things">
-        Always-reply groups in <a href="#routes" style={linkStyle}>Routes</a>.
-        WhatsApp pairing in <a href="#channels" style={linkStyle}>Channels</a> → ⚙️.
-        Email accounts in <a href="#tools" style={linkStyle}>Tools</a>. Memory scopes in{' '}
-        <a href="#memory" style={linkStyle}>Memory</a>. Global CLAUDE.md in{' '}
-        <a href="#agents" style={linkStyle}>Agents</a>. Costs in <a href="#analytics" style={linkStyle}>Analytics</a>.
+        Always-reply groups in <a href="/routes" style={linkStyle}>Routes</a>.
+        WhatsApp pairing in <a href="/channels" style={linkStyle}>Channels</a> → ⚙️.
+        Email accounts in <a href="/tools" style={linkStyle}>Tools</a>. Memory scopes in{' '}
+        <a href="/memory" style={linkStyle}>Memory</a>. Global CLAUDE.md in{' '}
+        <a href="/agents" style={linkStyle}>Agents</a>. Costs in <a href="/analytics" style={linkStyle}>Analytics</a>.
       </InfoBox>
 
       <AllowedCallers onToast={onToast} />
@@ -101,7 +101,7 @@ export function Settings({ onToast }: { onToast: (msg: string, type: 'success' |
           count={settingsHooks.length}
           action={
             <span style={{ fontSize: 11, color: 'var(--text-4)' }}>
-              Plugins in <a href="#skills" style={linkStyle}>Skills</a> · MCP in <a href="#tools" style={linkStyle}>Tools</a>
+              Plugins in <a href="/skills" style={linkStyle}>Skills</a> · MCP in <a href="/tools" style={linkStyle}>Tools</a>
             </span>
           }
         />

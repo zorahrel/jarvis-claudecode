@@ -84,7 +84,7 @@ export function DrillDownCard({ label, value, sub, href, title, tone = 'default'
 
   const node = clickable ? (
     <a
-      href={`#${href}`}
+      href={href.startsWith('/') || href.startsWith('#') ? href : `/${href}`}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{ ...baseStyle, cursor: 'pointer', textDecoration: 'none', color: 'inherit' }}

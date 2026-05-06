@@ -128,7 +128,7 @@ export function SessionRow({ session: p, onClick, trailing, isLast }: SessionRow
         {p.pending && <Badge tone="ok" size="xs">processing</Badge>}
         {p.messageCount > 0 && (
           <BadgeLink
-            href={`#/sessions?filter=key:${encodeURIComponent(p.key)}`}
+            href={`/sessions?filter=key:${encodeURIComponent(p.key)}`}
             tone="muted"
             size="xs"
             count={p.messageCount}
