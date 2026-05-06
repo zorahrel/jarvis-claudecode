@@ -707,10 +707,18 @@ export class WhatsAppConnector implements Connector {
           const fileName = basename(filePath);
           const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
 
-          if (imageExts.includes(ext as any)) {
-            await this.sock?.sendMessage(replyJid, { image: buffer, caption, mimetype: mime });
-          } else {
-            await this.sock?.sendMessage(replyJid, { document: buffer, mimetype: mime, fileName, caption });
+          // Track outgoing message id so the inbound echo is recognized as
+          // bot-sent and skipped — without this, the agent re-processes its
+          // own attachment and self-loops on every file send.
+          const sent = imageExts.includes(ext as any)
+            ? await this.sock?.sendMessage(replyJid, { image: buffer, caption, mimetype: mime })
+            : await this.sock?.sendMessage(replyJid, { document: buffer, mimetype: mime, fileName, caption });
+          if (sent?.key?.id) {
+            this.sentMsgIds.add(sent.key.id);
+            if (this.sentMsgIds.size > 200) {
+              const first = this.sentMsgIds.values().next().value;
+              if (first) this.sentMsgIds.delete(first);
+            }
           }
         } catch (e) {
           log.error({ err: e, filePath }, "Failed to send file on WhatsApp");
