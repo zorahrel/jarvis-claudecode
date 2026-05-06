@@ -73,9 +73,9 @@ export function WhatsAppSettingsModal({ open, onClose, onToast }: Props) {
           <WhatsAppPairing onToast={onToast} />
 
           <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-4)', lineHeight: 1.6 }}>
-            Looking for <a href="#routes" style={{ color: 'var(--accent-bright)' }}>always-reply groups</a>?
+            Looking for <a href="/routes" style={{ color: 'var(--accent-bright)' }}>always-reply groups</a>?
             They're routing rules — find them in <b>Routes</b>.{' '}
-            <a href="#settings" style={{ color: 'var(--accent-bright)' }}>Allowed callers</a> are channel-agnostic and live in <b>Settings</b>.
+            <a href="/settings" style={{ color: 'var(--accent-bright)' }}>Allowed callers</a> are channel-agnostic and live in <b>Settings</b>.
           </div>
         </div>
       </div>

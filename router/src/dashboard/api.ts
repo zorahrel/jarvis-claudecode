@@ -26,6 +26,24 @@ import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, 
 import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
 import { getAllServices, generatePlist } from "../services/services";
 import { discoverLocalSessions, dispatchOpenTarget, availableTargets, type OpenTargetId } from "../services/localSessions";
+import {
+  getLiveTokensFromSdk,
+  getLiveTokensFromJsonl,
+  costPerTurn,
+  normalizeModel,
+  calculateBreakdown,
+  detectCruft,
+  getSuggestionsForCruft,
+  extractToolUseEvents,
+  countCompactions,
+  diskStats,
+  recentSessions,
+  analyzeAgentBaselines,
+  type SpawnConfig,
+} from "../services/contextInspector/index.js";
+import { getSessionMetadata } from "../services/claude";
+import { promises as fsPromises } from "fs";
+import { homedir as getHomedir } from "os";
 import { subscribe as subscribeNotch, emitNotch } from "../notch/events";
 import { NotchConnector } from "../connectors/notch";
 import { WhatsAppConnector } from "../connectors/whatsapp";
@@ -567,38 +585,137 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, plugin: pluginName, enabled: next });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
-  // --- MCP SERVER STATUS (runs `claude mcp list`) ---
+  // --- MCP SERVER STATUS — read from in-memory cache (refreshed every 60s) ---
   } else if (path === "/api/mcp-status" && req.method === "GET") {
     try {
-      const { execFile } = await import("child_process");
-      const cli = resolveCliPath();
-      const out: string = await new Promise((resolve, reject) => {
-        execFile(cli, ["mcp", "list"], { timeout: 15000 }, (err, stdout, stderr) => {
-          if (err && !stdout) reject(new Error(stderr || err.message));
-          else resolve(stdout);
-        });
-      });
-      // Parse lines like: "name: target - ✓ Connected" / "- ! Needs authentication" / "- ✗ Failed"
-      // Name may contain colons (e.g. "plugin:playwright:playwright"), so split from the right.
-      const servers = out.split("\n")
-        .map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trim()) // strip ANSI
-        .map((l) => {
-          const m = l.match(/^(.+?)\s+-\s+([✓✗!])\s+(.*)$/);
-          if (!m) return null;
-          const [, head, icon, statusText] = m;
-          // Separator is the FIRST ": " (colon + space) — names may contain colons
-          // (e.g. "plugin:playwright:playwright") and targets may be URLs ("https://...").
-          const splitIdx = head.indexOf(": ");
-          if (splitIdx < 0) return null;
-          const name = head.slice(0, splitIdx).trim();
-          const target = head.slice(splitIdx + 2).trim();
-          if (!name) return null;
-          const status = icon === "✓" ? "connected" : icon === "!" ? "auth" : "failed";
-          return { name, target, status, statusText: statusText.trim() };
-        })
-        .filter(Boolean);
-      json(req, res, { servers });
+      const { listMcpStatus, getLastRefreshedAt, refreshMcpStatus } = await import("../services/mcp-status");
+      let servers = listMcpStatus();
+      // If the cache is empty (boot race), force a refresh once.
+      if (servers.length === 0 && getLastRefreshedAt() === 0) {
+        await refreshMcpStatus();
+        servers = listMcpStatus();
+      }
+      json(req, res, { servers, refreshedAt: getLastRefreshedAt() });
     } catch (e: any) { json(req, res, { error: e.message, servers: [] }, 200); }
+
+  // --- MCP REFRESH STATUS — invalidate cache, re-run `claude mcp list` ---
+  } else if (path === "/api/mcp/refresh" && req.method === "POST") {
+    try {
+      const { refreshMcpStatus, listMcpStatus } = await import("../services/mcp-status");
+      await refreshMcpStatus();
+      json(req, res, { ok: true, servers: listMcpStatus() });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MCP AUTHENTICATE — spawn one-shot mcp-remote (or claude mcp) for OAuth ---
+  // The user clicks "Authenticate" on a needs-auth MCP. We launch the auth
+  // flow directly (one popup, not N parallel ones), wait for it to finish,
+  // then refresh status. Works for stdio MCPs whose `command` is `npx mcp-remote URL`
+  // — we re-invoke that command which triggers the OAuth dance.
+  } else if (path === "/api/mcp/authenticate" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
+      const target = listMcpStatus().find(s => s.name === body.name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+
+      // Two stores must be in sync for the SDK-spawned mcp-remote to find a
+      // valid token: claude's own fcache + mcp-remote's `~/.mcp-auth/`. The
+      // dashboard's previous "click to auth" path only triggered claude's
+      // half. Spawn `npx mcp-remote URL` directly so it writes to its own
+      // store, which is what the SDK will read on the next session spawn.
+      // Only works for stdio entries whose command is `npx mcp-remote URL`.
+      const m = target.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
+      if (!m) {
+        return json(req, res, {
+          ok: false,
+          reason: `not an mcp-remote-based server (target: ${target.target}). For non-OAuth servers run \`claude mcp\` interactively.`,
+        });
+      }
+      const url = m[1];
+      const { spawn } = await import("child_process");
+
+      // mcp-remote in stdio mode runs forever; we keep it alive long enough for
+      // the user to complete OAuth in the browser tab, then kill it. Tokens are
+      // persisted to ~/.mcp-auth/ as soon as OAuth completes, so a kill after
+      // that point is safe.
+      const child = spawn("npx", ["mcp-remote", url], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+      });
+      const start = Date.now();
+      const TIMEOUT_MS = 180_000; // 3 min — enough to log in slowly
+      let stderrBuf = "";
+      child.stdout?.on("data", () => { /* drain */ });
+      child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
+
+      // Watch ~/.mcp-auth/mcp-remote-*/ for a fresh tokens.json — that's the
+      // signal that OAuth completed. Polls every 1s; gives up at TIMEOUT_MS.
+      const { readdirSync, statSync } = await import("fs");
+      const { join } = await import("path");
+      const HOME = process.env.HOME ?? "";
+      const authRoot = join(HOME, ".mcp-auth");
+      const baselineMtimes = new Map<string, number>();
+      try {
+        for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+          for (const f of readdirSync(join(authRoot, verDir))) {
+            if (f.endsWith("_tokens.json")) {
+              try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const tokenAppeared = await new Promise<boolean>((resolve) => {
+        const deadline = Date.now() + TIMEOUT_MS;
+        const interval = setInterval(() => {
+          if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
+          try {
+            for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+              for (const f of readdirSync(join(authRoot, verDir))) {
+                if (!f.endsWith("_tokens.json")) continue;
+                const key = `${verDir}/${f}`;
+                const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
+                const baseline = baselineMtimes.get(key);
+                if (baseline === undefined || mtime > baseline) {
+                  clearInterval(interval); resolve(true); return;
+                }
+              }
+            }
+          } catch { /* ignore */ }
+        }, 1000);
+        child.on("close", () => { clearInterval(interval); resolve(false); });
+      });
+
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      await refreshMcpStatus();
+      json(req, res, {
+        ok: tokenAppeared,
+        reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
+        durationMs: Date.now() - start,
+        name: body.name,
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MCP RESTART — kill local mcp-remote child for that server URL ---
+  // Useful when an MCP gets stuck. We pkill processes whose command line
+  // contains the MCP target URL. Server respawns on the next session.
+  } else if (path === "/api/mcp/restart" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
+      const target = listMcpStatus().find(s => s.name === body.name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+      // Use the URL fragment as a needle; for non-URL targets fall back to name.
+      const needle = target.target.includes("://") ? target.target : target.name;
+      const { execFile } = await import("child_process");
+      await new Promise<void>((resolve) => {
+        execFile("pkill", ["-f", needle], { timeout: 5000 }, () => resolve());
+      });
+      await refreshMcpStatus();
+      json(req, res, { ok: true, name: body.name, killed: needle });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- ROUTES GET --- (thin matchers referencing agents by name)
   } else if (path === "/api/routes" && req.method === "GET") {
@@ -1754,6 +1871,26 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     connector.inject(text, body.from ?? "notch").catch(() => {});
     json(req, res, { ok: true });
 
+  } else if (path === "/api/notch/abort" && req.method === "POST") {
+    // Hot-corner / dashboard "stop Jarvis". Cancels in-flight reply by
+    // bumping the connector's generation counter; the running
+    // handleMessage() finishes in the background but its reply() and
+    // TTS effects are dropped.
+    const connector = NotchConnector.getInstance();
+    if (!connector) { json(req, res, { error: "notch connector not running" }, 503); return; }
+    connector.abort();
+    json(req, res, { ok: true });
+
+  } else if (path === "/api/notch/barge" && req.method === "POST") {
+    // Hard barge-in: chiamato dal native (NotchController) quando il Silero
+    // VAD detecta voce dell'utente mentre il TTS sta playing. Stesso pattern
+    // di abort() ma il connector emette `audio.stop` + state→`recording` così
+    // l'UI non torna idle ma resta in posa "ti sto ascoltando".
+    const connector = NotchConnector.getInstance();
+    if (!connector) { json(req, res, { error: "notch connector not running" }, 503); return; }
+    connector.barge();
+    json(req, res, { ok: true });
+
   } else if (path === "/api/notch/history" && req.method === "GET") {
     // Persistent chat log — tail of the notch-history JSONL. The default 100
     // records is enough to rehydrate both the native WKWebView and the
@@ -1913,14 +2050,24 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     }
 
   } else if (path.startsWith("/api/notch/tts-stream/") && req.method === "GET") {
-    // Live ElevenLabs proxy — pipes the streaming response straight to the
-    // player as chunked audio/mpeg, so playback can start while bytes are
-    // still arriving (~150-250 ms first byte vs ~3 s for the file path).
-    // Single-consumer: the registered body is removed from the map on take.
+    // Live TTS proxy — pipes a streaming response (Cartesia SSE→MP3 via
+    // ffmpeg, or ElevenLabs streaming endpoint) straight to the WebView
+    // <audio> element as chunked audio/mpeg. Playback can start while
+    // bytes are still arriving — Cartesia: ~100-200ms TTFA; ElevenLabs:
+    // ~150-250ms TTFA.
+    //
+    // Multi-consumer caching: WebKit fetches an audio URL TWICE in many
+    // cases — first a probe range request to validate, then the actual
+    // playback fetch. Single-consumer registry (original ElevenLabs
+    // pattern) made the second fetch find nothing → silent playback.
+    // takeTtsStream now tees the stream on first hit, buffers in
+    // background, serves from buffer on subsequent hits.
     const id = path.slice("/api/notch/tts-stream/".length);
     if (!/^[0-9a-fA-F-]{8,}$/.test(id)) {
       json(req, res, { error: "not found" }, 404); return;
     }
+    const range = req.headers["range"] ?? "";
+    log.info({ id, range, ua: (req.headers["user-agent"] || "").slice(0, 60) }, "[tts-stream] consumer hit");
     const { takeTtsStream } = await import("../services/tts.js");
     const body = takeTtsStream(id);
     if (!body) { json(req, res, { error: "expired" }, 404); return; }
@@ -1928,6 +2075,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     res.writeHead(200, {
       "Content-Type": "audio/mpeg",
       "Cache-Control": "no-store",
+      // Non offriamo range — WebKit allora non fa probe request separati
+      "Accept-Ranges": "none",
       "Access-Control-Allow-Origin": corsOrigin(req),
     });
     const node = Readable.fromWeb(body as any);
@@ -1983,10 +2132,206 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
   } else if (path === "/api/local-sessions" && req.method === "GET") {
     try {
       const sessions = await discoverLocalSessions();
-      json(req, res, sessions);
+      const projectsRoot = join(getHomedir(), ".claude", "projects");
+
+      // Enrich each session with live tokens + cost + model + compactionCount.
+      // sessionKey/agent/fullAccess come from the sidecar (set in discovery.ts).
+      const enriched = await Promise.all(sessions.map(async (s) => {
+        let liveTokens: number | undefined;
+        let liveTokensSource: "sdk-task-progress" | "sdk-result" | "jsonl-tail" | "unknown" | undefined;
+        let liveTokensAt: number | undefined;
+        let contextWindow: number | undefined;
+        let lastTurnCostUsd: number | undefined;
+        let model: string | undefined;
+        let compactionCount = 0;
+
+        // Router-spawned: sessionKey set by sidecar.
+        if (s.sessionKey) {
+          const meta = getSessionMetadata(s.sessionKey);
+          if (meta) {
+            model = meta.resolvedModel ?? meta.model;
+            compactionCount = meta.compactionCount;
+            const snap = getLiveTokensFromSdk({
+              sessionKey: s.sessionKey,
+              resolvedModel: meta.resolvedModel,
+              totalInputTokens: meta.totalInputTokens,
+              compactionCount: meta.compactionCount,
+              alive: meta.alive,
+            });
+            liveTokens = snap.totalTokens;
+            liveTokensSource = snap.source;
+            liveTokensAt = snap.capturedAt;
+            contextWindow = snap.contextWindow;
+            if (snap.lastTurnUsage) {
+              const c = costPerTurn(snap.lastTurnUsage, normalizeModel(model ?? null));
+              lastTurnCostUsd = c.totalUsd;
+            }
+          }
+        }
+
+        // Fallback for bare CLI or router-spawned without sessionKey: read JSONL tail.
+        if (liveTokens === undefined && s.transcriptPath) {
+          const snap = await getLiveTokensFromJsonl(s.transcriptPath, model ?? null);
+          if (snap) {
+            liveTokens = snap.totalTokens;
+            liveTokensSource = snap.source;
+            liveTokensAt = snap.capturedAt;
+            contextWindow = snap.contextWindow;
+            if (snap.lastTurnUsage) {
+              const c = costPerTurn(snap.lastTurnUsage, normalizeModel(model ?? null));
+              lastTurnCostUsd = c.totalUsd;
+            }
+          }
+          if (s.transcriptPath) {
+            compactionCount = await countCompactions(s.transcriptPath);
+          }
+        }
+
+        return {
+          ...s,
+          liveTokens,
+          liveTokensSource,
+          liveTokensAt,
+          contextWindow,
+          lastTurnCostUsd,
+          model,
+          compactionCount,
+        };
+      }));
+
+      // Aggregate stats.
+      const totalLiveTokens = enriched.reduce((sum, s) => sum + (s.liveTokens ?? 0), 0);
+      const costsKnown = enriched.map((s) => s.lastTurnCostUsd).filter((c): c is number => typeof c === "number");
+      const avgCostPerTurnUsd = costsKnown.length > 0
+        ? costsKnown.reduce((a, b) => a + b, 0) / costsKnown.length
+        : 0;
+
+      const [disk, recent] = await Promise.all([
+        diskStats(projectsRoot),
+        recentSessions(projectsRoot, 10),
+      ]);
+
+      json(req, res, {
+        sessions: enriched,
+        aggregate: {
+          totalSessions: enriched.length,
+          totalLiveTokens,
+          avgCostPerTurnUsd,
+        },
+        disk,
+        recent,
+      });
     } catch (err: unknown) {
       log.warn({ err }, "[local-sessions] discovery failed");
       json(req, res, { error: "discovery failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && /^\/api\/sessions\/[^/]+\/breakdown$/.test(path)) {
+    // GET /api/sessions/:sessionId/breakdown — drill-down 8-category view (CTX-14).
+    const parts = path.split("/");
+    const sessionId = parts[3];
+    try {
+      const sessions = await discoverLocalSessions();
+      const target = sessions.find((s) => s.sessionId === sessionId);
+      if (!target) { json(req, res, { error: "session not found" }, 404); return; }
+
+      const sessionKey = target.sessionKey;
+      const meta = sessionKey ? getSessionMetadata(sessionKey) : null;
+
+      let liveTotal = 0;
+      if (meta && sessionKey) {
+        const snap = getLiveTokensFromSdk({
+          sessionKey,
+          resolvedModel: meta.resolvedModel,
+          totalInputTokens: meta.totalInputTokens,
+          compactionCount: meta.compactionCount,
+          alive: meta.alive,
+        });
+        liveTotal = snap.totalTokens;
+      } else if (target.transcriptPath) {
+        const snap = await getLiveTokensFromJsonl(target.transcriptPath, null);
+        if (snap) liveTotal = snap.totalTokens;
+      }
+
+      const spawn: SpawnConfig = {
+        agent: target.agent ?? (sessionKey ? sessionKey.split(":").pop() ?? "unknown" : "bare-cli"),
+        fullAccess: target.fullAccess ?? meta?.fullAccess ?? false,
+        inheritUserScope: target.inheritUserScope ?? meta?.inheritUserScope ?? false,
+        tools: [],
+        workspace: meta?.workspace ?? target.cwd,
+        mcpConfigPath: join(getHomedir(), ".claude.json"),
+      };
+
+      const breakdown = await calculateBreakdown(spawn, liveTotal);
+      json(req, res, {
+        sessionId,
+        sessionKey: sessionKey ?? null,
+        agent: spawn.agent,
+        ...breakdown,
+      });
+    } catch (err: unknown) {
+      log.warn({ err, sessionId }, "[breakdown] failed");
+      json(req, res, { error: "breakdown failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && path === "/api/agents/baseline") {
+    // GET /api/agents/baseline — STATIC baseline per agent template (no live data).
+    // For each agent.yaml under ~/.claude/jarvis/agents/, computes the spawn-time
+    // token cost (history=0) + cruft hints derived from the config alone.
+    // This is the headline view of the Context Inspector — answers
+    // "quanto pesa ogni agent template prima di parlare?".
+    try {
+      const agents = await analyzeAgentBaselines();
+      json(req, res, { agents });
+    } catch (err: unknown) {
+      log.warn({ err }, "[agents/baseline] failed");
+      json(req, res, { error: "agents baseline failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && path === "/api/sessions/cruft") {
+    // GET /api/sessions/cruft — global cruft view per agent (CTX-08/09/10).
+    try {
+      const sessions = await discoverLocalSessions();
+      type CruftEntry = {
+        agent: string;
+        findings: Array<{ kind: string; name: string; loadedTokens: number; recentTurns: number; callCount: number }>;
+        suggestions: Array<{ id: string; when: string; action: string; rationale: string }>;
+      };
+      const findingsByAgent: Record<string, CruftEntry> = {};
+
+      for (const s of sessions) {
+        if (!s.transcriptPath) continue;
+        const sessionKey = s.sessionKey ?? null;
+        const meta = sessionKey ? getSessionMetadata(sessionKey) : null;
+        const agent = s.agent ?? (sessionKey ? sessionKey.split(":").pop() ?? "unknown" : "bare-cli");
+
+        let mcpsLoaded: string[] = [];
+        const isFullAccess = s.fullAccess ?? meta?.fullAccess ?? false;
+        if (isFullAccess) {
+          try {
+            const cfgRaw = await fsPromises.readFile(join(getHomedir(), ".claude.json"), "utf-8");
+            const cfg = JSON.parse(cfgRaw);
+            mcpsLoaded = Object.keys(cfg.mcpServers ?? {});
+          } catch { /* empty mcpsLoaded */ }
+        }
+        // v1: skills index reader is deferred (Plan 04 must_haves CTX-09 caveat).
+        const skillsLoaded: string[] = [];
+
+        const events = await extractToolUseEvents(s.transcriptPath, 5);
+        const findings = detectCruft({ mcpsLoaded, skillsLoaded, toolUseEvents: events, recentTurns: 5 });
+        const suggestions = getSuggestionsForCruft(findings, {
+          agentName: agent,
+          inheritUserScope: s.inheritUserScope ?? meta?.inheritUserScope,
+          fullAccess: isFullAccess,
+        });
+
+        findingsByAgent[agent] = { agent, findings, suggestions };
+      }
+
+      json(req, res, { agents: Object.values(findingsByAgent) });
+    } catch (err: unknown) {
+      log.warn({ err }, "[cruft] failed");
+      json(req, res, { error: "cruft failed" }, 500);
     }
 
   } else if (/^\/api\/local-sessions\/\d+\/targets$/.test(path) && req.method === "GET") {

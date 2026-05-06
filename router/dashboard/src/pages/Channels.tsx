@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
+import { navigate } from '../lib/url-state'
 import { ChevronDown, ChevronUp, RefreshCw, Settings } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -37,7 +38,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
     refreshRoutes()
   }, [refreshChannels, refreshState, refreshRoutes])
 
-  const [expandedChannel, setExpandedChannel] = useState<string | null>(() => parseHashFocus(window.location.hash) || null)
+  const [expandedChannel, setExpandedChannel] = useState<string | null>(() => parseHashFocus(window.location.hash || window.location.search) || null)
   const [toggling, setToggling] = useState<Record<string, boolean>>({})
   const [revealedTokens, setRevealedTokens] = useState<Record<string, boolean>>({})
   const [costByChannel30d, setCostByChannel30d] = useState<Record<string, number>>({})
@@ -55,11 +56,13 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
 
   useEffect(() => {
     const onHash = () => {
-      const focus = parseHashFocus(window.location.hash)
+      const focus = parseHashFocus(window.location.hash || window.location.search)
       if (focus) setExpandedChannel(focus)
     }
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => window.removeEventListener('popstate', onHash);
+      window.removeEventListener('hashchange', onHash)
   }, [])
 
   const [waSettingsOpen, setWaSettingsOpen] = useState(false)
@@ -159,7 +162,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                 </Tooltip>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, alignItems: 'center' }}>
                   <BadgeLink
-                    href={`#/routes?filter=channel:${encodeURIComponent(ch.name)}`}
+                    href={`/routes?filter=channel:${encodeURIComponent(ch.name)}`}
                     tone="neutral"
                     size="xs"
                     count={chRoutes.length}
@@ -169,7 +172,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                   />
                   {sessions.length > 0 && (
                     <BadgeLink
-                      href={`#/sessions?filter=channel:${encodeURIComponent(ch.name)}`}
+                      href={`/sessions?filter=channel:${encodeURIComponent(ch.name)}`}
                       tone="ok"
                       size="xs"
                       count={sessions.length}
@@ -180,7 +183,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                   )}
                   {(costByChannel30d[ch.name] || 0) > 0 && (
                     <BadgeLink
-                      href={`#/analytics?groupBy=channel&period=30d&filter=channel:${encodeURIComponent(ch.name)}`}
+                      href={`/analytics?groupBy=channel&period=30d&filter=channel:${encodeURIComponent(ch.name)}`}
                       tone="muted"
                       size="xs"
                       label={`$${costByChannel30d[ch.name].toFixed(2)} · 30d`}
@@ -272,7 +275,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                           size="xs"
                           onClick={(e) => {
                             e.stopPropagation()
-                            window.location.hash = `#/agents?focus=${encodeURIComponent(agentName)}`
+                            navigate(`agents?focus=${encodeURIComponent(agentName)}`)
                           }}
                         />
                       </div>
@@ -348,7 +351,7 @@ export function Channels({ onToast }: { onToast?: (msg: string, type: 'success' 
                     Edit channel settings in{' '}
                     <a
                       style={{ color: 'var(--accent-bright)', cursor: 'pointer' }}
-                      onClick={(e) => { e.stopPropagation(); window.location.hash = 'settings' }}
+                      onClick={(e) => { e.stopPropagation(); navigate('settings') }}
                     >
                       config.yaml
                     </a>.

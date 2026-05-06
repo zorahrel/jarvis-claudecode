@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
+import { navigate } from '../lib/url-state'
 import { Plus, Sparkles, LayoutGrid, Table2 } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -13,6 +14,10 @@ import { AgentName } from '../components/ui/AgentName'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Input, Select, Textarea } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
+import type { AgentBaseline } from '../api/client'
+import { BreakdownStackedBar } from '../components/context/BreakdownStackedBar'
+import { formatTokens, colorForThreshold } from '../components/context/thresholds'
+import { AlertTriangle, Info, AlertCircle } from 'lucide-react'
 import { RelatedList } from '../components/RelatedList'
 import { ToolIcon } from '../icons'
 import type { FullAgent, ProcessSession, Tool } from '../api/client'
@@ -181,8 +186,22 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
   const [savingGlobal, setSavingGlobal] = useState(false)
 
   const [turnsByAgent7d, setTurnsByAgent7d] = useState<Record<string, number>>({})
-  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash))
-  const [hashFocus, setHashFocus] = useState(() => parseHashFocus(window.location.hash))
+
+  // Static baseline analysis per agent (no live data, fetched once on mount).
+  const [baselines, setBaselines] = useState<AgentBaseline[]>([])
+  useEffect(() => {
+    let cancelled = false
+    api.agentsBaseline()
+      .then((r) => { if (!cancelled) setBaselines(r.agents) })
+      .catch(() => { /* swallow — baselines optional */ })
+    return () => { cancelled = true }
+  }, [])
+  const baselineFor = useCallback(
+    (name: string): AgentBaseline | undefined => baselines.find((b) => b.agent === name),
+    [baselines],
+  )
+  const [hashFilter, setHashFilter] = useState(() => parseHashFilter(window.location.hash || window.location.search))
+  const [hashFocus, setHashFocus] = useState(() => parseHashFocus(window.location.hash || window.location.search))
   const [detailAgent, setDetailAgent] = useState<string | null>(null)
   const [allRoutes, setAllRoutes] = useState<Array<{ index: number; channel: string; workspace: string; from: string; group: string | null }>>([])
 
@@ -223,11 +242,13 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
 
   useEffect(() => {
     const onHash = () => {
-      setHashFilter(parseHashFilter(window.location.hash))
-      setHashFocus(parseHashFocus(window.location.hash))
+      setHashFilter(parseHashFilter(window.location.hash || window.location.search))
+      setHashFocus(parseHashFocus(window.location.hash || window.location.search))
     }
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => window.removeEventListener('popstate', onHash);
+      window.removeEventListener('hashchange', onHash)
   }, [])
 
   // Auto-open detail panel when ?focus=<name>
@@ -576,6 +597,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <th style={jarvisHeadCell}>Own files</th>
                 <th style={jarvisHeadCell}>Model</th>
                 <th style={jarvisHeadCell}>Tools</th>
+                <th style={{ ...jarvisHeadCell, textAlign: 'right' }} title="Spawn-time tokens: system + tools + MCP + skills + CLAUDE.md">Baseline</th>
                 <th style={{ ...jarvisHeadCell, textAlign: 'right' }}>Total</th>
               </tr>
             </thead>
@@ -629,6 +651,24 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <td style={jarvisBodyCell}>
                   <Badge tone="jarvis" size="sm" title="fullAccess: all MCP servers, no tool restrictions">FULL</Badge>
                   <div style={{ fontSize: 9, color: 'var(--text-4)', marginTop: 5 }}>all MCP, no filters</div>
+                </td>
+                <td style={{ ...jarvisBodyCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  {(() => {
+                    const b = baselineFor('jarvis')
+                    if (!b) return <span style={{ fontSize: 11, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>
+                    const tot = b.breakdown.totalEstimated
+                    const ratio = Math.min(1, tot / 200000)
+                    return (
+                      <span
+                        onClick={() => setDetailAgent('jarvis')}
+                        title={`Click for breakdown · ${b.cruftHints.length} cruft hint${b.cruftHints.length === 1 ? '' : 's'}`}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: colorForThreshold(ratio), cursor: 'pointer' }}
+                      >
+                        {formatTokens(tot)}
+                        {b.cruftHints.length > 0 && <AlertTriangle size={12} color="#eab308" />}
+                      </span>
+                    )
+                  })()}
                 </td>
                 <td style={{ ...jarvisBodyCell, textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 13, color: 'var(--text-1)' }}>
                   {(agentTotalSize(jarvisAgent) / 1024).toFixed(1)}KB
@@ -684,6 +724,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <th style={tableHeadCell}>Routes</th>
                 <th style={tableHeadCell}>Own files</th>
                 <th style={tableHeadCell}>Tools</th>
+                <th style={{ ...tableHeadCell, textAlign: 'right' }} title="Spawn-time tokens: system + tools + MCP + skills + CLAUDE.md">Baseline</th>
                 <th style={{ ...tableHeadCell, textAlign: 'right' }}>Total</th>
                 <th style={{ ...tableHeadCell, textAlign: 'right' }}></th>
               </tr>
@@ -708,7 +749,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         {routeLabels.length === 0 && <Badge tone="muted" size="xs">unused</Badge>}
                         {a.routes.length > 0 && (
                           <BadgeLink
-                            href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                             tone="neutral"
                             size="xs"
                             count={a.routes.length}
@@ -719,7 +760,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         )}
                         {sessions.length > 0 && (
                           <BadgeLink
-                            href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/sessions?filter=agent:${encodeURIComponent(a.name)}`}
                             tone="ok"
                             size="xs"
                             count={sessions.length}
@@ -730,7 +771,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         )}
                         {turns7d > 0 && (
                           <BadgeLink
-                            href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
                             tone="muted"
                             size="xs"
                             count={turns7d}
@@ -758,7 +799,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                         {routeLabels.length > 0 ? routeLabels.map((label, i) => (
                           <BadgeLink
                             key={i}
-                            href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                            href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                             tone="accent"
                             size="xs"
                             label={label}
@@ -784,6 +825,24 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                             {a.tools?.length || 0} tools
                           </span>
                         )}
+                    </td>
+                    <td style={{ ...tableBodyCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      {(() => {
+                        const b = baselineFor(a.name)
+                        if (!b) return <span style={{ fontSize: 10, color: 'var(--text-4)' }}>—</span>
+                        const tot = b.breakdown.totalEstimated
+                        const ratio = Math.min(1, tot / 200000)
+                        return (
+                          <span
+                            onClick={(e) => { e.stopPropagation(); setDetailAgent(a.name) }}
+                            title={`Click for breakdown · ${b.cruftHints.length} cruft hint${b.cruftHints.length === 1 ? '' : 's'}`}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, color: colorForThreshold(ratio), cursor: 'pointer' }}
+                          >
+                            {formatTokens(tot)}
+                            {b.cruftHints.length > 0 && <AlertTriangle size={11} color="#eab308" />}
+                          </span>
+                        )
+                      })()}
                     </td>
                     <td style={{ ...tableBodyCell, textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)' }}>
                       {(agentTotalSize(a) / 1024).toFixed(1)}KB
@@ -816,7 +875,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                   {hasFullAccess && <Badge tone="accent" size="xs">FULL</Badge>}
                   {a.routes.length > 0 && (
                     <BadgeLink
-                      href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                      href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                       tone="neutral"
                       size="xs"
                       count={a.routes.length}
@@ -826,7 +885,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                   )}
                   {sessions.length > 0 && (
                     <BadgeLink
-                      href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                      href={`/sessions?filter=agent:${encodeURIComponent(a.name)}`}
                       tone="ok"
                       size="xs"
                       count={sessions.length}
@@ -836,7 +895,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                   )}
                   {turns7d > 0 && (
                     <BadgeLink
-                      href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                      href={`/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
                       tone="muted"
                       size="xs"
                       count={turns7d}
@@ -1056,6 +1115,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
           const sessions = agentActiveSessions(a.name)
           const routesForAgent = allRoutes.filter(r => r.workspace === a.name)
           const turns7d = turnsByAgent7d[a.name] || 0
+          const baseline = baselineFor(a.name)
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -1065,28 +1125,77 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
                 <Button size="sm" onClick={() => { setDetailAgent(null); openToolsPicker(a.name, a.tools || []) }}>
                   Edit tools →
                 </Button>
-                <Button size="sm" onClick={() => { window.location.hash = `#/memory?agent=${encodeURIComponent(a.name)}` }}>
+                <Button size="sm" onClick={() => { navigate(`memory?agent=${encodeURIComponent(a.name)}`) }}>
                   View memory →
                 </Button>
               </div>
 
+              {baseline && (
+                <div style={{ background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>
+                      Context baseline
+                    </span>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600, color: colorForThreshold(Math.min(1, baseline.breakdown.totalEstimated / 200000)) }}>
+                      {formatTokens(baseline.breakdown.totalEstimated)}
+                    </span>
+                    <span style={{ fontSize: 10, color: 'var(--text-4)' }}>
+                      of 200k window · spawn-time estimate
+                    </span>
+                  </div>
+
+                  {baseline.cruftHints.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      {baseline.cruftHints.map((h) => {
+                        const Icon = h.severity === 'crit' ? AlertCircle : h.severity === 'warn' ? AlertTriangle : Info
+                        const color = h.severity === 'crit' ? '#ef4444' : h.severity === 'warn' ? '#eab308' : '#3b82f6'
+                        return (
+                          <div key={h.id} style={{ display: 'flex', gap: 6, padding: 6, marginBottom: 4, background: 'var(--bg-0)', borderRadius: 6, fontSize: 11, color: 'var(--text-2)' }}>
+                            <Icon size={12} color={color} style={{ flexShrink: 0, marginTop: 2 }} />
+                            <div style={{ flex: 1 }}>
+                              <div>{h.message}</div>
+                              {h.potentialSavingsTokens && (
+                                <div style={{ fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 }}>
+                                  Potential savings: ~{formatTokens(h.potentialSavingsTokens)} tok
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  <BreakdownStackedBar
+                    breakdown={{
+                      sessionId: `baseline:${a.name}`,
+                      sessionKey: null,
+                      agent: a.name,
+                      liveTotal: baseline.breakdown.totalEstimated,
+                      categories: baseline.breakdown.categories,
+                      totalEstimated: baseline.breakdown.totalEstimated,
+                    }}
+                  />
+                </div>
+              )}
+
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <BadgeLink
-                  href={`#/routes?filter=agent:${encodeURIComponent(a.name)}`}
+                  href={`/routes?filter=agent:${encodeURIComponent(a.name)}`}
                   tone="accent"
                   size="sm"
                   count={routesForAgent.length}
                   label="routes"
                 />
                 <BadgeLink
-                  href={`#/sessions?filter=agent:${encodeURIComponent(a.name)}`}
+                  href={`/sessions?filter=agent:${encodeURIComponent(a.name)}`}
                   tone={sessions.length > 0 ? 'ok' : 'muted'}
                   size="sm"
                   count={sessions.length}
                   label="sessions"
                 />
                 <BadgeLink
-                  href={`#/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
+                  href={`/analytics?groupBy=route&period=7d&filter=agent:${encodeURIComponent(a.name)}`}
                   tone="muted"
                   size="sm"
                   count={turns7d}

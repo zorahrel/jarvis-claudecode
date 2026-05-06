@@ -6,13 +6,14 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
+import type { ContextLimits } from "../types/config";
 import { logger } from "./logger";
 
 const log = logger.child({ module: "session-cache" });
 
 const CACHE_DIR = join(process.cwd(), "data", "sessions");
-const MAX_EXCHANGES = 10; // keep last 10 exchanges per session
-const MAX_CHARS = 8000; // max chars for context injection (avoid blowing up prompt)
+const DEFAULT_MAX_EXCHANGES = 10;
+const DEFAULT_MAX_CHARS = 8000;
 
 export interface Exchange {
   user: string;
@@ -74,8 +75,8 @@ export function recordExchange(key: string, userMsg: string, assistantMsg: strin
     timestamp: Date.now(),
   });
   // Keep only last N
-  if (data.exchanges.length > MAX_EXCHANGES) {
-    data.exchanges = data.exchanges.slice(-MAX_EXCHANGES);
+  if (data.exchanges.length > DEFAULT_MAX_EXCHANGES) {
+    data.exchanges = data.exchanges.slice(-DEFAULT_MAX_EXCHANGES);
   }
   saveSession(key, data);
 }
@@ -85,18 +86,23 @@ export function recordExchange(key: string, userMsg: string, assistantMsg: strin
  * Returns a string to prepend to the first message of a new session,
  * or empty string if no history.
  */
-export function buildContextFromCache(key: string): string {
+export function buildContextFromCache(key: string, limits?: ContextLimits): string {
+  const maxChars = limits?.sessionCacheMaxChars ?? DEFAULT_MAX_CHARS;
+  const maxExchanges = limits?.sessionCacheMaxExchanges ?? DEFAULT_MAX_EXCHANGES;
+
   const data = loadSession(key);
   if (data.exchanges.length === 0) return "";
 
-  // Build from most recent, respecting char budget
+  // Build from most recent, respecting char and exchange budgets
   const parts: string[] = [];
   let totalChars = 0;
+  const exchanges = data.exchanges.slice(-maxExchanges);
 
-  for (let i = data.exchanges.length - 1; i >= 0; i--) {
-    const ex = data.exchanges[i];
-    const block = `User: ${ex.user}\nAssistant: ${ex.assistant}`;
-    if (totalChars + block.length > MAX_CHARS) break;
+  for (let i = exchanges.length - 1; i >= 0; i--) {
+    const ex = exchanges[i];
+    // Compact format: "U: ...\nA: ..." saves ~10% chars vs "User: ...\nAssistant: ..."
+    const block = `U: ${ex.user}\nA: ${ex.assistant}`;
+    if (totalChars + block.length > maxChars) break;
     parts.unshift(block);
     totalChars += block.length;
   }
@@ -104,9 +110,9 @@ export function buildContextFromCache(key: string): string {
   if (parts.length === 0) return "";
 
   return [
-    "[Previous conversation context — you are resuming an ongoing session]",
+    "[Resuming session — recent exchanges]",
     ...parts,
-    "[End of previous context — new message follows]",
+    "[End of context]",
     "",
   ].join("\n\n");
 }

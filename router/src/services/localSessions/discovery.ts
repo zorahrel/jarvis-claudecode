@@ -6,6 +6,7 @@ import { promisify } from "util";
 import { logger } from "../logger";
 import { EVENTS_DIR } from "./hooksInstaller";
 import type { LocalSession, LocalSessionStatus } from "./types";
+import { readSessionSidecar } from "../contextInspector/sidecar.js";
 
 const log = logger.child({ module: "localSessions:discovery" });
 const execFileAsync = promisify(execFile);
@@ -284,6 +285,11 @@ export async function discoverLocalSessions(): Promise<LocalSession[]> {
         } catch { /* transcript gone */ }
       }
 
+      // Context Inspector: read sidecar by PID for sessionKey/agent linkage.
+      // Sidecar is written by claude.ts registerSessionSidecars after the
+      // first task_progress event; removed by killSession. MAJOR 5 fix.
+      const sidecar = await readSessionSidecar(p.pid);
+
       return {
         pid: p.pid,
         cwd,
@@ -297,7 +303,14 @@ export async function discoverLocalSessions(): Promise<LocalSession[]> {
         tty,
         parentCommand: p.command,
         preview,
-        isRouterSpawned: /JARVIS_SPAWN=1/.test(p.command) || p.command.includes(".claude/jarvis/router"),
+        isRouterSpawned:
+          sidecar !== null ||
+          /JARVIS_SPAWN=1/.test(p.command) ||
+          p.command.includes(".claude/jarvis/router"),
+        sessionKey: sidecar?.sessionKey,
+        agent: sidecar?.agent,
+        fullAccess: sidecar?.fullAccess,
+        inheritUserScope: sidecar?.inheritUserScope,
       };
     }),
   );

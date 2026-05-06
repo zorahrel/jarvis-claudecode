@@ -216,6 +216,18 @@ export interface LocalSession {
   parentCommand: string | null
   preview: { lastUserMessage: string | null; lastAssistantText: string | null }
   isRouterSpawned: boolean
+  // Context Inspector enrichment — populated by /api/local-sessions handler.
+  liveTokens?: number
+  liveTokensSource?: 'sdk-task-progress' | 'sdk-result' | 'jsonl-tail' | 'unknown'
+  liveTokensAt?: number
+  contextWindow?: number
+  lastTurnCostUsd?: number
+  model?: string
+  compactionCount?: number
+  sessionKey?: string
+  agent?: string
+  fullAccess?: boolean
+  inheritUserScope?: boolean
 }
 
 export type OpenTargetId = 'iterm' | 'terminal' | 'topics' | 'finder' | 'editor' | 'pr'
@@ -225,6 +237,122 @@ export interface TargetAvailability {
   available: boolean
   label: string
   reason?: string
+}
+
+// ─── Context Inspector (Phase 1 — Plan 01-06) ────────────────────────────────
+
+/** Alias kept for backward import compat — fields are now on LocalSession directly. */
+export type ContextLiveSession = LocalSession
+
+export interface ContextAggregate {
+  totalSessions: number
+  totalLiveTokens: number
+  avgCostPerTurnUsd: number
+}
+
+export interface ContextDisk {
+  totalMb: number
+  totalJsonl: number
+  filesOlderThan30d: number
+}
+
+export interface ContextRecentSession {
+  slug: string
+  sessionId: string
+  transcriptPath: string
+  cwd: string
+  routeHint: string | null
+  mtime: number
+  sizeBytes: number
+  totalTokens: number
+  turnCount: number
+  compactionCount: number
+}
+
+export interface ContextSessionsResponse {
+  sessions: ContextLiveSession[]
+  aggregate: ContextAggregate
+  disk: ContextDisk
+  recent: ContextRecentSession[]
+}
+
+export interface BreakdownCategory {
+  category:
+    | 'system_preset'
+    | 'builtin_tools'
+    | 'mcp_servers'
+    | 'skills_index'
+    | 'claudemd_chain'
+    | 'subagents'
+    | 'hooks_memory'
+    | 'history'
+  tokens: number
+  details: unknown
+}
+
+export interface SessionBreakdown {
+  sessionId: string
+  sessionKey: string | null
+  agent: string
+  liveTotal: number
+  categories: BreakdownCategory[]
+  totalEstimated: number
+}
+
+export interface CruftFinding {
+  kind: 'mcp_unused' | 'skill_unused'
+  name: string
+  loadedTokens: number
+  recentTurns: number
+  callCount: number
+}
+
+export interface ConfigSuggestion {
+  id: string
+  when: string
+  action: string
+  rationale: string
+}
+
+export interface AgentCruft {
+  agent: string
+  findings: CruftFinding[]
+  suggestions: ConfigSuggestion[]
+}
+
+export interface CruftResponse {
+  agents: AgentCruft[]
+}
+
+// ─── Agent Baselines (static config inspector) ───────────────────────────────
+
+export interface AgentCruftHint {
+  id: string
+  severity: 'info' | 'warn' | 'crit'
+  message: string
+  potentialSavingsTokens?: number
+}
+
+export interface AgentBaseline {
+  agent: string
+  model: string
+  fallbacks: string[]
+  fullAccess: boolean
+  inheritUserScope: boolean
+  tools: string[]
+  effort: string | null
+  workspace: string
+  /** Same shape as SessionBreakdown.breakdown — categories + totalEstimated. */
+  breakdown: {
+    categories: BreakdownCategory[]
+    totalEstimated: number
+    liveTotal: number
+  }
+  cruftHints: AgentCruftHint[]
+}
+
+export interface AgentBaselineResponse {
+  agents: AgentBaseline[]
 }
 
 export interface Exchange {
@@ -629,8 +757,13 @@ export const api = {
   removeCliSession: (id: string) =>
     request<{ ok: boolean }>(`/api/cli-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  // Local Claude Code sessions (auto-discovered from the process table)
-  localSessions: () => request<LocalSession[]>('/api/local-sessions'),
+  // Local Claude Code sessions (auto-discovered from the process table).
+  // Returns the LocalSession[] shape — projection of `.sessions` from the
+  // unified /api/local-sessions response (no backward-compat branch on server).
+  localSessions: async (): Promise<LocalSession[]> => {
+    const r = await request<ContextSessionsResponse>('/api/local-sessions')
+    return r.sessions as LocalSession[]
+  },
   localSessionTargets: (pid: number) =>
     request<TargetAvailability[]>(`/api/local-sessions/${pid}/targets`),
   openLocalSession: (pid: number, target: OpenTargetId) =>
@@ -639,4 +772,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target }),
     }),
+
+  // Context Inspector (Phase 1 — Plan 01-06)
+  contextSessions: () => request<ContextSessionsResponse>('/api/local-sessions'),
+  sessionBreakdown: (sessionId: string) =>
+    request<SessionBreakdown>(`/api/sessions/${encodeURIComponent(sessionId)}/breakdown`),
+  sessionsCruft: () => request<CruftResponse>('/api/sessions/cruft'),
+  agentsBaseline: () => request<AgentBaselineResponse>('/api/agents/baseline'),
 }

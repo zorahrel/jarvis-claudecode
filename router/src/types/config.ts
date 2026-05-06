@@ -24,6 +24,38 @@ export interface ToolDef {
   command?: string;
 }
 
+/**
+ * Per-channel scoping policy. Applied to in-process messaging MCPs (discord/whatsapp/telegram).
+ * Default safe: when no policy is set the agent can only read/write the *current* conversation
+ * (the one that triggered the session). Allow/deny lists let the agent reach further.
+ */
+export interface ChannelScope {
+  /** Discord guild IDs the agent may touch. Empty/missing → only current guild. */
+  allowedGuilds?: string[];
+  /** Discord channel IDs explicitly allowed (overrides guild filter when set). */
+  allowedChannels?: string[];
+  /** Discord channel IDs explicitly blocked (private/finance/etc). Always respected. */
+  denyChannels?: string[];
+  /** WhatsApp JIDs (group `@g.us` or DM `@s.whatsapp.net`) the agent may read/write. */
+  allowedJids?: string[];
+  /** WhatsApp JIDs to deny even if matched by allowedJids prefixes. */
+  denyJids?: string[];
+  /** Telegram chat IDs (string form) the agent may touch. */
+  allowedChats?: string[];
+  /** Telegram chat IDs to deny. */
+  denyChats?: string[];
+  /** When true, the agent may send to chats outside the current session conversation. Default false. */
+  allowCrossChatWrite?: boolean;
+}
+
+/** Token/context budget controls per agent */
+export interface ContextLimits {
+  /** Max chars of session history injected on session resume. Default 8000. */
+  sessionCacheMaxChars?: number;
+  /** Max exchanges injected on session resume. Default 10. */
+  sessionCacheMaxExchanges?: number;
+}
+
 /** Agent configuration (from agents/<name>/agent.yaml + workspace auto-resolved). */
 export interface AgentConfig {
   /** Agent name (from folder). Injected at load time, not present in agent.yaml. */
@@ -31,7 +63,10 @@ export interface AgentConfig {
   /** Absolute workspace path. Injected at load time. */
   workspace: string;
   model?: string;
-  /** Granular tool list: ["vision", "email:myaccount", "mcp:github", "memory:business"] */
+  /** Granular tool list: ["vision", "email:myaccount", "mcp:github", "memory:business",
+   *  "discord", "discord:write", "whatsapp", "whatsapp:write", "telegram", "telegram:write",
+   *  "channels"]
+   */
   tools?: string[];
   fallbacks?: string[];
   env?: Record<string, string>;
@@ -41,6 +76,16 @@ export interface AgentConfig {
   fullAccess?: boolean;
   /** Inherit ~/.claude/ user-scope settings (CLAUDE.md, hooks, skills). Default true. Set false for external/client agents that must not see the user's global config. */
   inheritUserScope?: boolean;
+  /** Context/token budget controls. Tune per-agent to reduce token usage. */
+  contextLimits?: ContextLimits;
+  /** Inactivity timeout in minutes before the session is killed. Default 15. */
+  inactivityTimeoutMin?: number;
+  /** When true, spawn the session at router startup so the first message has zero cold-start latency. */
+  keepWarm?: boolean;
+  /** Per-channel scoping for messaging MCPs. */
+  discord?: ChannelScope;
+  whatsapp?: ChannelScope;
+  telegram?: ChannelScope;
 }
 
 /** A single route definition — thin matcher that references an agent by name. */
@@ -114,6 +159,12 @@ export interface RateLimits {
 export interface JarvisConfig {
   allowedCallers?: string[];
   alwaysReplyGroups?: string[];
+  /**
+   * Telegram numeric user IDs allowed to one-shot the full agent via `@jarvis`
+   * mention from any chat (including groups not routed to jarvis). Mirrors the
+   * WhatsApp `allowedCallers[0]` owner pattern. Find your ID via @userinfobot.
+   */
+  telegramOwners?: string[];
 }
 
 /** Launchd configuration for a user-defined service (optional — tray can manage it) */
@@ -140,6 +191,21 @@ export interface ServiceDef {
   launchd?: ServiceLaunchd;
 }
 
+/** Router-level MCP behavior overrides */
+export interface McpRouterConfig {
+  /**
+   * MCP server names to NEVER attach to spawned SDK sessions, even when an
+   * agent has `fullAccess: true`. Useful for OAuth-heavy remotes (zenda, tally)
+   * that aggressively retry refresh and pop browser dialogs in tight loops
+   * across multiple parallel sessions. The agent loses access to those tools
+   * but the user stops seeing unsolicited OAuth tabs.
+   *
+   * The CLI and dashboard `claude mcp list` still see these servers — only
+   * router-spawned sessions skip them.
+   */
+  skip?: string[];
+}
+
 /** Top-level config */
 export interface Config {
   jarvis?: JarvisConfig;
@@ -149,4 +215,5 @@ export interface Config {
   crons?: CronJob[];
   rateLimits?: RateLimits;
   services?: ServiceDef[];
+  mcp?: McpRouterConfig;
 }

@@ -25,6 +25,10 @@ fallbacks:
 # Omit for minimal (read-only, no tools). List specific capabilities:
 tools:
   - vision          # Analyze images sent by user
+  # - vision-local        # Pre-caption + Q&A images on-device via Moondream
+                          # Station (port 2020). Adds ~3-5s per image but
+                          # gives the upstream model a textual brief and
+                          # zero vision-token cost. Composes with `vision`.
   - voice           # Transcribe voice messages
   # - email:myaccount       # Email via gws-mail (account name)
   # - calendar:myaccount    # Calendar via gws-mail
@@ -34,6 +38,16 @@ tools:
   # - mcp:brave-search      # MCP server (must exist in ~/.claude/settings.json)
   # - mcp:github
   # - mcp:context7
+
+# Inactivity timeout in minutes. Session is killed if idle for this long.
+# Default: 15. Use lower values for cron/one-shot agents, higher for heavy use.
+# inactivityTimeoutMin: 15
+
+# Keep-warm: after the first message, auto-respawn the session when it expires
+# so subsequent messages never hit cold-start latency. The first message still
+# cold-starts (session key isn't known until a real message arrives).
+# Use for personal/high-traffic agents. Costs one idle process while router runs.
+# keepWarm: false
 
 # Custom environment variables for this agent's Claude Code process
 # env:

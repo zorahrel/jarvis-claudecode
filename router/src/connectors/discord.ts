@@ -48,15 +48,24 @@ function resolveDiscordMentions(text: string, msg: Message): string {
 
 export class DiscordConnector implements Connector {
   readonly channel = "discord" as const;
-  private client: Client | null = null;
+  private static singleton: DiscordConnector | null = null;
+  static getInstance(): DiscordConnector | null {
+    return DiscordConnector.singleton;
+  }
 
-  constructor(private config: Config) {}
+  private _client: Client | null = null;
+  /** Read-only handle for in-process MCP tools (mcp/discord.ts). Null until start() succeeds. */
+  get client(): Client | null { return this._client; }
+
+  constructor(private config: Config) {
+    DiscordConnector.singleton = this;
+  }
 
   async start(): Promise<void> {
     const token = this.config.channels.discord?.botToken;
     if (!token) throw new Error("Discord bot token not configured");
 
-    this.client = new Client({
+    this._client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -69,7 +78,7 @@ export class DiscordConnector implements Connector {
     // Workaround: discord.js v14 sometimes doesn't emit MessageCreate for DMs
     // even with all required partials. Catch raw DM events and re-emit them.
     const dmProcessed = new Set<string>();
-    this.client.on("raw" as any, async (event: any) => {
+    this._client.on("raw" as any, async (event: any) => {
       if (event.t !== "MESSAGE_CREATE" || event.d?.guild_id) return;
       if (event.d?.author?.bot) return;
       const msgId = event.d?.id;
@@ -80,19 +89,19 @@ export class DiscordConnector implements Connector {
       if (!dmProcessed.has(msgId)) return; // already handled by normal event
       // discord.js didn't emit — fetch the channel & message manually
       try {
-        const channel = await this.client!.channels.fetch(event.d.channel_id);
+        const channel = await this._client!.channels.fetch(event.d.channel_id);
         if (!channel?.isTextBased()) return;
         const msg = await (channel as any).messages.fetch(msgId);
         if (msg) {
           log.debug({ authorId: msg.author?.id, isDM: true }, "DM recovered from raw event");
-          this.client!.emit(Events.MessageCreate, msg);
+          this._client!.emit(Events.MessageCreate, msg);
         }
       } catch (err) {
         log.error({ err, msgId }, "Failed to recover DM from raw event");
       }
     });
 
-    this.client.on(Events.MessageCreate, async (discordMsg) => {
+    this._client.on(Events.MessageCreate, async (discordMsg) => {
       // Mark as handled so raw workaround doesn't double-process
       dmProcessed.delete(discordMsg.id);
       try {
@@ -105,7 +114,7 @@ export class DiscordConnector implements Connector {
       // Ignore empty (unless has attachments or reference)
       if (!discordMsg.content && discordMsg.attachments.size === 0 && !discordMsg.reference) return;
 
-      const botId = this.client?.user?.id;
+      const botId = this._client?.user?.id;
       const isDM = !discordMsg.guildId;
 
       log.debug({ authorId: discordMsg.author?.id, guildId: discordMsg.guildId, isDM, content: discordMsg.content?.slice(0, 50) }, "Discord MessageCreate");
@@ -151,47 +160,57 @@ export class DiscordConnector implements Connector {
       const hasVision = canVision(agent);
 
       // Process attachments
-      const media: MediaAttachment[] = [];
+      const processAttachments = async (
+        atts: Iterable<{ url: string; name?: string | null; contentType?: string | null }>,
+      ): Promise<MediaAttachment[]> => {
+        const out: MediaAttachment[] = [];
+        for (const att of atts) {
+          try {
+            const mime = att.contentType ?? "";
+            let type: MediaAttachment["type"] = "document";
+            if (mime.startsWith("audio/") || att.name?.endsWith(".ogg") || att.name?.endsWith(".mp3")) type = "voice";
+            else if (mime.startsWith("image/")) type = "image";
+            else if (mime.startsWith("video/")) type = "video";
+
+            if ((type === "voice") && !hasVoice) {
+              log.warn({ attName: att.name }, "Voice attachment but 'voice' tool not authorized — skipping");
+              continue;
+            }
+            if ((type === "image" || type === "video") && !hasVision) {
+              log.warn({ attName: att.name, type }, "Visual attachment but 'vision' tool not authorized — skipping");
+              continue;
+            }
+
+            const localPath = await downloadMedia(att.url, att.name ?? "attachment");
+            const processed = await processMedia(type, localPath, mime);
+            out.push({ type, processedText: processed, localPath, fileName: att.name ?? undefined, mimeType: mime });
+          } catch (err) {
+            log.error({ err, attName: att.name }, "Error processing Discord attachment");
+          }
+        }
+        return out;
+      };
+
       const hasAttachments = discordMsg.attachments.size > 0;
       if (hasAttachments) timings.mediaStart = Date.now();
-      for (const [, att] of discordMsg.attachments) {
-        try {
-          const mime = att.contentType ?? "";
-          let type: MediaAttachment["type"] = "document";
-          if (mime.startsWith("audio/") || att.name?.endsWith(".ogg") || att.name?.endsWith(".mp3")) type = "voice";
-          else if (mime.startsWith("image/")) type = "image";
-          else if (mime.startsWith("video/")) type = "video";
-
-          // Gate by tool authorization
-          if ((type === "voice") && !hasVoice) {
-            log.warn({ attName: att.name }, "Voice attachment but 'voice' tool not authorized — skipping");
-            continue;
-          }
-          if ((type === "image" || type === "video") && !hasVision) {
-            log.warn({ attName: att.name, type }, "Visual attachment but 'vision' tool not authorized — skipping");
-            continue;
-          }
-
-          const localPath = await downloadMedia(att.url, att.name ?? "attachment");
-          const processed = await processMedia(type, localPath, mime);
-          media.push({ type, processedText: processed, localPath, fileName: att.name ?? undefined, mimeType: mime });
-        } catch (err) {
-          log.error({ err, attName: att.name }, "Error processing Discord attachment");
-        }
-      }
+      const media = await processAttachments(discordMsg.attachments.values());
       if (hasAttachments) timings.mediaEnd = Date.now();
 
-      // Process reply/reference
+      // Process reply/reference (text + attachments — so replies to messages with images work)
       let quotedMessage: QuotedMessage | undefined;
       if (discordMsg.reference?.messageId) {
         try {
           const refMsg = await discordMsg.channel.messages.fetch(discordMsg.reference.messageId);
           if (refMsg) {
             const rawQuotedText = refMsg.content || undefined;
+            const quotedMedia = refMsg.attachments.size > 0
+              ? await processAttachments(refMsg.attachments.values())
+              : undefined;
             quotedMessage = {
               text: rawQuotedText ? resolveDiscordMentions(rawQuotedText, refMsg) : undefined,
               from: refMsg.author.username,
               timestampEpoch: Math.floor(refMsg.createdTimestamp / 1000),
+              media: quotedMedia && quotedMedia.length > 0 ? quotedMedia : undefined,
             };
           }
         } catch { /* ignore */ }
@@ -208,6 +227,9 @@ export class DiscordConnector implements Connector {
         ? `[@${discordMsg.author.username}]: ${baseText}`
         : baseText;
 
+      const channelName = "name" in discordMsg.channel
+        ? (discordMsg.channel as { name: string }).name
+        : undefined;
       const msg: IncomingMessage = {
         channel: "discord",
         from: discordMsg.author.id,
@@ -219,6 +241,17 @@ export class DiscordConnector implements Connector {
         media: media.length > 0 ? media : undefined,
         quotedMessage,
         timings,
+        channelContext: {
+          discord: {
+            guildId: discordMsg.guildId,
+            guildName: discordMsg.guild?.name,
+            channelId: discordMsg.channelId,
+            channelName,
+            authorId: discordMsg.author.id,
+            authorName: discordMsg.author.displayName ?? discordMsg.author.username,
+            messageId: discordMsg.id,
+          },
+        },
         reply: async (response: string) => {
           await discordMsg.reply(response);
         },
@@ -256,7 +289,7 @@ export class DiscordConnector implements Connector {
     });
 
 
-    this.client.on(Events.ClientReady, async (c) => {
+    this._client.on(Events.ClientReady, async (c) => {
       log.info({ user: c.user.tag }, "Discord bot ready");
       // Cache guild names for dashboard
       for (const [id, guild] of c.guilds.cache) {
@@ -276,24 +309,24 @@ export class DiscordConnector implements Connector {
       } catch { /* ignore */ }
     });
 
-    this.client.on(Events.Error, (err) => {
+    this._client.on(Events.Error, (err) => {
       log.error({ err }, "Discord client error");
     });
 
-    await this.client.login(token);
+    await this._client.login(token);
   }
 
   async stop(): Promise<void> {
-    await this.client?.destroy();
-    this.client = null;
+    await this._client?.destroy();
+    this._client = null;
     log.info("Discord bot stopped");
   }
 
   /** Send a text message to a channel — used by cron delivery and crash recovery notices.
    *  `target` is a Discord channel.id (works for both DMs and guild channels). */
   async sendMessage(target: string, text: string): Promise<void> {
-    if (!this.client) throw new Error("Discord client not started");
-    const channel = await this.client.channels.fetch(target);
+    if (!this._client) throw new Error("Discord client not started");
+    const channel = await this._client.channels.fetch(target);
     if (!channel || !channel.isTextBased() || !("send" in channel)) {
       throw new Error(`Discord channel ${target} not sendable`);
     }

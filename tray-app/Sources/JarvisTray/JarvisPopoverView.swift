@@ -2,35 +2,68 @@ import SwiftUI
 
 struct JarvisPopoverView: View {
     @ObservedObject var manager = ServiceManager.shared
-    
+    @ObservedObject var notch = NotchProcessController.shared
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
             headerSection
-            
+
             Divider().padding(.horizontal, 12)
-            
+
             // Services
             servicesSection
 
             Divider().padding(.horizontal, 12)
-            
+
+            // Notch toggle — the notch lives in a separate process
+            // (JarvisNotch.app). Turning this off SIGTERMs it; turning it
+            // on respawns. Crash recovery is automatic via
+            // NotchProcessController's 2 s poll loop.
+            notchSection
+
+            Divider().padding(.horizontal, 12)
+
             // Stats
             if let stats = manager.routerStats {
                 statsSection(stats)
                 Divider().padding(.horizontal, 12)
             }
-            
+
             // Actions
             actionsSection
-            
+
             Divider().padding(.horizontal, 12)
-            
+
             // Footer
             footerSection
         }
         .frame(width: 320)
         .background(.ultraThinMaterial)
+    }
+
+    private var notchSection: some View {
+        HStack(spacing: 10) {
+            Image(systemName: notch.isRunning ? "rectangle.dashed.fill" : "rectangle.dashed")
+                .foregroundColor(notch.isRunning ? .accentColor : .secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Notch")
+                    .font(.system(.body, design: .default))
+                Text(notch.isRunning ? "in esecuzione" : (notch.wanted ? "in avvio…" : "spento"))
+                    .font(.system(.caption))
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { notch.wanted },
+                set: { $0 ? notch.start() : notch.stop() }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
     
     // MARK: - Header

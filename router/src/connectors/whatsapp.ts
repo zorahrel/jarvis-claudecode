@@ -11,6 +11,7 @@ import { setContactName } from "../services/contact-names";
 import { getConfig } from "../services/config-loader";
 import { logger } from "../services/logger";
 import { processMedia, saveMedia, cleanupMedia } from "../services/media";
+import { pushMessage as pushWaHistory, pushBulk as pushWaHistoryBulk, type WAStoredMessage } from "../services/whatsapp-history";
 import { readFileSync, rmSync, existsSync } from "fs";
 import { basename, extname } from "path";
 import { EventEmitter } from "events";
@@ -75,6 +76,45 @@ function isOwnerMessage(fromMe: boolean, senderPhone: string): boolean {
   return fromMe || senderPhone === getOwnerPhone();
 }
 
+/**
+ * Extract a minimal `WAStoredMessage` from a Baileys `WAMessage`. Returns null
+ * for status broadcasts and messages without a remoteJid (we can't index them).
+ */
+function toStoredMessage(waMsg: any): WAStoredMessage | null {
+  const jid = waMsg?.key?.remoteJid;
+  if (!jid || jid === "status@broadcast") return null;
+  const m = waMsg.message ?? {};
+  const text =
+    m.conversation ??
+    m.extendedTextMessage?.text ??
+    m.imageMessage?.caption ??
+    m.videoMessage?.caption ??
+    m.documentMessage?.caption ??
+    "";
+  let mediaType: WAStoredMessage["mediaType"] | undefined;
+  if (m.imageMessage) mediaType = "image";
+  else if (m.videoMessage) mediaType = "video";
+  else if (m.audioMessage) mediaType = m.audioMessage.ptt ? "voice" : "audio";
+  else if (m.documentMessage) mediaType = "document";
+  else if (m.stickerMessage) mediaType = "sticker";
+  const ts = typeof waMsg.messageTimestamp === "number"
+    ? waMsg.messageTimestamp
+    : Number(waMsg.messageTimestamp ?? 0);
+  return {
+    id: waMsg.key.id ?? "",
+    chatJid: jid,
+    fromJid: waMsg.key.participant ?? (waMsg.key.fromMe ? undefined : jid),
+    fromName: waMsg.pushName,
+    text: typeof text === "string" ? text : "",
+    ts,
+    fromMe: !!waMsg.key.fromMe,
+    mediaType,
+    // Persist encrypted media proto so the MCP can download/transcribe later
+    // even if the message wasn't routed to an agent at receive time.
+    ...(mediaType ? { mediaProto: m, participant: waMsg.key.participant ?? undefined } : {}),
+  };
+}
+
 // ============================================================
 // CONNECTOR
 // ============================================================
@@ -98,6 +138,8 @@ export class WhatsAppConnector implements Connector {
   }
 
   private sock: WASocket | null = null;
+  /** Read-only handle for in-process MCP tools (mcp/whatsapp.ts). Null until paired+connected. */
+  get socket(): WASocket | null { return this.sock; }
   private authDir: string;
   private selfJid: string = "";
   private myLidBase: string = "";
@@ -237,6 +279,15 @@ export class WhatsAppConnector implements Connector {
     });
 
     this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      // Capture into the WhatsApp history store for the in-process MCP. We do
+      // this for ALL upserts (live + backfill `notify` with requestId), so
+      // mcp/whatsapp.ts can serve historical reads without needing a separate
+      // CLI/auth/process. Bot's own outbound messages are also captured.
+      for (const waMsg of messages) {
+        const stored = toStoredMessage(waMsg);
+        if (stored) pushWaHistory(stored);
+      }
+
       if (type !== "notify" && type !== "append") return;
       for (const waMsg of messages) {
         try {
@@ -245,6 +296,21 @@ export class WhatsAppConnector implements Connector {
           log.error({ err, msgId: waMsg.key.id }, "Error processing WA message");
         }
       }
+    });
+
+    // Initial history sync after pair (and on reconnects when Baileys decides
+    // to re-sync). Up to ~14 days of past messages arrive in one shot —
+    // bulk-ingest into the store.
+    this.sock.ev.on("messaging-history.set", ({ messages, isLatest, progress }) => {
+      if (!messages || messages.length === 0) return;
+      const stored = messages
+        .map(toStoredMessage)
+        .filter((m): m is WAStoredMessage => m !== null);
+      pushWaHistoryBulk(stored);
+      log.info(
+        { count: stored.length, isLatest, progress },
+        "WhatsApp history sync ingested",
+      );
     });
   }
 
@@ -547,6 +613,7 @@ export class WhatsAppConnector implements Connector {
     const replyJid = this.getReplyJid(jid);
     const msgKey = waMsg.key;
 
+    const groupName = isGroup ? (waMsg.pushName || waMsg.key?.participant || undefined) : undefined;
     const msg: IncomingMessage = {
       channel: "whatsapp",
       from: isFromSelf ? "self" : "+" + senderJid.split(":")[0].split("@")[0],
@@ -560,6 +627,16 @@ export class WhatsAppConnector implements Connector {
       quotedMessage,
       timings: (waMsg as any)._timings,
       agentOverride,
+      channelContext: {
+        whatsapp: {
+          jid,
+          isGroup,
+          groupName,
+          senderJid,
+          senderName: waMsg.pushName,
+          messageId: waMsg.key.id ?? undefined,
+        },
+      },
       reply: async (response: string) => {
         log.info({ replyJid, responseLen: response.length }, "Sending WhatsApp reply");
         const maxRetries = 3;
@@ -630,10 +707,18 @@ export class WhatsAppConnector implements Connector {
           const fileName = basename(filePath);
           const imageExts = [".jpg", ".jpeg", ".png", ".gif", ".webp"];
 
-          if (imageExts.includes(ext as any)) {
-            await this.sock?.sendMessage(replyJid, { image: buffer, caption, mimetype: mime });
-          } else {
-            await this.sock?.sendMessage(replyJid, { document: buffer, mimetype: mime, fileName, caption });
+          // Track outgoing message id so the inbound echo is recognized as
+          // bot-sent and skipped — without this, the agent re-processes its
+          // own attachment and self-loops on every file send.
+          const sent = imageExts.includes(ext as any)
+            ? await this.sock?.sendMessage(replyJid, { image: buffer, caption, mimetype: mime })
+            : await this.sock?.sendMessage(replyJid, { document: buffer, mimetype: mime, fileName, caption });
+          if (sent?.key?.id) {
+            this.sentMsgIds.add(sent.key.id);
+            if (this.sentMsgIds.size > 200) {
+              const first = this.sentMsgIds.values().next().value;
+              if (first) this.sentMsgIds.delete(first);
+            }
           }
         } catch (e) {
           log.error({ err: e, filePath }, "Failed to send file on WhatsApp");

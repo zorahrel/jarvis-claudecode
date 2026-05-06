@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { navigate } from '../lib/url-state'
 import { RefreshCw, X } from 'lucide-react'
 import { api } from '../api/client'
 import { usePolling } from '../hooks/usePolling'
@@ -114,8 +115,8 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
   const [filter, setFilter] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('lastMessageAt')
   const [selected, setSelected] = useState<ProcessSession | null>(null)
-  const [hashFilter, setHashFilter] = useState<SessionsFilter | null>(() => parseSessionsFilter(window.location.hash))
-  const [view, setView] = useState<SessionsView>(() => parseSessionsView(window.location.hash))
+  const [hashFilter, setHashFilter] = useState<SessionsFilter | null>(() => parseSessionsFilter(window.location.hash || window.location.search))
+  const [view, setView] = useState<SessionsView>(() => parseSessionsView(window.location.hash || window.location.search))
 
   const processes = useMemo(() => procs || [], [procs])
   const cliSessions = useMemo(() => cliData || [], [cliData])
@@ -123,11 +124,13 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
   // Listen for hash changes (external navigation from other pages).
   useEffect(() => {
     const onHash = () => {
-      setHashFilter(parseSessionsFilter(window.location.hash))
-      setView(parseSessionsView(window.location.hash))
+      setHashFilter(parseSessionsFilter(window.location.hash || window.location.search))
+      setView(parseSessionsView(window.location.hash || window.location.search))
     }
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => window.removeEventListener('popstate', onHash);
+      window.removeEventListener('hashchange', onHash)
   }, [])
 
   // When hashFilter=key and the matching ProcessSession appears, auto-open detail panel (table view only).
@@ -218,7 +221,7 @@ export function Sessions({ onToast }: { onToast: (msg: string, type: 'success' |
   const openLogsForSession = useCallback((key: string) => {
     // Contract with Logs page: hash filter, same format as sessions.
     // Logs may ignore it; this is a best-effort link.
-    window.location.hash = `#/logs?filter=sessionKey:${encodeURIComponent(key)}`
+    navigate(`logs?filter=sessionKey:${encodeURIComponent(key)}`)
   }, [])
 
   const streamInitialChannel = hashFilter?.type === 'channel' ? hashFilter.value : ''
@@ -646,10 +649,10 @@ function SessionDetail({
   onToast: (msg: string, type: 'success' | 'error' | 'info') => void
 }) {
   const goToAgent = () => {
-    if (s.agentName) window.location.hash = `#/agents?focus=${encodeURIComponent(s.agentName)}`
+    if (s.agentName) navigate(`agents?focus=${encodeURIComponent(s.agentName)}`)
   }
   const goToChannel = () => {
-    if (s.channel) window.location.hash = `#/channels?focus=${encodeURIComponent(s.channel)}`
+    if (s.channel) navigate(`channels?focus=${encodeURIComponent(s.channel)}`)
   }
 
   return (
@@ -736,7 +739,7 @@ function SessionDetail({
           title="Usage"
           action={
             <BadgeLink
-              href={`#/analytics?groupBy=route&period=7d${s.agentName ? `&filter=agent:${encodeURIComponent(s.agentName)}` : ''}`}
+              href={`/analytics?groupBy=route&period=7d${s.agentName ? `&filter=agent:${encodeURIComponent(s.agentName)}` : ''}`}
               tone="muted"
               size="xs"
               label="analytics"
