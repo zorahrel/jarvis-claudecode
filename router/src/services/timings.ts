@@ -54,7 +54,7 @@ export function formatTimingFooter(
   }
 
   const parts: string[] = [];
-  const phasesStr = phases.map(p => `${p.label} ${fmt(p.ms)}`).join(" + ");
+  const phasesStr = phases.map(p => `${p.label} ${fmt(p.ms)}`).join(" → ");
   parts.push(phases.length > 0 ? `t ${fmt(total)} = ${phasesStr}` : `t ${fmt(total)}`);
 
   // Append tokens (use ">" instead of "→" for ASCII safety)

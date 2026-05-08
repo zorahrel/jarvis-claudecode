@@ -239,7 +239,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   // Start typing indicator & reaction (👀 only if not already sent by connector for media)
   const stopTyping = msg.startTyping?.() ?? (() => {});
   if (!timings.mediaStart) {
-    await msg.react?.("👀").catch(() => {});
+    msg.react?.("👀").catch(() => {});
   }
 
   try {
@@ -269,7 +269,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     const memoryScope = memoryTool ? memoryTool.split(":")[1] : null;
 
     // 🧠 reaction (typing stays ON during Claude call — interval keeps refreshing)
-    await msg.react?.("🧠").catch(() => {});
+    msg.react?.("🧠").catch(() => {});
 
     // Append image file paths so Claude reads them via its Read tool
     let messageForClaude = fullText;
@@ -460,7 +460,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
       }
     }
 
-    await msg.react?.("👍").catch(() => {});
+    msg.react?.("👍").catch(() => {});
 
     // Persist exchange for session continuity across restarts
     recordExchange(key, fullText, response.text);
@@ -471,7 +471,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     }
   } catch (err) {
     stopTyping();
-    await msg.react?.("👎").catch(() => {});
+    msg.react?.("👎").catch(() => {});
 
     log.error({ err, channel: msg.channel, from: msg.from }, "Handler error");
     const errMsg = err instanceof Error ? err.message : String(err);
