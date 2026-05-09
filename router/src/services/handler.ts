@@ -1,6 +1,6 @@
 import type { IncomingMessage } from "../types";
 import { findRoute } from "./router";
-import { askClaude, sessionKey } from "./claude";
+import { askClaude, sessionKey, interruptByPrefix } from "./claude";
 import { canVoice, canVision, canVisionLocal } from "./capabilities";
 import { caption as visionCaption, query as visionQuery, isAvailable as visionAvailable, visionBackend } from "./vision-local";
 import { logger } from "./logger";
@@ -168,6 +168,24 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   // Rate limit check
   if (!checkIncomingRate(msg.channel, msg.from)) {
     log.warn({ channel: msg.channel, from: msg.from }, "Incoming rate limit exceeded — dropping");
+    return;
+  }
+
+  // Stop word: a bare "stop"/"basta"/"ferma"/"fermati" interrupts any
+  // in-flight session for this chat without spawning a new turn. Mirrors
+  // OpenClaw semantics. Runs before route resolution so it works even when
+  // the agent itself is wedged.
+  const trimmedText = (msg.text ?? "").trim();
+  if (/^(stop|basta|ferma|fermati)\.?\s*$/i.test(trimmedText)) {
+    const target = String(msg.group ?? msg.from);
+    const count = interruptByPrefix(msg.channel, target);
+    log.info({ channel: msg.channel, target, count }, "Stop word — interrupted sessions");
+    try { await msg.react?.("⏹"); } catch {}
+    try {
+      await msg.reply(count > 0 ? "⏹ ok, fermo qui." : "⏹ niente da fermare.");
+    } catch (e) {
+      log.warn({ err: e }, "Failed to ack stop");
+    }
     return;
   }
 
@@ -366,6 +384,35 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     // Stop typing right before sending reply
     stopTyping();
 
+    // No-reply sentinel: agent can opt out of replying for this turn by
+    // emitting exactly `[[no_reply]]` (or `<no_reply>`). Useful for crons
+    // and group chats where the agent decides nothing is worth saying.
+    // Metrics, cost, and conversation cache are still recorded.
+    const isNoReply = /^\s*(\[\[no_reply\]\]|<no_reply>)\s*$/i.test(response.text);
+    if (isNoReply) {
+      stopTyping();
+      const wallMs = (timings.llmEnd ?? Date.now()) - startTime;
+      const apiMs = response.apiDurationMs ?? 0;
+      const model = response.model ?? "—";
+      trackResponseTime(key, wallMs, apiMs, model, {
+        channel: msg.channel, agent: agentName, routeIndex, status: "ok",
+      });
+      if (response.costUsd !== undefined) {
+        recordCost({
+          ts: Date.now(), route: agentName, channel: msg.channel,
+          from: String(msg.from), model,
+          inputTokens: response.inputTokens ?? 0,
+          outputTokens: response.outputTokens ?? 0,
+          cacheCreation: response.cacheCreation ?? 0,
+          cacheRead: response.cacheRead ?? 0,
+          costUsd: response.costUsd, durationMs: wallMs, apiDurationMs: apiMs,
+        });
+      }
+      recordExchange(key, fullText, response.text);
+      log.info({ key, channel: msg.channel, agent: agentName }, "no-reply sentinel — staying silent");
+      return;
+    }
+
     // Convert markdown to platform-native formatting, then append footer
     const formatted = formatForChannel(response.text, msg.channel);
     const model = response.model ?? "—";
@@ -471,10 +518,19 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     }
   } catch (err) {
     stopTyping();
+
+    const errMsg = err instanceof Error ? err.message : String(err);
+
+    // User-triggered interrupt — already acknowledged by the stop branch.
+    // Don't 👎-react and don't post an error reply.
+    if (errMsg === "INTERRUPTED") {
+      log.info({ key, channel: msg.channel }, "Session interrupted by stop");
+      return;
+    }
+
     msg.react?.("👎").catch(() => {});
 
     log.error({ err, channel: msg.channel, from: msg.from }, "Handler error");
-    const errMsg = err instanceof Error ? err.message : String(err);
     const status: ResponseStatus = errMsg.includes("TIMEOUT") ? "timeout" : "error";
     const wallMs = Date.now() - startTime;
     trackResponseTime(key, wallMs, 0, "—", {

@@ -1617,6 +1617,32 @@ export function killProcessByKey(key: string): boolean {
   return true;
 }
 
+/**
+ * Interrupt every in-flight session for `${channel}:${target}` (across agent
+ * suffixes). Replaces the pending caller's rejection reason with `INTERRUPTED`
+ * so the handler can distinguish a user-triggered stop from a crash, then
+ * tears the session down. The next message respawns a fresh session.
+ */
+export function interruptByPrefix(channel: string, target: string): number {
+  const prefixExact = `${channel}:${target}`;
+  const prefixWithAgent = `${prefixExact}:`;
+  let count = 0;
+  for (const key of Array.from(sessions.keys())) {
+    if (key !== prefixExact && !key.startsWith(prefixWithAgent)) continue;
+    const s = sessions.get(key);
+    if (!s) continue;
+    if (s.pendingReject) {
+      const reject = s.pendingReject;
+      s.pendingResolve = null; s.pendingOnChunk = null; s.pendingReject = null;
+      reject(new Error("INTERRUPTED"));
+    }
+    killSession(s);
+    sessions.delete(key);
+    count++;
+  }
+  return count;
+}
+
 export function getProcesses(): ProcessInfo[] {
   const result: ProcessInfo[] = [];
   for (const [key, s] of sessions) {
