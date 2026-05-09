@@ -141,6 +141,12 @@ export interface CronJob {
   prompt: string;
   timeout?: number;
   delivery?: CronDelivery;
+  /**
+   * When true (default if `delivery` is set), prepend the cached chat history
+   * for the delivery target to the prompt so the cron is aware of the recent
+   * exchange before composing its message. Set false to keep cron context-free.
+   */
+  includeContext?: boolean;
 }
 
 /** Rate limit config */

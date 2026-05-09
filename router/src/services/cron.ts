@@ -6,7 +6,7 @@ import { join, basename } from "path";
 import type { CronJob, Config } from "../types";
 import { askClaudeFresh, sessionKey } from "./claude";
 import { expandHome, getAgentRegistry } from "./config-loader";
-import { recordExchange } from "./session-cache";
+import { recordExchange, buildContextFromCache } from "./session-cache";
 import { logger } from "./logger";
 
 const log = logger.child({ module: "cron" });
@@ -240,7 +240,25 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
   // as OpenClaw, where each job points to an agentId and the agent dictates access.
   const agentName = basename(job.workspace);
   const agent = getAgentRegistry()[agentName];
-  const res = await askClaudeFresh(job.workspace, job.prompt, job.model ?? agent?.model, timeoutMs, {
+
+  // Inject delivery-target chat history so the cron isn't a context-free
+  // one-shot — without this, scheduled messages land in the conversation
+  // ignoring whatever was said in the last hours. Default ON when delivery
+  // is set; opt out per-job with `includeContext: false`.
+  let prompt = job.prompt;
+  if (job.delivery && job.includeContext !== false) {
+    const isGroup = job.delivery.target.includes("@g.us");
+    const ctxKey = sessionKey(
+      job.delivery.channel,
+      job.delivery.target,
+      isGroup ? job.delivery.target : undefined,
+      agentName,
+    );
+    const ctx = buildContextFromCache(ctxKey, agent?.contextLimits);
+    if (ctx) prompt = `${ctx}\n${job.prompt}`;
+  }
+
+  const res = await askClaudeFresh(job.workspace, prompt, job.model ?? agent?.model, timeoutMs, {
     fullAccess: agent?.fullAccess,
     tools: agent?.tools,
     agentEnv: agent?.env,
@@ -261,8 +279,14 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
       try {
         // Match the chat footer convention from _shared/AGENTS.md:
         // [t 10.8s | llm 10.7s | tok 22.1k>132 | agent/model]
-        const inTok = res.usage?.input_tokens ?? 0;
-        const outTok = res.usage?.output_tokens ?? 0;
+        // input_tokens reports only the uncached portion; the cached parts
+        // (which dominate when context-injection is on) live in the two
+        // cache_* fields. Sum all three to match the chat handler footer.
+        const u = res.usage as any;
+        const inTok = (u?.input_tokens ?? 0)
+          + (u?.cache_creation_input_tokens ?? 0)
+          + (u?.cache_read_input_tokens ?? 0);
+        const outTok = u?.output_tokens ?? 0;
         const fmtTok = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
         const secs = (durationMs / 1000).toFixed(1);
         const shortModel = (res.model ?? job.model ?? "opus").replace(/^(claude-)?(.*?)(-\d.*)?$/, "$2") || "opus";
@@ -316,7 +340,12 @@ async function runJob(state: CronState, trigger: "schedule" | "manual"): Promise
     error: res.status !== "ok" ? (res.error ?? res.result) : undefined,
     delivery: deliveryRecord,
     usage: res.usage ? {
-      input_tokens: res.usage.input_tokens,
+      // Effective input includes cached portions; without these the JSONL
+      // historical view massively under-reports prompts that hit cache.
+      input_tokens:
+        (res.usage.input_tokens ?? 0)
+        + ((res.usage as any).cache_creation_input_tokens ?? 0)
+        + ((res.usage as any).cache_read_input_tokens ?? 0),
       output_tokens: res.usage.output_tokens,
       total_tokens: res.usage.total_tokens,
     } : undefined,

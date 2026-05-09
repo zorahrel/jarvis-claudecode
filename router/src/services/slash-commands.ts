@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, existsSync, type Dirent } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { logger } from "./logger";
-import { clearHistoryByPrefix, getProcesses } from "./claude";
+import { clearHistoryByPrefix, getProcesses, interruptByPrefix } from "./claude";
 import { clearSessionCacheByPrefix } from "./session-cache";
 import { queryCosts } from "./cost-tracker";
 
@@ -27,6 +27,7 @@ export interface SlashCommand {
 export const ROUTER_COMMANDS: Array<{ name: string; description: string }> = [
   { name: "help", description: "List available slash commands" },
   { name: "clear", description: "Reset this conversation's context" },
+  { name: "stop", description: "Interrupt the in-flight reply for this chat" },
   { name: "cost", description: "Show today's token cost" },
   { name: "status", description: "Show router & session status" },
 ];
@@ -303,6 +304,14 @@ function formatClear(ctx: RouterCommandContext): string {
   return "✅ Conversazione resettata. Ricomincio da capo al prossimo messaggio.";
 }
 
+function formatStop(ctx: RouterCommandContext): string {
+  const target = ctx.group ?? ctx.from;
+  const count = interruptByPrefix(ctx.channel, target);
+  return count > 0
+    ? `⏹ Sessione fermata${count > 1 ? ` (${count} agent)` : ""}.`
+    : "⏹ Niente da fermare.";
+}
+
 function formatCost(): string {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -383,6 +392,7 @@ export function handleRouterCommand(
   switch (token) {
     case "help":   return formatHelp(catalog, arg);
     case "clear":  return formatClear(ctx);
+    case "stop":   return formatStop(ctx);
     case "cost":   return formatCost();
     case "status": return formatStatus(ctx);
     default:       return null;
