@@ -282,7 +282,7 @@ export class DiscordConnector implements Connector {
         raw: discordMsg,
       };
 
-      await handleMessage(msg);
+      void handleMessage(msg).catch((err) => log.error({ err }, "handleMessage threw"));
       } catch (err) {
         log.error({ err, authorId: discordMsg?.author?.id }, "Unhandled error in Discord MessageCreate");
       }

@@ -304,7 +304,11 @@ export class TelegramConnector implements Connector {
         raw: ctx,
       };
 
-      await handleMessage(msg);
+      // Fire-and-forget: grammY processes updates sequentially per-bot, so an
+      // awaited handleMessage blocks the next "stop" from reaching its
+      // interrupt branch until the current turn finishes. handleMessage owns
+      // its own try/catch — no unhandled-rejection risk.
+      void handleMessage(msg).catch((err) => log.error({ err }, "handleMessage threw"));
     });
 
     this._bot.catch((err) => {
