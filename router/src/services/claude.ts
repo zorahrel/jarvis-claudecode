@@ -1355,6 +1355,10 @@ async function askClaudeInternal(
       return await doSendWithTimeout(s, key, fullMessage, model, message.length, startTime, agent, images, opts?.onChunk);
     } catch (err: any) {
       const errMsg = err?.message ?? "";
+      // User-triggered stop: don't fall back to other models, don't log as
+      // error. The handler's catch swallows INTERRUPTED silently after the
+      // stop branch already acked the user.
+      if (errMsg === "INTERRUPTED") throw err;
       if (errMsg === "INIT_TIMEOUT") {
         const s = sessions.get(key);
         if (s) { killSession(s); sessions.delete(key); }

@@ -741,7 +741,7 @@ export class WhatsAppConnector implements Connector {
       raw: waMsg,
     };
 
-    await handleMessage(msg);
+    void handleMessage(msg).catch((err) => log.error({ err }, "handleMessage threw"));
   }
 
   async stop(): Promise<void> {
