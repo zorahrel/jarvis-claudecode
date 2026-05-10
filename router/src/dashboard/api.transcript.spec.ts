@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { buildTranscript } from "../services/orchestrator/snapshot.js";
+import { buildTranscript } from "agent-conductor";
 
 /**
  * Phase 2 Plan 02-01 — /api/sessions/:pid/transcript contract test (ORC-01).

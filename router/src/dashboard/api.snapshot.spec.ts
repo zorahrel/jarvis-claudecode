@@ -1,19 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSnapshot, composeSnapshot } from "../services/orchestrator/snapshot.js";
+import { buildSnapshot, composeSnapshot } from "agent-conductor";
+import { discoverLocalSessions } from "../services/localSessions/discovery.js";
 
 /**
  * Phase 2 Plan 02-01 — /api/sessions/snapshot contract test (ORC-03).
  *
- * The HTTP handler in dashboard/api.ts simply calls buildSnapshot() and
- * serializes the result. We test buildSnapshot directly here (calls
- * discoverLocalSessions which works on any host — empty array on CI
- * with no live Claude sessions) because importing handleApi would pull
- * in connectors that hang the test runner.
+ * The HTTP handler in dashboard/api.ts calls discoverLocalSessions() to
+ * gather sessions then passes them to buildSnapshot (post-extraction:
+ * agent-conductor library is data-source-agnostic). We test that round-trip
+ * directly here because importing handleApi would pull in connectors that
+ * hang the test runner.
  */
 
 test("buildSnapshot returns OrchestratorSnapshot envelope", async () => {
-  const snap = await buildSnapshot();
+  const sessions = await discoverLocalSessions();
+  const snap = await buildSnapshot(sessions);
   assert.equal(typeof snap.generated_at, "string");
   assert.match(snap.generated_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.ok(Array.isArray(snap.sessions), "sessions must be an array");

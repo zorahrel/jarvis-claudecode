@@ -13,7 +13,7 @@
  * that the thin route wrapper in api.ts calls.
  */
 
-import type { ReminderTodo, RemindersCli } from "../services/reminders/types.js";
+import type { ReminderTodo, RemindersCli } from "agent-conductor";
 
 /**
  * Injectable surface for the todos handlers. Production wires these to

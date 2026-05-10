@@ -1,4 +1,0 @@
-52706 _gsd_test_session %0 0 1
-52899 work-jarvis %1 0 1
-52905 work-jarvis %2 1 0
-52910 chat %3 0 1

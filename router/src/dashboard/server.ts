@@ -6,7 +6,7 @@ import { logger, setDashboardLogHook } from "../services/logger";
 import { pushLog, type LogEntry } from "./state";
 import { handleApi } from "./api";
 import { attachWebSocket, broadcast, clientCount } from "./ws";
-import { startReminderPolling } from "../services/reminders/index.js";
+import { startReminderPolling } from "agent-conductor";
 import {
   emit as emitOrchestratorEvent,
   startOrchestratorBridge,

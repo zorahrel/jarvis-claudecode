@@ -139,8 +139,12 @@ export function startOrchestratorBridge(opts: { snapshotIntervalMs?: number } = 
     try {
       // Lazy-import buildSnapshot so non-bridge code paths (tests, CLI tools)
       // don't pull in the orchestrator service graph until they need it.
-      const { buildSnapshot } = await import("../services/orchestrator/snapshot.js");
-      const snap = await buildSnapshot();
+      // Jarvis owns the discovery side (ps+lsof in services/localSessions); the
+      // library is data-source-agnostic.
+      const { buildSnapshot } = await import("agent-conductor");
+      const { discoverLocalSessions } = await import("../services/localSessions/discovery.js");
+      const sessions = await discoverLocalSessions();
+      const snap = await buildSnapshot(sessions);
       emit({
         type: "sessions:update",
         data: {
@@ -172,7 +176,7 @@ export function startOrchestratorBridge(opts: { snapshotIntervalMs?: number } = 
     if (todosDebounce) clearTimeout(todosDebounce);
     todosDebounce = setTimeout(async () => {
       try {
-        const { listTodos } = await import("../services/reminders/cli.js");
+        const { listTodos } = await import("agent-conductor");
         const all = await listTodos();
         const open = all
           .filter((t) => !t.completed)

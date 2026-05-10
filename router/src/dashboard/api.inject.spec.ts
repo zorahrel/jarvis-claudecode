@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleInject, type TmuxDeps } from "./api.tmux.js";
 import type { LocalSession } from "../services/localSessions/types.js";
-import type { AuditEntry } from "../services/orchestrator/types.js";
+import type { AuditEntry } from "agent-conductor";
 
 function mkSession(over: Partial<LocalSession> = {}): LocalSession {
   return {

@@ -11,7 +11,7 @@
  */
 
 import type { LocalSession } from "../services/localSessions/types.js";
-import type { AuditEntry } from "../services/orchestrator/types.js";
+import type { AuditEntry } from "agent-conductor";
 
 /** Result envelope shared with Plan 02-02 conventions. */
 export type HandlerResult<T = unknown> = { status: number; body: T };

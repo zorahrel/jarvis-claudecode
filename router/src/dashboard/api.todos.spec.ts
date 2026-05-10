@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { handleListTodos, handleAddTodo, handleCompleteTodo, handlePatchTodo, type TodosDeps } from "./api.todos.js";
-import type { ReminderTodo } from "../services/reminders/types.js";
+import type { ReminderTodo } from "agent-conductor";
 
 /**
  * Phase 2 Plan 02-02 — /api/todos handler contract (ORC-09).
