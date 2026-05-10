@@ -21,3 +21,12 @@ Out-of-scope discoveries from plan execution that are NOT addressed by this phas
 - **Status:** Already present as un-staged work when Plan 02-01 started. Stashed and re-applied untouched around Task 3 commit so Plan 02-01 commits stayed clean.
 - **Owner:** Whoever was prototyping MCP auth v2 (likely belongs to the `stash@{0}` mentioned in STATE.md).
 - **Action:** Author should review and either commit or discard. Not Plan 02-01's responsibility.
+
+## From Plan 02-02 execution (2026-05-10)
+
+### MCP auth v2 working-tree state at end of Plan 02-02
+
+- **File:** `router/src/dashboard/api.ts` — same 606..887 region.
+- **Status:** During Task 3 the MCP-auth-v2 hunks and my new `/api/todos` hunks landed in the same file simultaneously. To keep the Task 3 commit clean (only orchestrator todos work), I checked out `api.ts` to HEAD before staging, re-applied my todos changes, and committed those alone. The pre-existing MCP-auth-v2 diff is now NOT in the working tree — it remains preserved in `stash@{0}` (`MCP auth v2 WIP (stdio+http transport) — paused for orchestrator phase 2`).
+- **Recovery:** `git stash apply stash@{0}` will reintroduce the diff with conflict markers (because line numbers shifted by ~46 from my todos imports). Resolve by hand or rebase the stash onto `feature/orchestrator`.
+- **Owner:** unchanged — same author of the original stash.

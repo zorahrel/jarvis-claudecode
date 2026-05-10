@@ -64,7 +64,7 @@ Plans:
 
 Plans:
 - [x] 02-01-PLAN.md — Wave 0: Conductor read-only — fixtures + transcriptReader/refinedStatus/cwdLock/suggestionEngine + /api/sessions/:pid/{transcript,snapshot} + skill /orchestrator (HTTP-only). Requirements: ORC-01..05 ✓ 2026-05-10
-- [ ] 02-02-PLAN.md — Wave 1: Reminders bridge — remindctl wrapper + 3s polling + metadata schema (pid/repo/phase) + /api/todos GET/POST/PATCH/complete + TodosTab.tsx + auth banner. Requirements: ORC-06..10. Depends on 02-01.
+- [x] 02-02-PLAN.md — Wave 1: Reminders bridge — remindctl wrapper + 3s polling + metadata schema (pid/repo/phase) + /api/todos GET/POST/PATCH/complete + TodosTab.tsx + auth banner. Requirements: ORC-06..10. Depends on 02-01.
 - [ ] 02-03-PLAN.md — Wave 1: Notch HUD Swift views — SessionsSidebarView + TodoStripView + NotchEventBus reconnect + bridge in connectors/notch.ts. Requirements: ORC-11..14. Depends on 02-02.
 - [ ] 02-04-PLAN.md — Wave 2: tmux inject control — pid→pane resolver (cached) + /api/sessions/:pid/{tmux,inject} + audit JSONL + Approve/Skip/Custom dashboard + force-confirm modal. Requirements: ORC-15..19. Depends on 02-01 + 02-02.
 - [ ] 02-05-PLAN.md — Wave 5 [DEFERRED, autonomous=false]: Auto-pilot opt-in — UserPromptSubmit hook + budget guard + confidence:high gate + audit. Requirements: ORC-20..22. Depends on 02-01..04. Manual /gsd:execute-plan 02-05 only after ≥1 week stability.

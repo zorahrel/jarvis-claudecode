@@ -43,11 +43,11 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 
 #### Reminders bridge (Plan 02-02)
 
-- [ ] **ORC-06**: Wrapper `router/src/services/reminders.ts` espone `listTodos()`, `addTodo({title, body, list})`, `completeTodo(uuid)` via `apple-reminders-cli` (preferred) o `ekctl` (fallback) con JSON I/O
-- [ ] **ORC-07**: Polling 3s su lista dedicata `Jarvis/ActiveTasks`; emette eventi `todo:added`, `todo:completed`, `todo:updated` sul bus interno del router
-- [ ] **ORC-08**: Schema body Reminders contiene linea `pid:NNNN repo:<name> phase:<plan|exec|review>` + parser bidirezionale; round-trip preserve dei campi metadata
-- [ ] **ORC-09**: `GET /api/todos` + `POST /api/todos` + `POST /api/todos/:uuid/complete` esposti via dashboard API; `GET` ritorna max 100 todos open ordinati per due-date
-- [ ] **ORC-10**: Tab "Todos" in `router/dashboard/src/pages/` mostra lista con stato live (auto-refresh 5s come Context Inspector); link per ogni todo alla sessione mappata
+- [x] **ORC-06**: Wrapper `router/src/services/reminders.ts` espone `listTodos()`, `addTodo({title, body, list})`, `completeTodo(uuid)` via `apple-reminders-cli` (preferred) o `ekctl` (fallback) con JSON I/O
+- [x] **ORC-07**: Polling 3s su lista dedicata `Jarvis/ActiveTasks`; emette eventi `todo:added`, `todo:completed`, `todo:updated` sul bus interno del router
+- [x] **ORC-08**: Schema body Reminders contiene linea `pid:NNNN repo:<name> phase:<plan|exec|review>` + parser bidirezionale; round-trip preserve dei campi metadata
+- [x] **ORC-09**: `GET /api/todos` + `POST /api/todos` + `POST /api/todos/:uuid/complete` esposti via dashboard API; `GET` ritorna max 100 todos open ordinati per due-date
+- [x] **ORC-10**: Tab "Todos" in `router/dashboard/src/pages/` mostra lista con stato live (auto-refresh 5s come Context Inspector); link per ogni todo alla sessione mappata
 
 #### Notch HUD (Plan 02-03)
 
@@ -126,11 +126,11 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 | ORC-03 | Phase 2 | Pending |
 | ORC-04 | Phase 2 | Pending |
 | ORC-05 | Phase 2 | Pending |
-| ORC-06 | Phase 2 | Pending |
-| ORC-07 | Phase 2 | Pending |
-| ORC-08 | Phase 2 | Pending |
-| ORC-09 | Phase 2 | Pending |
-| ORC-10 | Phase 2 | Pending |
+| ORC-06 | Phase 2 | Complete |
+| ORC-07 | Phase 2 | Complete |
+| ORC-08 | Phase 2 | Complete |
+| ORC-09 | Phase 2 | Complete |
+| ORC-10 | Phase 2 | Complete |
 | ORC-11 | Phase 2 | Pending |
 | ORC-12 | Phase 2 | Pending |
 | ORC-13 | Phase 2 | Pending |
