@@ -10,7 +10,8 @@
 
 const PAGES = new Set([
   "overview", "channels", "routes", "agents", "tools", "skills",
-  "memory", "cron", "sessions", "todos", "logs", "analytics", "settings",
+  "memory", "cron", "sessions", "todos", "orchestrator",
+  "logs", "analytics", "settings",
 ])
 
 export function currentPage(): string {

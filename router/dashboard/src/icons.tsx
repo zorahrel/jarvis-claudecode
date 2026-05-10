@@ -93,6 +93,7 @@ export const navIcons: Record<string, (props?: LucideProps) => ReactNode> = {
   memory: (p) => <Brain {...p} />,
   sessions: (p) => <SquareTerminal {...p} />,
   todos: (p) => <CheckSquare {...p} />,
+  orchestrator: (p) => <Bot {...p} />,
   analytics: (p) => <BarChart3 {...p} />,
   settings: (p) => <Settings {...p} />,
   logs: (p) => <FileText {...p} />,
