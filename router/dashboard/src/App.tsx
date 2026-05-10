@@ -7,11 +7,10 @@ import { Channels } from './pages/Channels'
 import { Routes } from './pages/Routes'
 import { Agents } from './pages/Agents'
 import { Tools } from './pages/Tools'
+import { Permissions } from './pages/Permissions'
 import { Skills } from './pages/Skills'
 import { Memory } from './pages/Memory'
 import { Sessions } from './pages/Sessions'
-import TodosTab from './pages/TodosTab'
-import OrchestratorTab from './pages/OrchestratorTab'
 import { Logs } from './pages/Logs'
 import { Settings } from './pages/Settings'
 import { Cron } from './pages/Cron'
@@ -87,6 +86,8 @@ function App() {
         return <Agents onToast={addToast} />
       case 'tools':
         return <Tools onToast={addToast} />
+      case 'permissions':
+        return <Permissions onToast={addToast} />
       case 'skills':
         return <Skills onToast={addToast} />
       case 'memory':
@@ -95,10 +96,6 @@ function App() {
         return <Cron onToast={addToast} />
       case 'sessions':
         return <Sessions onToast={addToast} />
-      case 'todos':
-        return <TodosTab />
-      case 'orchestrator':
-        return <OrchestratorTab />
       case 'logs':
         return <Logs />
       case 'analytics':

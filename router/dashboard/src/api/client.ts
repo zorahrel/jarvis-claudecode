@@ -62,6 +62,24 @@ export interface AgentFile {
   size: number
 }
 
+export type Tier = 'owner' | 'team' | 'family' | 'personal' | 'client'
+
+export interface ChannelScope {
+  allowedGuilds?: string[]
+  allowedChannels?: string[]
+  denyChannels?: string[]
+  allowedJids?: string[]
+  denyJids?: string[]
+  allowedChats?: string[]
+  denyChats?: string[]
+  allowCrossChatWrite?: boolean
+}
+
+export interface AgentRateLimit {
+  maxMessages?: number
+  windowSeconds?: number
+}
+
 export interface FullAgent {
   name: string
   workspace: string
@@ -74,7 +92,44 @@ export interface FullAgent {
   fallbacks: string[]
   fullAccess: boolean
   tools: string[]
+  inheritUserScope?: boolean
+  tier: Tier
+  rateLimit: AgentRateLimit | null
+  channelScope: {
+    discord: ChannelScope | null
+    whatsapp: ChannelScope | null
+    telegram: ChannelScope | null
+  }
   routes: Array<{ index: number; channel: string; from: string; group: string | null; fullAccess: boolean }>
+}
+
+export interface AuditEntry {
+  ts: string
+  event: string
+  actor: string
+  agent?: string
+  target?: string
+  diff?: { added?: string[]; removed?: string[]; before?: unknown; after?: unknown }
+  killedSessions?: number
+  details?: Record<string, unknown>
+  result?: 'ok' | 'denied' | 'error'
+  reason?: string
+}
+
+export interface PermissionMatrix {
+  agents: Array<{
+    name: string
+    tier: Tier
+    fullAccess: boolean
+    tools: string[]
+    inheritUserScope: boolean
+    model: string | null
+    rateLimit: AgentRateLimit | null
+    channelScope: { discord: ChannelScope | null; whatsapp: ChannelScope | null; telegram: ChannelScope | null }
+  }>
+  allTools: Array<{ id: string; type: string; label: string; icon: string | null; allowedFor: Tier[] }>
+  tiers: Tier[]
+  tierWhitelist: Record<Tier, string[]>
 }
 
 export interface Agent {
@@ -491,98 +546,6 @@ export interface EmailAccount {
   account: string
 }
 
-// ── Reminders / Todos (Phase 2 Plan 02-02 — ORC-09/ORC-10) ────────────────
-// Mirrors the server-side ReminderTodo type. Re-declared here because
-// the dashboard is a separate package and does not import from
-// ../../router/src/. Keep these in sync with services/reminders/types.ts.
-
-export interface TodoMetadataDTO {
-  pid?: number
-  repo?: string
-  phase?: 'plan' | 'exec' | 'review'
-}
-
-export interface ReminderTodoDTO {
-  id: string
-  title: string
-  list: string
-  notes: string | null
-  due: string | null
-  priority: number
-  completed: boolean
-  metadata: TodoMetadataDTO
-}
-
-export interface TodosResponse {
-  todos: ReminderTodoDTO[]
-  unauthorized: boolean
-}
-
-export interface AddTodoInput {
-  title: string
-  notes?: string
-  due?: string
-  metadata?: { pid: number; repo: string; phase: 'plan' | 'exec' | 'review' }
-}
-
-// ── Orchestrator snapshot + tmux + inject (Phase 2 Plan 02-04 — ORC-15..19) ──
-// Mirrors the server-side OrchestratorSnapshot / SnapshotEntry types. Re-declared
-// here because the dashboard is a separate package. Keep in sync with
-// router/src/services/orchestrator/types.ts.
-
-export type RefinedStatusDTO =
-  | 'awaiting_user_input'
-  | 'tool_pending'
-  | 'crashed'
-  | 'working'
-  | 'idle'
-
-export type ConfidenceDTO = 'low' | 'medium' | 'high'
-
-export type SnapshotActionDTO =
-  | { type: 'inject'; text: string }
-  | { type: 'abort' }
-  | { type: 'restart' }
-  | { type: 'none'; reason?: string }
-
-export interface SnapshotEntryDTO {
-  pid: number
-  repo: string
-  branch: string | null
-  cwd: string
-  status: RefinedStatusDTO
-  last_assistant_summary: string | null
-  suggestion: string
-  action: SnapshotActionDTO
-  confidence: ConfidenceDTO
-  todo_link: string | null
-  tmux: { session: string; pane: string } | null
-  conflict: number | null
-}
-
-export interface OrchestratorSnapshotDTO {
-  generated_at: string
-  sessions: SnapshotEntryDTO[]
-}
-
-export interface TmuxLookupResponse {
-  has_tmux: boolean
-  session_name?: string
-  pane_id?: string
-}
-
-export interface InjectBody {
-  text: string
-  source: 'user-approved' | 'auto' | 'skill'
-  confidence?: ConfidenceDTO
-  reason?: string
-  force?: boolean
-}
-
-export type InjectResponse =
-  | { ok: true; paneId: string; auditTs: number; echoTail?: string }
-  | { error: string; message?: string; conflictPid?: number }
-
 // API client
 
 const BASE = ''
@@ -806,6 +769,25 @@ export const api = {
   deleteAgent: (name: string) =>
     requestConfirm<void>(`/api/agents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
+  // Permissions / channel scope / audit / matrix
+  patchAgentChannelScope: (
+    name: string,
+    body: { discord?: ChannelScope | null; whatsapp?: ChannelScope | null; telegram?: ChannelScope | null },
+  ) =>
+    request<{ ok: boolean; scope: { discord: ChannelScope | null; whatsapp: ChannelScope | null; telegram: ChannelScope | null }; killedSessions: number }>(
+      `/api/agents/${encodeURIComponent(name)}/channel-scope`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+  permissionMatrix: () => request<PermissionMatrix>('/api/permission-matrix'),
+  audit: (opts?: { limit?: number; agent?: string; event?: string }) => {
+    const q = new URLSearchParams()
+    if (opts?.limit) q.set('limit', String(opts.limit))
+    if (opts?.agent) q.set('agent', opts.agent)
+    if (opts?.event) q.set('event', opts.event)
+    const qs = q.toString()
+    return request<{ entries: AuditEntry[]; path: string }>(`/api/audit${qs ? `?${qs}` : ''}`)
+  },
+
   // Crons
   createCron: (cron: Record<string, unknown>) =>
     request<{ ok: boolean; name: string }>('/api/crons', {
@@ -871,44 +853,4 @@ export const api = {
     request<SessionBreakdown>(`/api/sessions/${encodeURIComponent(sessionId)}/breakdown`),
   sessionsCruft: () => request<CruftResponse>('/api/sessions/cruft'),
   agentsBaseline: () => request<AgentBaselineResponse>('/api/agents/baseline'),
-
-  // Reminders / Todos (Phase 2 Plan 02-02 — ORC-09/ORC-10)
-  // GET /api/todos returns either {todos, unauthorized:false} (auth ok) or
-  // {todos:[], unauthorized:true} (auth missing — dashboard renders banner).
-  // Never crashes the router.
-  todos: () => request<TodosResponse>('/api/todos'),
-  addTodo: (input: AddTodoInput) =>
-    request<ReminderTodoDTO>('/api/todos', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
-  completeTodo: (uuid: string) =>
-    request<{ ok: boolean }>(`/api/todos/${encodeURIComponent(uuid)}/complete`, {
-      method: 'POST',
-    }),
-  patchTodo: (uuid: string, metadata: { pid: number; repo?: string; phase?: 'plan' | 'exec' | 'review' }) =>
-    request<{ ok: boolean }>(`/api/todos/${encodeURIComponent(uuid)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ metadata }),
-    }),
-
-  // ── Orchestrator (Phase 2 Plan 02-04 — ORC-15..19) ────────────────────────
-  // snapshot: read-side observatory (refinedStatus + suggestion + tmux info).
-  // tmux: pid → pane mapping (has_tmux false for bare-TTY sessions).
-  // inject: write-side. May return error envelope for lock_conflict / no_tmux —
-  // the dashboard handles those without a thrown error.
-  snapshot: () => request<OrchestratorSnapshotDTO>('/api/sessions/snapshot'),
-  tmux: (pid: number) =>
-    request<TmuxLookupResponse>(`/api/sessions/${pid}/tmux`),
-  inject: async (pid: number, body: InjectBody): Promise<InjectResponse> => {
-    // Always parse the JSON body — error responses (409 lock_conflict /
-    // no_tmux, 404 pane_lost / session_not_found) are valid JSON envelopes
-    // we want to surface to the UI rather than throw on.
-    const r = await fetch(`/api/sessions/${pid}/inject`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    return r.json() as Promise<InjectResponse>
-  },
 }

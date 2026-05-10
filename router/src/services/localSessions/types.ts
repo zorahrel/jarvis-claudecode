@@ -45,7 +45,7 @@ export interface LocalSession {
   // All optional — Phase 1 consumers ignore them. Populated by the new
   // /api/sessions/snapshot pipeline, NOT by /api/local-sessions (Phase 1).
   /** Refined 5-state status (awaiting_user_input | tool_pending | crashed | working | idle). */
-  refinedStatus?: import("../orchestrator/types.js").RefinedStatus;
+  refinedStatus?: import("agent-conductor").RefinedStatus;
   /** Resolved tmux pane mapping (Plan 02-04 wires the resolver — Plan 02-01 always emits null). */
   tmux?: { session: string; pane: string } | null;
   /** Other session pid that conflicts on this cwd (sub-path with same git root). */

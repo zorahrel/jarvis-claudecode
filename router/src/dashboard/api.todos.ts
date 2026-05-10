@@ -57,7 +57,7 @@ export async function handleListTodos(deps: TodosDeps): Promise<HandlerResult> {
     }
     let all;
     try {
-      all = await deps.listTodos();
+      all = await deps.listTodos("Jarvis/ActiveTasks");
     } catch (err) {
       const msg = String((err as Error).message ?? err);
       // Reminders list missing — first-run before the user has created
@@ -116,7 +116,7 @@ export async function handleAddTodo(
       notes: typeof body.notes === "string" ? body.notes : undefined,
       due: typeof body.due === "string" ? body.due : undefined,
       metadata: isMetadataPayload(body.metadata) ? body.metadata : undefined,
-    });
+    }, "Jarvis/ActiveTasks");
     return { status: 201, body: created };
   } catch (err) {
     return {
