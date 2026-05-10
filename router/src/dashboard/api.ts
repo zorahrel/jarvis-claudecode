@@ -41,16 +41,16 @@ import {
   analyzeAgentBaselines,
   type SpawnConfig,
 } from "../services/contextInspector/index.js";
-import { buildSnapshot, buildTranscript } from "../services/orchestrator/index.js";
-import { findPaneForPid, sendKeys, capturePane } from "../services/orchestrator/tmuxMap.js";
-import { appendAudit } from "../services/orchestrator/audit.js";
-import { detectConflict } from "../services/orchestrator/lock.js";
+import { buildSnapshot, buildTranscript } from "agent-conductor";
+import { findPaneForPid, sendKeys, capturePane } from "agent-conductor";
+import { appendAudit } from "agent-conductor";
+import { detectConflict } from "agent-conductor";
 import {
   listTodos as listRemindersTodos,
   addTodo as addReminderTodo,
   completeTodo as completeReminderTodo,
   probeAuth as probeReminderAuth,
-} from "../services/reminders/index.js";
+} from "agent-conductor";
 import {
   handleListTodos,
   handleAddTodo,
@@ -2295,7 +2295,8 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     // and a conflict map for cwd lock detection. Read-only — write-side
     // (inject) lives in Plan 02-04.
     try {
-      const snapshot = await buildSnapshot();
+      const sessions = await discoverLocalSessions();
+      const snapshot = await buildSnapshot(sessions);
       json(req, res, snapshot);
     } catch (err: unknown) {
       log.warn({ err }, "[orchestrator] snapshot failed");
