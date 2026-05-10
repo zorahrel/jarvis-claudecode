@@ -903,6 +903,138 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, name: name, killed: needle });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
+  // --- MCP DISCONNECT — clear stored OAuth credentials for a server ---
+  // Body: { name }. Wipes the per-server entry from
+  // ~/.claude/mcp-needs-auth-cache.json AND the persisted token in the
+  // macOS keychain (`Claude Code-credentials` blob, `mcpOAuth.<name>|<hash>`)
+  // by spawning a one-shot SDK session and calling Query.mcpClearAuth(name).
+  // After this the server reverts to "needs authentication" status; clicking
+  // Authenticate triggers a fresh OAuth flow.
+  } else if (path === "/api/mcp/logout" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const name = body.name;
+      const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
+      const target = listMcpStatus().find(s => s.name === name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${name}` }, 404);
+      const start = Date.now();
+
+      // Read transport from canonical config so we can spawn a focused SDK
+      // session with ONLY this server attached (no side effects on others).
+      const claudeJsonPath = join(HOME, ".claude.json");
+      let serverCfg: unknown;
+      try {
+        const cfg = JSON.parse(readFileSync(claudeJsonPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+        serverCfg = cfg.mcpServers?.[name];
+      } catch { /* fall through */ }
+      if (!serverCfg) {
+        return json(req, res, { ok: false, reason: `no config found for ${name} in ~/.claude.json`, durationMs: Date.now() - start, name }, 400);
+      }
+
+      const sdk = await import("@anthropic-ai/claude-agent-sdk");
+      const queryFn = (sdk as unknown as { query: (opts: unknown) => unknown }).query;
+
+      let releaseInput!: () => void;
+      const inputHeld = new Promise<void>((r) => { releaseInput = r; });
+      async function* keepAlive() { await inputHeld; }
+
+      type SdkQueryHandle = AsyncIterable<unknown> & {
+        mcpClearAuth(name: string): Promise<unknown>;
+        close?: () => void;
+      };
+
+      const q = queryFn({
+        prompt: keepAlive(),
+        options: {
+          cwd: HOME,
+          permissionMode: "bypassPermissions",
+          allowDangerouslySkipPermissions: true,
+          strictMcpConfig: true,
+          settingSources: [],
+          mcpServers: { [name]: serverCfg },
+        },
+      }) as SdkQueryHandle;
+
+      const drain = (async () => { try { for await (const _ of q) { /* drain */ } } catch { /* ignore */ } })();
+      // Brief grace for SDK init.
+      await new Promise(r => setTimeout(r, 1500));
+
+      let cleared = false;
+      let reason: string | undefined;
+      try {
+        await q.mcpClearAuth(name);
+        cleared = true;
+      } catch (err: any) {
+        reason = `mcpClearAuth failed: ${err?.message ?? err}`;
+      }
+
+      releaseInput();
+      q.close?.();
+      await drain.catch(() => undefined);
+
+      // Belt & braces: also wipe ~/.claude/mcp-needs-auth-cache.json entry
+      // AND any ~/.mcp-auth/mcp-remote-*/ tokens for stdio+mcp-remote
+      // servers (the SDK may not touch those).
+      try {
+        const cachePath = join(HOME, ".claude/mcp-needs-auth-cache.json");
+        if (existsSync(cachePath)) {
+          const cache = JSON.parse(readFileSync(cachePath, "utf-8")) as Record<string, unknown>;
+          if (name in cache) {
+            delete cache[name];
+            writeFileSync(cachePath, JSON.stringify(cache, null, 4), "utf-8");
+          }
+        }
+      } catch { /* best-effort */ }
+
+      // For stdio+mcp-remote servers: remove the matching tokens.json by
+      // reading client_info.json server_url and matching against the
+      // configured target URL.
+      try {
+        const cfgUrl = (serverCfg as { url?: string }).url
+          ?? (() => {
+            const args = (serverCfg as { args?: string[] }).args;
+            const found = Array.isArray(args) ? args.find(a => /^https?:\/\//.test(a)) : undefined;
+            return found ?? "";
+          })();
+        if (cfgUrl) {
+          const authRoot = join(HOME, ".mcp-auth");
+          if (existsSync(authRoot)) {
+            for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+              const dir = join(authRoot, verDir);
+              for (const f of readdirSync(dir)) {
+                if (!f.endsWith("_client_info.json")) continue;
+                try {
+                  const ci = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { server_url?: string };
+                  if (ci.server_url && (ci.server_url === cfgUrl || cfgUrl.startsWith(ci.server_url) || ci.server_url.startsWith(cfgUrl.split("?")[0]!))) {
+                    const hash = f.replace("_client_info.json", "");
+                    for (const ext of ["client_info.json", "tokens.json", "code_verifier.txt"]) {
+                      const p = join(dir, `${hash}_${ext}`);
+                      if (existsSync(p)) { try { rmSync(p, { force: true }); } catch { /* ignore */ } }
+                    }
+                  }
+                } catch { /* skip */ }
+              }
+            }
+          }
+        }
+      } catch { /* best-effort */ }
+
+      await refreshMcpStatus();
+      audit({
+        event: "mcp.disconnect", actor: "dashboard", target: name,
+        result: cleared ? "ok" : "error",
+        reason,
+        details: { durationMs: Date.now() - start },
+      });
+      return json(req, res, {
+        ok: cleared,
+        reason,
+        durationMs: Date.now() - start,
+        name,
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
   // --- AGENT CHANNEL SCOPE — edit allowedJids/Chats/Channels + allowCrossChatWrite ---
   // Body: { discord?: ChannelScope, whatsapp?: ChannelScope, telegram?: ChannelScope }
   // Each ChannelScope merges into the existing one — pass `null` to clear.
