@@ -6,6 +6,11 @@ import { logger, setDashboardLogHook } from "../services/logger";
 import { pushLog, type LogEntry } from "./state";
 import { handleApi } from "./api";
 import { attachWebSocket, broadcast, clientCount } from "./ws";
+import { startReminderPolling } from "agent-conductor";
+import {
+  emit as emitOrchestratorEvent,
+  startOrchestratorBridge,
+} from "../notch/orchestrator-events.js";
 
 // Re-export for external consumers (handler.ts, index.ts)
 export { pushLog, trackMessage, trackResponseTime, getCliSessions } from "./state";
@@ -126,6 +131,54 @@ p{color:#8a8f98;line-height:1.6;font-size:13px;}
 export function startDashboard(port: number): void {
   if (USE_REACT) log.info("Serving React dashboard from %s", DIST_DIR);
   else log.warn("React build not found at %s — dashboard UI unavailable (API still works)", DIST_DIR);
+
+  // ── Phase 2 Plan 02-02 — boot the Reminders polling loop once at startup.
+  // 3s tick on Jarvis/ActiveTasks → diff → emit todo:added/completed/updated
+  // through the orchestrator-events bus (consumed by the notch HUD in
+  // Plan 02-03 and by any future SSE endpoint).
+  // Disabled when JARVIS_NO_POLL=1 so unit tests / specs that import server.ts
+  // transitively don't kick off a real polling interval.
+  if (!process.env.JARVIS_NO_POLL) {
+    try {
+      startReminderPolling({
+        intervalMs: 3000,
+        list: "Jarvis/ActiveTasks",
+        onEvent: (e) => {
+          // Project the per-todo events into the OrchestratorEvent union
+          // (which carries only id+title — full ReminderTodo would bloat
+          // the WS broadcast and isn't needed by the notch HUD).
+          emitOrchestratorEvent({
+            type: e.type,
+            todo: { id: e.todo.id, title: e.todo.title },
+            ts: Date.now(),
+          });
+          // Coarser-grained "list changed" event so the dashboard can
+          // do a single fetch instead of granular DOM updates.
+          emitOrchestratorEvent({
+            type: "todos:update",
+            data: { count: 1, ts: Date.now() },
+          });
+        },
+        onError: (err) => log.warn({ err }, "[reminders] polling tick failed"),
+      });
+      log.info("[reminders] polling started (3s, list=Jarvis/ActiveTasks)");
+    } catch (err) {
+      log.warn({ err }, "[reminders] polling failed to start");
+    }
+
+    // ── Phase 2 Plan 02-03 — orchestrator → notch event bridge.
+    // 5s tick: buildSnapshot() → emit `sessions:update` with the rich
+    // {pid, repo, status, conflict} array consumed by SessionsSidebarView.
+    // 1s debounce on todo:added/completed/updated → listTodos() → emit
+    // `todos:update` with topThree consumed by TodoStripView.
+    // Same JARVIS_NO_POLL escape hatch as the reminders loop.
+    try {
+      startOrchestratorBridge({ snapshotIntervalMs: 5000 });
+      log.info("[orchestrator-bridge] started (5s snapshot tick + 1s todos debounce)");
+    } catch (err) {
+      log.warn({ err }, "[orchestrator-bridge] failed to start");
+    }
+  }
 
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     const url = req.url ?? "/";

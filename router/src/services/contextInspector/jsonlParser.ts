@@ -169,3 +169,123 @@ export async function countTurns(path: string): Promise<number> {
   }
   return count;
 }
+
+// ─── Phase 2 (Plan 02-01) — orchestrator helpers ───────────────────────────
+// These extend jsonlParser additively — Phase 1 callers (countTurns, sumTokens,
+// extractToolUseEvents) are untouched. The helpers below feed refinedStatus
+// derivation, suggestion engine, and the new /api/sessions/:pid/transcript
+// endpoint. All are tail-only reads; no full-file scan even on multi-GB JSONLs.
+
+/**
+ * Walk the JSONL tail in reverse and return the last `assistant`-typed turn.
+ * Returns null if no assistant turn is found (empty file, malformed-only, or
+ * file lacks any assistant rows).
+ *
+ * Used by:
+ *  - refinedStatus.ts (decide awaiting_user_input vs crashed via stop_reason)
+ *  - snapshot.ts (last_assistant_summary projection — first text block)
+ *  - dashboard/api.ts /api/sessions/:pid/transcript handler
+ */
+export async function extractLastAssistantTurn(transcriptPath: string): Promise<{
+  stop_reason: string | null;
+  content: Array<{
+    type: string;
+    text?: string;
+    name?: string;
+    id?: string;
+    input?: unknown;
+  }>;
+  timestamp: string;
+  uuid: string;
+} | null> {
+  const lines = await readJsonlTailLines(transcriptPath, 256_000);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const obj = JSON.parse(lines[i]) as {
+        type?: string;
+        message?: {
+          role?: string;
+          content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }>;
+          stop_reason?: string | null;
+        };
+        timestamp?: string;
+        uuid?: string;
+      };
+      if (obj.type === "assistant" && obj.message?.role === "assistant") {
+        return {
+          stop_reason: obj.message.stop_reason ?? null,
+          content: obj.message.content ?? [],
+          timestamp: obj.timestamp ?? "",
+          uuid: obj.uuid ?? "",
+        };
+      }
+    } catch {
+      /* skip malformed line */
+    }
+  }
+  return null;
+}
+
+/**
+ * Walk the JSONL tail and return the set of `tool_use` blocks emitted by
+ * `assistant` turns that do NOT yet have a matching `tool_result` block in a
+ * subsequent `user` turn. A non-empty result means the session is in
+ * "tool_pending" state — Claude is waiting for a tool result before continuing.
+ *
+ * Matching is by `tool_use.id` ↔ `tool_result.tool_use_id`. Order within the
+ * tail does not matter; we collect all tool_uses then subtract matched ids.
+ */
+export async function extractPendingToolUses(transcriptPath: string): Promise<Array<{
+  id: string;
+  name: string;
+  input: unknown;
+}>> {
+  const lines = await readJsonlTailLines(transcriptPath, 256_000);
+  const toolUses = new Map<string, { id: string; name: string; input: unknown }>();
+  const matchedIds = new Set<string>();
+  for (const raw of lines) {
+    try {
+      const obj = JSON.parse(raw) as {
+        type?: string;
+        message?: {
+          role?: string;
+          content?: Array<{ type?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string }>;
+        };
+      };
+      // Collect tool_use blocks from assistant turns
+      if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
+        for (const block of obj.message!.content!) {
+          if (block?.type === "tool_use" && typeof block.id === "string") {
+            toolUses.set(block.id, {
+              id: block.id,
+              name: typeof block.name === "string" ? block.name : "",
+              input: block.input ?? null,
+            });
+          }
+        }
+      }
+      // Collect tool_result tool_use_ids from user turns
+      if (obj.type === "user" && Array.isArray(obj.message?.content)) {
+        for (const block of obj.message!.content!) {
+          if (block?.type === "tool_result" && typeof block.tool_use_id === "string") {
+            matchedIds.add(block.tool_use_id);
+          }
+        }
+      }
+    } catch {
+      /* skip malformed line */
+    }
+  }
+  return [...toolUses.values()].filter((tu) => !matchedIds.has(tu.id));
+}
+
+/**
+ * Convenience wrapper around extractLastAssistantTurn that returns just the
+ * stop_reason (or null when missing). Used by refinedStatus crashed-detection
+ * — a transcript whose last assistant has stop_reason==null AND whose process
+ * is gone from `ps` is "crashed".
+ */
+export async function getStopReason(transcriptPath: string): Promise<string | null> {
+  const last = await extractLastAssistantTurn(transcriptPath);
+  return last?.stop_reason ?? null;
+}

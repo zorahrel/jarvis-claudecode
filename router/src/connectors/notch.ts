@@ -3,6 +3,7 @@ import type { IncomingMessage, Config } from "../types";
 import { handleMessage } from "../services/handler";
 import { logger } from "../services/logger";
 import { emitNotch } from "../notch/events";
+import { subscribe as subscribeOrchestrator } from "../notch/orchestrator-events";
 import { appendHistory } from "../notch/history";
 import { getPrefs } from "../notch/prefs";
 import { speakToFile, registerCartesiaStream, registerExternalStream } from "../services/tts";
@@ -88,12 +89,57 @@ export class NotchConnector implements Connector {
     emitNotch({ type: "state.change", data: { state: "recording" } });
   }
 
+  /**
+   * Plan 02-03 — orchestrator → notch wire. The orchestrator-events bus
+   * is namespaced (notch/orchestrator-events.ts, NOT notch/events.ts —
+   * RESEARCH.md anti-pattern). We subscribe HERE because NotchConnector is
+   * the only place that owns the notch transport surface; relaying through
+   * `emitNotch` lets the existing SSE + WS endpoints fan the events out
+   * to JarvisNotch (Swift) without a new transport.
+   *
+   * Static so the subscription survives connector hot-reloads / repeated
+   * start() calls. Holds the unsubscribe handle so test setups can tear
+   * it down via `__resetForTests` on the orchestrator bus.
+   */
+  private static orchestratorBridgeUnsub: (() => void) | null = null;
+
   async start(): Promise<void> {
+    if (NotchConnector.orchestratorBridgeUnsub === null) {
+      NotchConnector.orchestratorBridgeUnsub = subscribeOrchestrator((event) => {
+        // Forward orchestrator events through the existing notch event
+        // surface. The Swift NotchEventBus.parse(line:) recognizes
+        // `sessions:update` and `todos:update` and routes them to the
+        // SessionsSidebarView and TodoStripView subscribers.
+        //
+        // We carry the same `{type, data}` envelope the orchestrator bus
+        // already produces. The notch wire-protocol union (notch/events.ts)
+        // is intentionally NOT extended — instead the events.ts emitter
+        // accepts our payload via a type assertion, mirroring the runtime
+        // behavior the WKWebView already tolerates (unknown types fall to
+        // the SSE parser's `default: break`).
+        try {
+          const data: Record<string, unknown> =
+            "data" in event ? (event.data as Record<string, unknown>) : { todo: event.todo, ts: event.ts };
+          // Cast through `unknown` because the NotchEvent union does not
+          // currently include sessions:update / todos:update; the Swift
+          // side is the actual consumer and accepts every `{type,data}`
+          // envelope by name. Future hardening would extend NotchEvent.
+          emitNotch({ type: event.type, data } as unknown as Parameters<typeof emitNotch>[0]);
+        } catch (err) {
+          log.warn({ err, type: event.type }, "[notch] orchestrator forward failed");
+        }
+      });
+      log.info("[notch] orchestrator-events bridge wired (sessions:update + todos:update)");
+    }
     log.info("Notch connector ready (POST /api/notch/send, WS /notch, SSE /api/notch/stream)");
   }
 
   async stop(): Promise<void> {
     if (NotchConnector.instance === this) NotchConnector.instance = null;
+    if (NotchConnector.orchestratorBridgeUnsub) {
+      NotchConnector.orchestratorBridgeUnsub();
+      NotchConnector.orchestratorBridgeUnsub = null;
+    }
     log.info("Notch connector stopped");
   }
 

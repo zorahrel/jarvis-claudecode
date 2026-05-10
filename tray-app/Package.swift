@@ -27,5 +27,14 @@ let package = Package(
                 .copy("Orb"),
             ]
         ),
+        // XCTest target for JarvisNotch — Phase 2 Plan 02-03.
+        // Covers ORC-11..14: SessionsSidebarView, TodoStripView, NotchEvent
+        // decoder for sessions:update + todos:update, and reconnect-state
+        // preservation in NotchEventBus.
+        .testTarget(
+            name: "JarvisNotchTests",
+            dependencies: ["JarvisNotch"],
+            path: "Tests/JarvisNotchTests"
+        ),
     ]
 )

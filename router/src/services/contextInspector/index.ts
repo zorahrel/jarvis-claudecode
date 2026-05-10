@@ -50,6 +50,9 @@ export {
   sumTokens,
   countTurns,
   readJsonlTailLines,
+  extractLastAssistantTurn,
+  extractPendingToolUses,
+  getStopReason,
 } from "./jsonlParser.js";
 export type { ToolUseRecord, TokenSummary } from "./jsonlParser.js";
 
