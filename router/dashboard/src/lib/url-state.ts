@@ -9,7 +9,7 @@
  */
 
 const PAGES = new Set([
-  "overview", "channels", "routes", "agents", "tools", "skills",
+  "overview", "channels", "routes", "agents", "tools", "permissions", "skills",
   "memory", "cron", "sessions", "logs", "analytics", "settings",
 ])
 

@@ -1622,6 +1622,38 @@ export function killProcessByKey(key: string): boolean {
 }
 
 /**
+ * Kill every live SDK session bound to a specific agent. Used after a
+ * dashboard PATCH that mutates the agent's tools / channelScope / model:
+ * sessions already running carry the OLD config in memory until inactivity
+ * timeout (default 15 min), so a config change wouldn't visibly take effect
+ * for that long. Killing here forces the next inbound message for that
+ * agent to spawn a fresh session that reads the freshly-written agent.yaml.
+ *
+ * Matches by trailing `:<agentName>` segment of the session key (see
+ * parseSessionKey above). Returns the count of sessions killed.
+ */
+export function killSessionsByAgent(agentName: string): number {
+  if (!agentName) return 0;
+  const suffix = `:${agentName}`;
+  let count = 0;
+  for (const key of Array.from(sessions.keys())) {
+    if (!key.endsWith(suffix)) continue;
+    const s = sessions.get(key);
+    if (!s) continue;
+    if (s.pendingReject) {
+      const reject = s.pendingReject;
+      s.pendingResolve = null; s.pendingOnChunk = null; s.pendingReject = null;
+      reject(new Error("CONFIG_CHANGED"));
+    }
+    killSession(s);
+    sessions.delete(key);
+    count++;
+  }
+  if (count > 0) log.info({ agentName, killed: count }, "Killed live sessions after agent config change");
+  return count;
+}
+
+/**
  * Interrupt every in-flight session for `${channel}:${target}` (across agent
  * suffixes). Replaces the pending caller's rejection reason with `INTERRUPTED`
  * so the handler can distinguish a user-triggered stop from a crash, then

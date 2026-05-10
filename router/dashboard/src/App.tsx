@@ -7,6 +7,7 @@ import { Channels } from './pages/Channels'
 import { Routes } from './pages/Routes'
 import { Agents } from './pages/Agents'
 import { Tools } from './pages/Tools'
+import { Permissions } from './pages/Permissions'
 import { Skills } from './pages/Skills'
 import { Memory } from './pages/Memory'
 import { Sessions } from './pages/Sessions'
@@ -85,6 +86,8 @@ function App() {
         return <Agents onToast={addToast} />
       case 'tools':
         return <Tools onToast={addToast} />
+      case 'permissions':
+        return <Permissions onToast={addToast} />
       case 'skills':
         return <Skills onToast={addToast} />
       case 'memory':
