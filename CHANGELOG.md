@@ -5,6 +5,28 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Changed
+- **Dashboard `/api/mcp/authenticate` now supports `type: http` MCPs.** Previously
+  rejected anything that wasn't `npx mcp-remote URL` with "not an mcp-remote-based
+  server". The endpoint now branches on transport (detected from
+  `claude mcp list` target string): stdio+mcp-remote uses the existing
+  `~/.mcp-auth/` token-watch flow; `type: http`/`sse` spawn a one-shot
+  `claude --print "ping" --strict-mcp-config --mcp-config <inline>` with only
+  that server attached and watch `~/.claude/mcp-needs-auth-cache.json` for the
+  entry to clear (Claude Code's native auth flow opens the OAuth popup once and
+  persists the token in its own store).
+
+### Fixed
+- **mcp-remote auth-state janitor extended.** `cleanupOrphanMcpLocks()` now runs
+  three passes at boot instead of one: (1) orphan `_lock.json` from dead pids
+  (existing); (2) aborted OAuth flows — a `<hash>_code_verifier.txt` older than
+  30 min with no matching `<hash>_tokens.json` indicates a closed browser tab,
+  the whole hash group is removed; (3) duplicate `<hash>_client_info.json`
+  entries pointing at the same upstream `server_url` are collapsed to the one
+  with the most recent token, others removed. Pass (3) fixes a Tally OAuth
+  popup-loop bug where two stale dynamic-client registrations co-existed and
+  every spawn re-triggered registration. Cheap, idempotent, completely safe.
+
 ### Added
 - **Per-agent inactivity timeout.** `agent.yaml` now accepts `inactivityTimeoutMin`
   (default 15). Replaces the previous hardcoded 15-minute global constant.
