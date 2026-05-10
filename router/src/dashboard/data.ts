@@ -3,6 +3,8 @@ import { join, basename } from "path";
 import { parse as parseYaml } from "yaml";
 import { getProcesses } from "../services/claude";
 import { getConfig, getToolRegistry, getToolRouteMap } from "../services/config-loader";
+import { resolveAgentTier } from "../types/config";
+import type { ChannelScope, User } from "../types/config";
 import { getAllContactNames } from "../services/contact-names";
 import { formatUptime, safeReadFile, safeFileSize } from "./helpers";
 import { getTotalMessages, getMessagesByChannel, getResponseTimes, ROUTER_START } from "./state";
@@ -163,6 +165,9 @@ export function getAgentsData() {
     scopes: ReturnType<typeof parseAgentScopes>;
     model: string | null; effort: string | null; fallbacks: string[];
     fullAccess: boolean; tools: string[]; inheritUserScope: boolean;
+    tier: User["type"];
+    rateLimit: { maxMessages?: number; windowSeconds?: number } | null;
+    channelScope: { discord: ChannelScope | null; whatsapp: ChannelScope | null; telegram: ChannelScope | null };
   }> = [];
   const agentsDir = join(HOME, ".claude/jarvis/agents");
   try {
@@ -189,6 +194,11 @@ export function getAgentsData() {
       let fullAccess = false;
       let tools: string[] = [];
       let inheritUserScope = true;
+      let tier: User["type"] = "personal";
+      let rateLimit: { maxMessages?: number; windowSeconds?: number } | null = null;
+      let scopeDiscord: ChannelScope | null = null;
+      let scopeWhatsApp: ChannelScope | null = null;
+      let scopeTelegram: ChannelScope | null = null;
       try {
         const yamlPath = join(ws, "agent.yaml");
         if (existsSync(yamlPath)) {
@@ -199,12 +209,19 @@ export function getAgentsData() {
           fullAccess = parsed.fullAccess === true;
           tools = Array.isArray(parsed.tools) ? parsed.tools : [];
           inheritUserScope = parsed.inheritUserScope !== false;
+          tier = resolveAgentTier(parsed);
+          rateLimit = parsed.rateLimit && typeof parsed.rateLimit === "object" ? parsed.rateLimit : null;
+          scopeDiscord = parsed.discord ?? null;
+          scopeWhatsApp = parsed.whatsapp ?? null;
+          scopeTelegram = parsed.telegram ?? null;
         }
       } catch { /* skip */ }
       agents.push({
         name, workspace: ws, content, size: content.length,
         files, scopes: parseAgentScopes(content),
         model, effort, fallbacks, fullAccess, tools, inheritUserScope,
+        tier, rateLimit,
+        channelScope: { discord: scopeDiscord, whatsapp: scopeWhatsApp, telegram: scopeTelegram },
       });
     }
   } catch { /* no agents dir */ }

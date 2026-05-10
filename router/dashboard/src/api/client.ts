@@ -62,6 +62,24 @@ export interface AgentFile {
   size: number
 }
 
+export type Tier = 'owner' | 'team' | 'family' | 'personal' | 'client'
+
+export interface ChannelScope {
+  allowedGuilds?: string[]
+  allowedChannels?: string[]
+  denyChannels?: string[]
+  allowedJids?: string[]
+  denyJids?: string[]
+  allowedChats?: string[]
+  denyChats?: string[]
+  allowCrossChatWrite?: boolean
+}
+
+export interface AgentRateLimit {
+  maxMessages?: number
+  windowSeconds?: number
+}
+
 export interface FullAgent {
   name: string
   workspace: string
@@ -74,7 +92,44 @@ export interface FullAgent {
   fallbacks: string[]
   fullAccess: boolean
   tools: string[]
+  inheritUserScope?: boolean
+  tier: Tier
+  rateLimit: AgentRateLimit | null
+  channelScope: {
+    discord: ChannelScope | null
+    whatsapp: ChannelScope | null
+    telegram: ChannelScope | null
+  }
   routes: Array<{ index: number; channel: string; from: string; group: string | null; fullAccess: boolean }>
+}
+
+export interface AuditEntry {
+  ts: string
+  event: string
+  actor: string
+  agent?: string
+  target?: string
+  diff?: { added?: string[]; removed?: string[]; before?: unknown; after?: unknown }
+  killedSessions?: number
+  details?: Record<string, unknown>
+  result?: 'ok' | 'denied' | 'error'
+  reason?: string
+}
+
+export interface PermissionMatrix {
+  agents: Array<{
+    name: string
+    tier: Tier
+    fullAccess: boolean
+    tools: string[]
+    inheritUserScope: boolean
+    model: string | null
+    rateLimit: AgentRateLimit | null
+    channelScope: { discord: ChannelScope | null; whatsapp: ChannelScope | null; telegram: ChannelScope | null }
+  }>
+  allTools: Array<{ id: string; type: string; label: string; icon: string | null; allowedFor: Tier[] }>
+  tiers: Tier[]
+  tierWhitelist: Record<Tier, string[]>
 }
 
 export interface Agent {
@@ -713,6 +768,25 @@ export const api = {
     request<Agent>('/api/agents', { method: 'POST', body: JSON.stringify(agent) }),
   deleteAgent: (name: string) =>
     requestConfirm<void>(`/api/agents/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  // Permissions / channel scope / audit / matrix
+  patchAgentChannelScope: (
+    name: string,
+    body: { discord?: ChannelScope | null; whatsapp?: ChannelScope | null; telegram?: ChannelScope | null },
+  ) =>
+    request<{ ok: boolean; scope: { discord: ChannelScope | null; whatsapp: ChannelScope | null; telegram: ChannelScope | null }; killedSessions: number }>(
+      `/api/agents/${encodeURIComponent(name)}/channel-scope`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+  permissionMatrix: () => request<PermissionMatrix>('/api/permission-matrix'),
+  audit: (opts?: { limit?: number; agent?: string; event?: string }) => {
+    const q = new URLSearchParams()
+    if (opts?.limit) q.set('limit', String(opts.limit))
+    if (opts?.agent) q.set('agent', opts.agent)
+    if (opts?.event) q.set('event', opts.event)
+    const qs = q.toString()
+    return request<{ entries: AuditEntry[]; path: string }>(`/api/audit${qs ? `?${qs}` : ''}`)
+  },
 
   // Crons
   createCron: (cron: Record<string, unknown>) =>

@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getProcesses, killProcessByKey, resolveCliPath } from "../services/claude";
+import { getProcesses, killProcessByKey, killSessionsByAgent, resolveCliPath } from "../services/claude";
 import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
@@ -22,6 +22,9 @@ import { queryCosts, aggregateCosts, getTotalCost } from "../services/cost-track
 import { logger } from "../services/logger";
 import { clearLogEntries } from "./state";
 import { corsOrigin, json, parseBody, requireConfirm, validateAgentName, safeReadFile } from "./helpers";
+import { TIER_TOOL_WHITELIST, isToolAllowedForTier, resolveAgentTier } from "../types/config";
+import type { User } from "../types/config";
+import { audit, arrayDiff, AUDIT_LOG_PATH } from "../services/audit-log";
 import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, persistCliSessionsNow } from "./state";
 import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
 import { getAllServices, generatePlist } from "../services/services";
@@ -606,94 +609,275 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, servers: listMcpStatus() });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
-  // --- MCP AUTHENTICATE — spawn one-shot mcp-remote (or claude mcp) for OAuth ---
+  // --- MCP AUTHENTICATE — spawn one-shot OAuth flow ---
   // The user clicks "Authenticate" on a needs-auth MCP. We launch the auth
   // flow directly (one popup, not N parallel ones), wait for it to finish,
-  // then refresh status. Works for stdio MCPs whose `command` is `npx mcp-remote URL`
-  // — we re-invoke that command which triggers the OAuth dance.
+  // then refresh status.
+  //
+  // Two transports are supported:
+  //   1) stdio + npx mcp-remote URL  → spawn `npx mcp-remote URL`, watch
+  //      `~/.mcp-auth/mcp-remote-*/<hash>_tokens.json` for a fresh write.
+  //   2) type: http  (URL with `(HTTP)` suffix in `claude mcp list`) → spawn
+  //      a one-shot `claude --print "ping"` with strictMcpConfig and ONLY this
+  //      server attached. Claude Code's native auth flow opens the browser
+  //      popup and persists the token in its own store
+  //      (`~/.claude/mcp-needs-auth-cache.json` clears the entry on success).
   } else if (path === "/api/mcp/authenticate" && req.method === "POST") {
     try {
       const body = await parseBody(req) as { name?: string };
       if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const name = body.name;
       const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
-      const target = listMcpStatus().find(s => s.name === body.name);
-      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+      const target = listMcpStatus().find(s => s.name === name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${name}` }, 404);
 
-      // Two stores must be in sync for the SDK-spawned mcp-remote to find a
-      // valid token: claude's own fcache + mcp-remote's `~/.mcp-auth/`. The
-      // dashboard's previous "click to auth" path only triggered claude's
-      // half. Spawn `npx mcp-remote URL` directly so it writes to its own
-      // store, which is what the SDK will read on the next session spawn.
-      // Only works for stdio entries whose command is `npx mcp-remote URL`.
-      const m = target.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
-      if (!m) {
-        return json(req, res, {
-          ok: false,
-          reason: `not an mcp-remote-based server (target: ${target.target}). For non-OAuth servers run \`claude mcp\` interactively.`,
-        });
-      }
-      const url = m[1];
       const { spawn } = await import("child_process");
-
-      // mcp-remote in stdio mode runs forever; we keep it alive long enough for
-      // the user to complete OAuth in the browser tab, then kill it. Tokens are
-      // persisted to ~/.mcp-auth/ as soon as OAuth completes, so a kill after
-      // that point is safe.
-      const child = spawn("npx", ["mcp-remote", url], {
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: false,
-      });
-      const start = Date.now();
-      const TIMEOUT_MS = 180_000; // 3 min — enough to log in slowly
-      let stderrBuf = "";
-      child.stdout?.on("data", () => { /* drain */ });
-      child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
-
-      // Watch ~/.mcp-auth/mcp-remote-*/ for a fresh tokens.json — that's the
-      // signal that OAuth completed. Polls every 1s; gives up at TIMEOUT_MS.
-      const { readdirSync, statSync } = await import("fs");
+      const { readdirSync, statSync, readFileSync, existsSync } = await import("fs");
       const { join } = await import("path");
       const HOME = process.env.HOME ?? "";
-      const authRoot = join(HOME, ".mcp-auth");
-      const baselineMtimes = new Map<string, number>();
-      try {
-        for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
-          for (const f of readdirSync(join(authRoot, verDir))) {
-            if (f.endsWith("_tokens.json")) {
-              try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
-            }
-          }
-        }
-      } catch { /* ignore */ }
+      const start = Date.now();
 
-      const tokenAppeared = await new Promise<boolean>((resolve) => {
-        const deadline = Date.now() + TIMEOUT_MS;
-        const interval = setInterval(() => {
-          if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
-          try {
-            for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
-              for (const f of readdirSync(join(authRoot, verDir))) {
-                if (!f.endsWith("_tokens.json")) continue;
-                const key = `${verDir}/${f}`;
-                const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
-                const baseline = baselineMtimes.get(key);
-                if (baseline === undefined || mtime > baseline) {
-                  clearInterval(interval); resolve(true); return;
-                }
+      // Detect transport from `claude mcp list` target string.
+      // Format examples:
+      //   "npx mcp-remote https://example.com" → stdio + mcp-remote
+      //   "https://example.com (HTTP)"          → type: http
+      //   "https://example.com (SSE)"           → type: sse (handled like http)
+      const remoteMatch = target.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
+      const httpMatch = target.target.match(/^(https?:\/\/\S+)\s+\((HTTP|SSE)\)\s*$/);
+
+      // ---------- Branch A: stdio + npx mcp-remote ----------
+      if (remoteMatch) {
+        const url = remoteMatch[1];
+
+        // mcp-remote in stdio mode runs forever; we keep it alive long enough for
+        // the user to complete OAuth in the browser tab, then kill it. Tokens are
+        // persisted to ~/.mcp-auth/ as soon as OAuth completes, so a kill after
+        // that point is safe.
+        const child = spawn("npx", ["mcp-remote", url], {
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: false,
+        });
+        const TIMEOUT_MS = 180_000; // 3 min — enough to log in slowly
+        let stderrBuf = "";
+        child.stdout?.on("data", () => { /* drain */ });
+        child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
+
+        // Watch ~/.mcp-auth/mcp-remote-*/ for a fresh tokens.json — that's the
+        // signal that OAuth completed. Polls every 1s; gives up at TIMEOUT_MS.
+        const authRoot = join(HOME, ".mcp-auth");
+        const baselineMtimes = new Map<string, number>();
+        try {
+          for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+            for (const f of readdirSync(join(authRoot, verDir))) {
+              if (f.endsWith("_tokens.json")) {
+                try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
               }
             }
-          } catch { /* ignore */ }
-        }, 1000);
-        child.on("close", () => { clearInterval(interval); resolve(false); });
-      });
+          }
+        } catch { /* ignore */ }
 
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
-      await refreshMcpStatus();
-      json(req, res, {
-        ok: tokenAppeared,
-        reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
-        durationMs: Date.now() - start,
-        name: body.name,
+        const tokenAppeared = await new Promise<boolean>((resolve) => {
+          const deadline = Date.now() + TIMEOUT_MS;
+          const interval = setInterval(() => {
+            if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
+            try {
+              for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+                for (const f of readdirSync(join(authRoot, verDir))) {
+                  if (!f.endsWith("_tokens.json")) continue;
+                  const key = `${verDir}/${f}`;
+                  const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
+                  const baseline = baselineMtimes.get(key);
+                  if (baseline === undefined || mtime > baseline) {
+                    clearInterval(interval); resolve(true); return;
+                  }
+                }
+              }
+            } catch { /* ignore */ }
+          }, 1000);
+          child.on("close", () => { clearInterval(interval); resolve(false); });
+        });
+
+        try { child.kill("SIGTERM"); } catch { /* ignore */ }
+        await refreshMcpStatus();
+        audit({
+          event: "mcp.authenticate", actor: "dashboard", target: name,
+          result: tokenAppeared ? "ok" : "error",
+          details: { transport: "stdio+mcp-remote", durationMs: Date.now() - start },
+        });
+        return json(req, res, {
+          ok: tokenAppeared,
+          transport: "stdio+mcp-remote",
+          reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
+          durationMs: Date.now() - start,
+          name: name,
+        });
+      }
+
+      // ---------- Branch B: type: http / sse ----------
+      // Browser-only flow via the Anthropic SDK's mcpAuthenticate API.
+      //
+      // 1. Spawn a long-lived `query()` SDK session with ONLY this server
+      //    attached (strictMcpConfig). Use a never-resolving prompt
+      //    generator so the SDK's bidirectional input stays open while we
+      //    issue control requests.
+      // 2. Drain the SDK message iterator in the background — it must be
+      //    consumed for the underlying child to keep streaming.
+      // 3. Call `query.mcpAuthenticate(name)` — returns
+      //    `{ authUrl, requiresUserAction }`. The SDK has already bound
+      //    a localhost callback port and embedded `redirect_uri` in the
+      //    URL, so we only need to point the user's browser at it.
+      // 4. `open <authUrl>` macOS-style. The default browser opens.
+      //    The user logs in, clicks approve, browser redirects to
+      //    `localhost:NNN/callback` which the SDK intercepts and exchanges
+      //    for a token, persisted into the keychain
+      //    (`Claude Code-credentials` → `mcpOAuth.<name>|<hash>`).
+      // 5. Poll `query.mcpServerStatus()` until the server's status is no
+      //    longer `needs-auth` (i.e. `connected`). 5-min budget.
+      // 6. Cleanup: close the SDK session, refresh `mcp-status` so the
+      //    dashboard reflects the new state.
+      if (httpMatch) {
+        const claudeJsonPath = join(HOME, ".claude.json");
+        let serverCfg: unknown;
+        try {
+          const cfg = JSON.parse(readFileSync(claudeJsonPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+          serverCfg = cfg.mcpServers?.[name];
+        } catch { /* ignore — fall back to inferred config below */ }
+        if (!serverCfg) {
+          serverCfg = { type: httpMatch[2]!.toLowerCase(), url: httpMatch[1] };
+        }
+
+        // Lazy-import the SDK so we don't pay the cost on every dashboard
+        // request that isn't authenticate-related.
+        const sdk = await import("@anthropic-ai/claude-agent-sdk");
+        const queryFn = (sdk as unknown as { query: (opts: unknown) => unknown }).query;
+
+        // Hold the SDK input stream open until we're ready to tear down.
+        let releaseInput!: () => void;
+        const inputHeld = new Promise<void>((r) => { releaseInput = r; });
+        async function* keepAlive() { await inputHeld; }
+
+        // Type-cast escape: the SDK's Query class isn't on the public
+        // .d.ts surface, but we know the methods exist (verified at
+        // runtime via Object.getPrototypeOf on a live query handle).
+        type SdkQueryHandle = AsyncIterable<unknown> & {
+          mcpAuthenticate(name: string): Promise<{ authUrl?: string; requiresUserAction?: boolean }>;
+          mcpServerStatus(): Promise<Array<{ name: string; status: string }>>;
+          close?: () => void;
+        };
+
+        const q = queryFn({
+          prompt: keepAlive(),
+          options: {
+            cwd: HOME,
+            permissionMode: "bypassPermissions",
+            allowDangerouslySkipPermissions: true,
+            strictMcpConfig: true,
+            settingSources: [],
+            mcpServers: { [name]: serverCfg },
+          },
+        }) as SdkQueryHandle;
+
+        // The async iterator MUST be drained for the underlying child to
+        // keep streaming. We don't care about messages — just consume.
+        const drain = (async () => {
+          try { for await (const _ of q) { /* drain */ } } catch { /* ignore */ }
+        })();
+
+        // Give claude a moment to spawn + initialize the MCP transport
+        // before issuing the authenticate control request.
+        await new Promise(r => setTimeout(r, 2500));
+
+        let authUrl: string | undefined;
+        let earlyOk = false;
+        try {
+          const result = await q.mcpAuthenticate(name);
+          authUrl = result?.authUrl;
+          // If requiresUserAction is explicitly false, the server was
+          // already authenticated (e.g. token still valid in keychain).
+          if (result && result.requiresUserAction === false) earlyOk = true;
+        } catch (err: any) {
+          releaseInput();
+          q.close?.();
+          await drain.catch(() => undefined);
+          return json(req, res, {
+            ok: false, transport: "http",
+            reason: `mcpAuthenticate failed: ${err?.message ?? err}`,
+            durationMs: Date.now() - start, name,
+          });
+        }
+
+        if (earlyOk || !authUrl) {
+          releaseInput();
+          q.close?.();
+          await drain.catch(() => undefined);
+          await refreshMcpStatus();
+          return json(req, res, {
+            ok: true, transport: "http",
+            reason: "already authenticated",
+            durationMs: Date.now() - start, name,
+          });
+        }
+
+        // Open the user's default browser at the SDK-provided authorize
+        // URL. macOS `open` returns immediately and never blocks the
+        // router. The SDK already bound a localhost callback port and
+        // embedded `redirect_uri` in this URL.
+        try {
+          const opener = spawn("open", [authUrl], { stdio: "ignore", detached: true });
+          opener.unref();
+        } catch { /* user can copy/paste from the response if open fails */ }
+
+        // Poll the SDK's own status endpoint — it sees auth completion
+        // immediately (no 60s mcp-status cache lag).
+        const TIMEOUT_MS = 5 * 60 * 1000;
+        const POLL_INTERVAL_MS = 1500;
+        const authCompleted = await new Promise<boolean>((resolve) => {
+          const deadline = Date.now() + TIMEOUT_MS;
+          const tick = async () => {
+            if (Date.now() > deadline) { resolve(false); return; }
+            try {
+              const statuses = await q.mcpServerStatus();
+              const s = statuses.find(x => x.name === name);
+              // SDK reports "connected" once OAuth completes & token persists.
+              if (s && s.status !== "needs-auth" && s.status !== "failed") {
+                resolve(true); return;
+              }
+            } catch { /* ignore — poll again */ }
+            setTimeout(tick, POLL_INTERVAL_MS);
+          };
+          setTimeout(tick, 1500);
+        });
+
+        // Refresh the cached `claude mcp list` status so the dashboard
+        // reflects the new state on the next /api/mcp-status hit.
+        try { await refreshMcpStatus(); } catch { /* ignore */ }
+
+        // Tear down the SDK session.
+        releaseInput();
+        q.close?.();
+        await drain.catch(() => undefined);
+
+        audit({
+          event: "mcp.authenticate", actor: "dashboard", target: name,
+          result: authCompleted ? "ok" : "error",
+          details: { transport: "http", durationMs: Date.now() - start },
+        });
+        return json(req, res, {
+          ok: authCompleted,
+          transport: "http",
+          authUrl,
+          reason: authCompleted
+            ? undefined
+            : `OAuth did not complete within ${TIMEOUT_MS / 1000}s — user cancelled or auth did not persist`,
+          durationMs: Date.now() - start,
+          name,
+        });
+      }
+
+      // ---------- Unrecognised transport ----------
+      return json(req, res, {
+        ok: false,
+        reason: `unrecognised transport for ${name} (target: ${target.target}). Supported: stdio+mcp-remote and type:http/sse.`,
       });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
@@ -704,9 +888,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     try {
       const body = await parseBody(req) as { name?: string };
       if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const name = body.name;
       const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
-      const target = listMcpStatus().find(s => s.name === body.name);
-      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+      const target = listMcpStatus().find(s => s.name === name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${name}` }, 404);
       // Use the URL fragment as a needle; for non-URL targets fall back to name.
       const needle = target.target.includes("://") ? target.target : target.name;
       const { execFile } = await import("child_process");
@@ -714,7 +899,133 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         execFile("pkill", ["-f", needle], { timeout: 5000 }, () => resolve());
       });
       await refreshMcpStatus();
-      json(req, res, { ok: true, name: body.name, killed: needle });
+      audit({ event: "mcp.restart", actor: "dashboard", target: name, details: { killed: needle } });
+      json(req, res, { ok: true, name: name, killed: needle });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT CHANNEL SCOPE — edit allowedJids/Chats/Channels + allowCrossChatWrite ---
+  // Body: { discord?: ChannelScope, whatsapp?: ChannelScope, telegram?: ChannelScope }
+  // Each ChannelScope merges into the existing one — pass `null` to clear.
+  } else if (path.match(/^\/api\/agents\/[^/]+\/channel-scope$/) && req.method === "PATCH") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const body = await parseBody(req) as Record<string, unknown>;
+      const yamlPath = join(HOME, ".claude/jarvis/agents", agentName, "agent.yaml");
+      if (!existsSync(yamlPath)) { json(req, res, { error: "agent.yaml not found" }, 404); return; }
+      const existing = parseYaml(readFileSync(yamlPath, "utf-8")) ?? {};
+
+      const channels = ["discord", "whatsapp", "telegram"] as const;
+      const before: Record<string, unknown> = {};
+      for (const ch of channels) {
+        before[ch] = existing[ch] ?? null;
+        const incoming = body[ch];
+        if (incoming === undefined) continue;
+        if (incoming === null) { delete existing[ch]; continue; }
+        if (typeof incoming !== "object") { json(req, res, { error: `${ch}: must be object or null` }, 400); return; }
+        // Validate shape (string arrays / boolean only) — defensive against
+        // typo or injection from a user-edited dashboard.
+        const sc = incoming as Record<string, unknown>;
+        const arrayFields = ["allowedGuilds", "allowedChannels", "denyChannels", "allowedJids", "denyJids", "allowedChats", "denyChats"];
+        for (const f of arrayFields) {
+          if (sc[f] === undefined) continue;
+          if (!Array.isArray(sc[f]) || (sc[f] as unknown[]).some(v => typeof v !== "string")) {
+            json(req, res, { error: `${ch}.${f}: must be array of strings` }, 400); return;
+          }
+        }
+        if (sc.allowCrossChatWrite !== undefined && typeof sc.allowCrossChatWrite !== "boolean") {
+          json(req, res, { error: `${ch}.allowCrossChatWrite: must be boolean` }, 400); return;
+        }
+        existing[ch] = { ...(existing[ch] ?? {}), ...sc };
+        // Strip empty arrays / undefined keys for tidiness.
+        for (const k of Object.keys(existing[ch])) {
+          const v = existing[ch][k];
+          if (v === undefined || (Array.isArray(v) && v.length === 0)) delete existing[ch][k];
+        }
+        if (Object.keys(existing[ch]).length === 0) delete existing[ch];
+      }
+
+      writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
+      await reloadConfig();
+      invalidateHtmlCache();
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.channel-scope.patched", actor: "dashboard", agent: agentName,
+        diff: { before, after: { discord: existing.discord ?? null, whatsapp: existing.whatsapp ?? null, telegram: existing.telegram ?? null } },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, killedSessions: killedAgent }, "[dashboard] Patched channel scope");
+      json(req, res, {
+        ok: true,
+        scope: { discord: existing.discord ?? null, whatsapp: existing.whatsapp ?? null, telegram: existing.telegram ?? null },
+        killedSessions: killedAgent,
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AUDIT LOG — last N entries (default 100, max 1000) ---
+  } else if (path === "/api/audit" && req.method === "GET") {
+    try {
+      const url = new URL(req.url || "/", "http://x");
+      const limit = Math.max(1, Math.min(1000, parseInt(url.searchParams.get("limit") || "100", 10) || 100));
+      const agentFilter = url.searchParams.get("agent") || "";
+      const eventFilter = url.searchParams.get("event") || "";
+      let entries: Array<Record<string, unknown>> = [];
+      if (existsSync(AUDIT_LOG_PATH)) {
+        // Read last ~256KB — way more than `limit` even at the longest line.
+        const buf = readFileSync(AUDIT_LOG_PATH, "utf-8");
+        const tail = buf.length > 262144 ? buf.slice(buf.length - 262144) : buf;
+        for (const line of tail.split("\n")) {
+          if (!line.trim()) continue;
+          try { entries.push(JSON.parse(line)); } catch { /* skip malformed */ }
+        }
+        if (agentFilter) entries = entries.filter(e => e.agent === agentFilter);
+        if (eventFilter) entries = entries.filter(e => e.event === eventFilter);
+        entries = entries.slice(-limit).reverse();
+      }
+      json(req, res, { entries, path: AUDIT_LOG_PATH });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- PERMISSION MATRIX — overview of all agents × all tools ---
+  // Returns a single payload the dashboard can render as a table:
+  //   { agents: [{name, tier, fullAccess, tools, scope, killedRouteCount}],
+  //     allTools: [{id, type, label, category, allowedFor: ["owner","team",...]}],
+  //     tierWhitelist: { owner: [...], team: [...], ... } }
+  } else if (path === "/api/permission-matrix" && req.method === "GET") {
+    try {
+      const agentRegistry = getAgentRegistry();
+      const toolRegistry = getToolRegistry();
+      const tools = Object.values(toolRegistry).map((t: any) => {
+        const allowedFor: string[] = [];
+        for (const tier of Object.keys(TIER_TOOL_WHITELIST) as Array<keyof typeof TIER_TOOL_WHITELIST>) {
+          if (isToolAllowedForTier(t.id, tier)) allowedFor.push(tier);
+        }
+        return { id: t.id, type: t.type, label: t.label, icon: t.icon ?? null, allowedFor };
+      });
+      const agents = Object.values(agentRegistry).map((a: any) => {
+        const tier = resolveAgentTier(a);
+        return {
+          name: a.name,
+          tier,
+          fullAccess: a.fullAccess === true,
+          tools: Array.isArray(a.tools) ? a.tools : [],
+          inheritUserScope: a.inheritUserScope !== false,
+          model: a.model ?? null,
+          rateLimit: a.rateLimit ?? null,
+          channelScope: {
+            discord: a.discord ?? null,
+            whatsapp: a.whatsapp ?? null,
+            telegram: a.telegram ?? null,
+          },
+        };
+      });
+      json(req, res, {
+        agents,
+        allTools: tools,
+        tiers: Object.keys(TIER_TOOL_WHITELIST),
+        tierWhitelist: Object.fromEntries(
+          Object.entries(TIER_TOOL_WHITELIST).map(([tier, patterns]) => [tier, patterns.map(p => p.source)]),
+        ),
+      });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- ROUTES GET --- (thin matchers referencing agents by name)
@@ -923,6 +1234,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         effort: a.effort ?? null,
         fullAccess: a.fullAccess === true,
         inheritUserScope: a.inheritUserScope !== false,
+        tier: resolveAgentTier(a),
+        rateLimit: a.rateLimit ?? null,
+        channelScope: {
+          discord: a.discord ?? null,
+          whatsapp: a.whatsapp ?? null,
+          telegram: a.telegram ?? null,
+        },
         usedBy: usedBy[a.name!] ?? [],
       }));
       json(req, res, agents);
@@ -958,7 +1276,36 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         }
       }
       if (body.tools !== undefined && existing.fullAccess !== true) {
-        existing.tools = Array.isArray(body.tools) ? body.tools : [];
+        const candidateTools = Array.isArray(body.tools) ? body.tools : [];
+        // Tier-based whitelist enforcement (same rule as PATCH /tools).
+        const tier = resolveAgentTier(existing as { tier?: User["type"]; fullAccess?: boolean });
+        const denied = candidateTools.filter((t: string) => typeof t === "string" && !isToolAllowedForTier(t, tier));
+        if (denied.length > 0) {
+          json(req, res, {
+            error: "tier_violation",
+            tier,
+            deniedTools: denied,
+            message: `Tier "${tier}" does not permit: ${denied.join(", ")}.`,
+          }, 403);
+          return;
+        }
+        existing.tools = candidateTools;
+      }
+      if (body.tier !== undefined) {
+        const valid: User["type"][] = ["owner", "team", "family", "personal", "client"];
+        if (body.tier === null || body.tier === "") delete existing.tier;
+        else if (valid.includes(body.tier)) existing.tier = body.tier;
+        else { json(req, res, { error: `invalid tier: ${body.tier}. Must be one of: ${valid.join(", ")}` }, 400); return; }
+      }
+      if (body.rateLimit !== undefined) {
+        if (body.rateLimit === null) delete existing.rateLimit;
+        else if (typeof body.rateLimit === "object") {
+          const rl: Record<string, number> = {};
+          if (Number.isFinite(body.rateLimit.maxMessages)) rl.maxMessages = body.rateLimit.maxMessages;
+          if (Number.isFinite(body.rateLimit.windowSeconds)) rl.windowSeconds = body.rateLimit.windowSeconds;
+          if (Object.keys(rl).length > 0) existing.rateLimit = rl;
+          else delete existing.rateLimit;
+        }
       }
       if (body.inheritUserScope !== undefined) {
         // Default is true; only persist when explicitly false.
@@ -971,8 +1318,23 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
       await reloadConfig();
       invalidateHtmlCache();
-      log.info("[dashboard] Updated agent.yaml for %s", agentName);
-      json(req, res, { ok: true });
+      // Kill live sessions of this agent so the next inbound message
+      // respawns with the freshly-written config (otherwise users see
+      // their changes "not take effect" until inactivity timeout).
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.config.updated",
+        actor: "dashboard",
+        agent: agentName,
+        details: {
+          fields: Object.keys(body).filter(k => body[k] !== undefined),
+          tier: existing.tier,
+          fullAccess: existing.fullAccess === true,
+        },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, killedSessions: killedAgent }, "[dashboard] Updated agent.yaml");
+      json(req, res, { ok: true, killedSessions: killedAgent });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- AGENT SCOPE TOGGLE (adds/removes an @import line in CLAUDE.md) ---
@@ -1055,15 +1417,47 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       if (!existsSync(yamlPath)) { json(req, res, { error: "agent.yaml not found" }, 404); return; }
       const existing = parseYaml(readFileSync(yamlPath, "utf-8")) ?? {};
       if (existing.fullAccess) { json(req, res, { error: "agent has fullAccess; tools list is ignored" }, 400); return; }
+      const beforeTools: string[] = Array.isArray(existing.tools) ? [...existing.tools] : [];
       existing.tools = Array.isArray(existing.tools) ? existing.tools : [];
+
+      // Tier-based whitelist enforcement: reject any tool that isn't
+      // permitted by this agent's trust tier. Prevents privilege
+      // escalation (e.g. assigning fileAccess:full to a client agent).
+      const tier = resolveAgentTier(existing as { tier?: User["type"]; fullAccess?: boolean });
+      const wouldAdd: string[] = [];
+      if (body.addTool) wouldAdd.push(body.addTool);
+      if (Array.isArray(body.tools)) wouldAdd.push(...body.tools);
+      const denied = wouldAdd.filter((t: string) => typeof t === "string" && !isToolAllowedForTier(t, tier));
+      if (denied.length > 0) {
+        audit({
+          event: "agent.tools.patched", actor: "dashboard", agent: agentName,
+          result: "denied", reason: "tier_violation",
+          details: { tier, attempted: wouldAdd, deniedTools: denied },
+        });
+        json(req, res, {
+          error: "tier_violation",
+          tier,
+          deniedTools: denied,
+          message: `Tier "${tier}" does not permit: ${denied.join(", ")}. Raise the agent's tier in agent.yaml to grant.`,
+        }, 403);
+        return;
+      }
+
       if (body.addTool && !existing.tools.includes(body.addTool)) existing.tools.push(body.addTool);
       if (body.removeTool) existing.tools = existing.tools.filter((t: string) => t !== body.removeTool);
       if (Array.isArray(body.tools)) existing.tools = body.tools;
       writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
       await reloadConfig();
       invalidateHtmlCache();
-      log.info("[dashboard] Patched tools for agent %s", agentName);
-      json(req, res, { ok: true, tools: existing.tools });
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.tools.patched", actor: "dashboard", agent: agentName,
+        diff: arrayDiff(beforeTools, existing.tools),
+        details: { tier, after: existing.tools },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, killedSessions: killedAgent }, "[dashboard] Patched tools");
+      json(req, res, { ok: true, tools: existing.tools, tier, killedSessions: killedAgent });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- AGENT CLAUDE.MD ---
@@ -1433,8 +1827,16 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       const abs = join(HOME, ".claude/jarvis/agents", agentName, fileName);
       writeFileSync(abs, body.content ?? "", "utf-8");
       invalidateHtmlCache();
-      log.info("[dashboard] Saved agent file %s/%s", agentName, fileName);
-      json(req, res, { ok: true });
+      // CLAUDE.md/MEMORY.md/etc are read at session spawn into the system
+      // prompt; restart live sessions so changes take effect immediately.
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.file.saved", actor: "dashboard", agent: agentName, target: fileName,
+        details: { bytes: (body.content ?? "").length },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, fileName, killedSessions: killedAgent }, "[dashboard] Saved agent file");
+      json(req, res, { ok: true, killedSessions: killedAgent });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // -- Shared files CRUD (~/.claude/jarvis/agents/_shared/) --

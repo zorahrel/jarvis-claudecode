@@ -4,7 +4,7 @@ import { askClaude, sessionKey, interruptByPrefix } from "./claude";
 import { canVoice, canVision, canVisionLocal } from "./capabilities";
 import { caption as visionCaption, query as visionQuery, isAvailable as visionAvailable, visionBackend } from "./vision-local";
 import { logger } from "./logger";
-import { checkIncomingRate } from "./rate-limiter";
+import { checkIncomingRate, checkAgentRate } from "./rate-limiter";
 import { trackMessage, trackResponseTime, pushLog, broadcast, clientCount } from "../dashboard/server";
 import { getConfig } from "./config-loader";
 import type { ResponseStatus } from "../dashboard/state";
@@ -214,6 +214,14 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   })();
 
   if (!agent) return;
+
+  // Per-agent rate-limit gate. Uses `agent.rateLimit` override when set,
+  // otherwise falls back to the global `rateLimits.incoming` budget. Runs
+  // AFTER route resolution so we know which agent's bucket to charge.
+  if (agent.name && !checkAgentRate(msg.channel, msg.from, agent.name, agent.rateLimit)) {
+    try { await msg.react?.("🐢"); } catch {}
+    return;
+  }
 
   // Preserve a route-shaped object downstream so existing code referencing `route.agent` still works
   const route = { agent } as { agent: typeof agent; action?: undefined };
