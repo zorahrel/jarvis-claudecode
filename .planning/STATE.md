@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_plan: 02-04 (running concurrently — tmux inject)
+current_plan: 02-05 (next — auto-pilot opt-in, deferred behind manual gate)
 status: in_progress
-last_updated: "2026-05-10T11:17:30Z"
+last_updated: "2026-05-10T11:19:47Z"
 progress:
   total_phases: 2
   completed_phases: 1
@@ -17,10 +17,10 @@ progress:
 ## Current Status
 
 **Active milestone:** v1
-**Active phase:** Phase 2 — Orchestrator Multi-Session (executing)
-**Current plan:** 02-03 completed — Notch HUD; 02-04 running concurrently — tmux inject (Wave 1b parallel)
+**Active phase:** Phase 2 — Orchestrator Multi-Session (executing — Plans 02-01..04 done; 02-05 deferred behind manual gate)
+**Current plan:** 02-05 (next — auto-pilot opt-in; deferred until ≥1 week stability of 02-01..04)
 **Branch:** feature/orchestrator (rebased on main dd4345d)
-**Last session:** 2026-05-10T11:17:30Z — Completed 02-03-PLAN.md (Notch HUD)
+**Last session:** 2026-05-10T11:19:47Z — Completed 02-04-PLAN.md (tmux inject control)
 
 ## Accumulated Context
 
@@ -31,6 +31,7 @@ progress:
 - 2026-05-10: Phase 2 Plan 01 completed — read-side observatory: refinedStatus + suggestion + lock + 2 HTTP endpoints + /orchestrator skill. 47 tests GREEN, typecheck GREEN.
 - 2026-05-10: Phase 2 Plan 02 completed — Reminders bridge: remindctl wrapper + 3s polling + /api/todos endpoints + TodosTab dashboard with Vitest+RTL. 33 new tests GREEN, typecheck GREEN, dashboard build GREEN, no notch/events.ts pollution. ORC-06..10 closed.
 - 2026-05-10: Phase 2 Plan 03 completed — Notch HUD: SessionsSidebarView + TodoStripView + NotchEventBus multi-subscriber + reconnect-replay-last-snapshot + router orchestrator-events bridge. 10 XCTest cases GREEN, 68 prior router tests still GREEN, typecheck GREEN, swift build GREEN, tray-app/make-app.sh GREEN, notch/events.ts UNCHANGED. ORC-11..14 closed.
+- 2026-05-10: Phase 2 Plan 04 completed — tmux inject control (WRITE side): tmuxMap.ts (pid→pane parent-walk + arg-array execFile + cached pane lookup W4) + audit.ts (single-writer mutex + 10 MB rotation) + 2 HTTP endpoints (/api/sessions/:pid/tmux, /api/sessions/:pid/inject) + snapshot tmux enrichment + OrchestratorTab dashboard with Approve/Skip/Custom + force-confirm modal (case-INSENSITIVE per W5). 25 new tests GREEN (12 service + 10 api + 15 OrchestratorTab Vitest+RTL via 5 it.each variants × 2). 84 router tests + 21 dashboard tests GREEN. ORC-15..19 closed.
 
 ### Decisions Log
 
@@ -52,6 +53,12 @@ progress:
 - 2026-05-10 (Plan 02-03): Last-known-snapshot cache lives on the bus, not the views. Replays on subscribe + on reconnect (`replayCachedSnapshots` from `scheduleReconnect`). Single source of truth — no per-view caching, no race between bus and view-model. Solves ORC-14 reconnect-state preservation.
 - 2026-05-10 (Plan 02-03): Test affordances behind `#if DEBUG` extensions on the bus + the views (`publishForTesting`, `simulateDisconnectForTesting`, `lastSessionsForTesting`, `resetForTesting`, `_test_complete(id:session:)`, `_test_longPressOpensPicker(id:)`, `_test_installSubscription`). Production API stays clean; XCTest drives the same code paths the production lifecycle modifiers register.
 - 2026-05-10 (Plan 02-03): NotchConnector forwards orchestrator events via the EXISTING `emitNotch({type, data})` transport. No new endpoint, no new SSE channel. The Swift `NotchEventBus.parse(line:)` updates recognize the two new types and route them to orchestrator subscribers. RESEARCH.md anti-pattern preserved end-to-end — `notch/events.ts` UNCHANGED.
+- 2026-05-10 (Plan 02-04): (W4 FIX) Cached pane lookup at snapshot level — `getTmuxPanesOnce()` shells to tmux ONCE per `buildSnapshot()`, builds a `Map<pid, paneInfo>`, threads it through `findPaneForPid` via the new optional `cachedPanes` param. Mirrors `refinedStatusFor` 2s-cache pattern. Backward-compatible — existing `findPaneForPid(pid)` calls work unchanged.
+- 2026-05-10 (Plan 02-04): (W5 FIX) Case-INSENSITIVE force matching — `forceWord.trim().toLowerCase() === 'force'`. Accepts `force`, `Force`, `FORCE`, `  force  `, `fOrCe`. Rejects `forced`, `fOrce!`, `yes`, `f0rce`, ``. User-friendly accept under stress; audit log records which variant for security trace.
+- 2026-05-10 (Plan 02-04): Pure handler helpers (api.tmux.ts) — same `handleApi`-imports-hangs-tests workaround as Plans 02-01 (buildTranscript) and 02-02 (api.todos.ts). `handleTmuxLookup` + `handleInject` with injectable `TmuxDeps`; api.ts route wrappers are 4-6 lines.
+- 2026-05-10 (Plan 02-04): Audit JSONL = stdlib only — single-writer Promise queue (writeQueue chain) + 10 MB rotation via fs.stat → fs.rename. No external rotator dep. JARVIS_AUDIT_DIR env override for test isolation; default `~/.claude/jarvis/orchestrator/audit.jsonl`.
+- 2026-05-10 (Plan 02-04): Inject error envelope returned (not thrown) — typed dashboard client uses raw fetch().json() so 4xx error bodies (lock_conflict + conflictPid, no_tmux, pane_lost) flow through to the React component. `InjectResponse` is a tagged union narrowed by `isInjectError`.
+- 2026-05-10 (Plan 02-04): Re-resolve pane immediately before each send-keys (Pitfall 1) — pane IDs recycle across sessions; on first send failure, retry once after fresh resolution; second failure → 404 pane_lost.
 
 ### Open Stashes
 
@@ -64,3 +71,4 @@ progress:
 | 02-01 | 24 min   | 4/4   | 21    | 26 (47 GREEN total) | 2026-05-10T10:29:24Z |
 | 02-02 | 23 min   | 4/4   | 30    | 33 (62 GREEN total)  | 2026-05-10T10:59:09Z |
 | 02-03 | 10 min   | 3/3   | 13    | 10 XCTest (Swift) + 0 router (router specs unchanged, all 68 still GREEN) | 2026-05-10T11:17:30Z |
+| 02-04 | 11 min   | 4/4   | 20    | 25 new (12 service + 10 api + 15 OrchestratorTab Vitest+RTL); 84 router + 21 dashboard GREEN total | 2026-05-10T11:19:47Z |

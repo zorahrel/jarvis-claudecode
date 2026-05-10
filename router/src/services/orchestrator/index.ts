@@ -10,6 +10,10 @@ export type { TranscriptBlock, TranscriptTurn, TranscriptResponse } from "./snap
 export { deriveRefinedStatus, refinedStatusFor } from "./refinedStatus.js";
 export { suggestNext } from "./suggest.js";
 export { detectConflict, findGitRoot } from "./lock.js";
+// Plan 02-04 — tmux mapping + audit log.
+export { listAllPanes, findPaneForPid, sendKeys, capturePane } from "./tmuxMap.js";
+export type { PaneRow } from "./tmuxMap.js";
+export { appendAudit, AUDIT_DIR, AUDIT_FILE_PATH, ROTATE_BYTES } from "./audit.js";
 export type {
   RefinedStatus,
   Suggestion,

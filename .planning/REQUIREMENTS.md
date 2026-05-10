@@ -58,11 +58,11 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 
 #### tmux inject control (Plan 02-04)
 
-- [ ] **ORC-15**: Endpoint `GET /api/sessions/:pid/tmux` ritorna `{has_tmux: bool, session_name?, pane_id?}` mappando pid → pane (via `tmux list-panes -aF '#{pane_pid} #{session_name} #{pane_id}'`)
-- [ ] **ORC-16**: Endpoint `POST /api/sessions/:pid/inject {text, source}` esegue `tmux send-keys -t <pane_id> -- "<text>" Enter`, fallisce con 409 se sessione non sotto tmux o se lock cwd violato
-- [ ] **ORC-17**: Audit log JSONL append-only in `~/.claude/jarvis/orchestrator/audit.jsonl` con `{ts, pid, repo, action, text, source}`; rotation a 10 MB
-- [ ] **ORC-18**: Tab Orchestrator dashboard ha controlli "Approve" (action suggerito), "Skip" (no-op + nota), "Custom" (textarea) per ogni sessione `awaiting_user_input`; ogni click chiama `/inject` con `source: "user-approved"`
-- [ ] **ORC-19**: Confirmation modal su "Approve" se la sessione è in cwd condivisa con un'altra sessione (lock conflict) — utente deve digitare `force` per procedere
+- [x] **ORC-15**: Endpoint `GET /api/sessions/:pid/tmux` ritorna `{has_tmux: bool, session_name?, pane_id?}` mappando pid → pane (via `tmux list-panes -aF '#{pane_pid} #{session_name} #{pane_id}'`) ✓ 02-04
+- [x] **ORC-16**: Endpoint `POST /api/sessions/:pid/inject {text, source}` esegue `tmux send-keys -t <pane_id> -- "<text>" Enter`, fallisce con 409 se sessione non sotto tmux o se lock cwd violato ✓ 02-04
+- [x] **ORC-17**: Audit log JSONL append-only in `~/.claude/jarvis/orchestrator/audit.jsonl` con `{ts, pid, repo, action, text, source}`; rotation a 10 MB ✓ 02-04
+- [x] **ORC-18**: Tab Orchestrator dashboard ha controlli "Approve" (action suggerito), "Skip" (no-op + nota), "Custom" (textarea) per ogni sessione `awaiting_user_input`; ogni click chiama `/inject` con `source: "user-approved"` ✓ 02-04
+- [x] **ORC-19**: Confirmation modal su "Approve" se la sessione è in cwd condivisa con un'altra sessione (lock conflict) — utente deve digitare `force` per procedere (case-INSENSITIVE per W5) ✓ 02-04
 
 #### Auto-pilot opzionale (Plan 02-05)
 
@@ -135,11 +135,11 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 | ORC-12 | Phase 2 | Complete |
 | ORC-13 | Phase 2 | Complete |
 | ORC-14 | Phase 2 | Complete |
-| ORC-15 | Phase 2 | Pending |
-| ORC-16 | Phase 2 | Pending |
-| ORC-17 | Phase 2 | Pending |
-| ORC-18 | Phase 2 | Pending |
-| ORC-19 | Phase 2 | Pending |
+| ORC-15 | Phase 2 | Complete |
+| ORC-16 | Phase 2 | Complete |
+| ORC-17 | Phase 2 | Complete |
+| ORC-18 | Phase 2 | Complete |
+| ORC-19 | Phase 2 | Complete |
 | ORC-20 | Phase 2 | Pending |
 | ORC-21 | Phase 2 | Pending |
 | ORC-22 | Phase 2 | Pending |

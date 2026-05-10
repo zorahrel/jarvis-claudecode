@@ -45,7 +45,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Context Inspector | 8/8 | Code complete (UAT pending user) | 2026-05-01 |
-| 2. Orchestrator Multi-Session | 3/5 | Plans 02-01..03 done; 02-04 running concurrently; 02-05 deferred | — |
+| 2. Orchestrator Multi-Session | 4/5 | Plans 02-01..04 done; 02-05 deferred (auto-pilot, manual gate) | — |
 
 ### Phase 2: Orchestrator Multi-Session
 **Goal**: Cruscotto unificato per pilotare N sessioni Claude Code attive (router-spawned + bare CLI under tmux). Trasforma 5+ sessioni scollegate in un'orchestra controllabile da un punto: skill `/orchestrator` produce snapshot con next-step suggerito per ogni sessione; Reminders Mac come intent layer (sync iPhone/Watch/Siri); notch HUD always-on con top-3 todo + badge sessioni; tmux send-keys come canale di inject approvato dall'utente. Read-only first (Plan 02-01) + sync (02-02..03) + write con approvazione (02-04) + auto-pilot opt-in (02-05). Estende infrastructure di Phase 1 (`/api/local-sessions`), nessuna riscrittura.
@@ -66,5 +66,5 @@ Plans:
 - [x] 02-01-PLAN.md — Wave 0: Conductor read-only — fixtures + transcriptReader/refinedStatus/cwdLock/suggestionEngine + /api/sessions/:pid/{transcript,snapshot} + skill /orchestrator (HTTP-only). Requirements: ORC-01..05 ✓ 2026-05-10
 - [x] 02-02-PLAN.md — Wave 1: Reminders bridge — remindctl wrapper + 3s polling + metadata schema (pid/repo/phase) + /api/todos GET/POST/PATCH/complete + TodosTab.tsx + auth banner. Requirements: ORC-06..10. Depends on 02-01.
 - [x] 02-03-PLAN.md — Wave 1: Notch HUD Swift views — SessionsSidebarView + TodoStripView + NotchEventBus reconnect + bridge in connectors/notch.ts. Requirements: ORC-11..14. Depends on 02-02. ✓ 2026-05-10
-- [ ] 02-04-PLAN.md — Wave 2: tmux inject control — pid→pane resolver (cached) + /api/sessions/:pid/{tmux,inject} + audit JSONL + Approve/Skip/Custom dashboard + force-confirm modal. Requirements: ORC-15..19. Depends on 02-01 + 02-02.
+- [x] 02-04-PLAN.md — Wave 2: tmux inject control — pid→pane resolver (cached W4) + /api/sessions/:pid/{tmux,inject} + audit JSONL with rotation + Approve/Skip/Custom dashboard + force-confirm modal (case-INSENSITIVE per W5). Requirements: ORC-15..19 ✓ 2026-05-10
 - [ ] 02-05-PLAN.md — Wave 5 [DEFERRED, autonomous=false]: Auto-pilot opt-in — UserPromptSubmit hook + budget guard + confidence:high gate + audit. Requirements: ORC-20..22. Depends on 02-01..04. Manual /gsd:execute-plan 02-05 only after ≥1 week stability.
