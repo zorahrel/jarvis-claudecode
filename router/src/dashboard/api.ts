@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getProcesses, killProcessByKey, killSessionsByAgent, resolveCliPath } from "../services/claude";
+import { getProcesses, killProcessByKey, killSessionsByAgent, killSessionsUsingMcp, resolveCliPath } from "../services/claude";
 import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
@@ -699,9 +699,14 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
 
         try { child.kill("SIGTERM"); } catch { /* ignore */ }
         await refreshMcpStatus();
+        // Live sessions hold a stale MCP transport snapshot — kill any
+        // session that may use this server so the next message respawns
+        // and picks up the fresh auth.
+        const killedAuthStdio = tokenAppeared ? killSessionsUsingMcp(name) : 0;
         audit({
           event: "mcp.authenticate", actor: "dashboard", target: name,
           result: tokenAppeared ? "ok" : "error",
+          killedSessions: killedAuthStdio,
           details: { transport: "stdio+mcp-remote", durationMs: Date.now() - start },
         });
         return json(req, res, {
@@ -710,6 +715,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
           reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
           durationMs: Date.now() - start,
           name: name,
+          killedSessions: killedAuthStdio,
         });
       }
 
@@ -857,9 +863,15 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         q.close?.();
         await drain.catch(() => undefined);
 
+        // Kill live sessions that may use this MCP so they respawn fresh
+        // with the just-authed transport (otherwise users see "MCP not
+        // available" until inactivity timeout — exactly the bug that
+        // surfaced after authenticating Cloudflare).
+        const killedAuthHttp = authCompleted ? killSessionsUsingMcp(name) : 0;
         audit({
           event: "mcp.authenticate", actor: "dashboard", target: name,
           result: authCompleted ? "ok" : "error",
+          killedSessions: killedAuthHttp,
           details: { transport: "http", durationMs: Date.now() - start },
         });
         return json(req, res, {
@@ -871,6 +883,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
             : `OAuth did not complete within ${TIMEOUT_MS / 1000}s — user cancelled or auth did not persist`,
           durationMs: Date.now() - start,
           name,
+          killedSessions: killedAuthHttp,
         });
       }
 
@@ -899,8 +912,12 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         execFile("pkill", ["-f", needle], { timeout: 5000 }, () => resolve());
       });
       await refreshMcpStatus();
-      audit({ event: "mcp.restart", actor: "dashboard", target: name, details: { killed: needle } });
-      json(req, res, { ok: true, name: name, killed: needle });
+      // Restart killed the underlying mcp-remote processes; live SDK
+      // sessions still hold the dead transport handle. Kill them so the
+      // next message respawns with a fresh transport.
+      const killedRestart = killSessionsUsingMcp(name);
+      audit({ event: "mcp.restart", actor: "dashboard", target: name, killedSessions: killedRestart, details: { killed: needle } });
+      json(req, res, { ok: true, name: name, killed: needle, killedSessions: killedRestart });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- MCP DISCONNECT — clear stored OAuth credentials for a server ---
@@ -1021,9 +1038,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       } catch { /* best-effort */ }
 
       await refreshMcpStatus();
+      // Live sessions might still hold the now-revoked token; kill them
+      // so they don't keep making 401-bound calls until inactivity timeout.
+      const killedLogout = cleared ? killSessionsUsingMcp(name) : 0;
       audit({
         event: "mcp.disconnect", actor: "dashboard", target: name,
         result: cleared ? "ok" : "error",
+        killedSessions: killedLogout,
         reason,
         details: { durationMs: Date.now() - start },
       });
@@ -1032,6 +1053,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         reason,
         durationMs: Date.now() - start,
         name,
+        killedSessions: killedLogout,
       });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
