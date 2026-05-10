@@ -9,8 +9,9 @@
  */
 
 const PAGES = new Set([
-  "overview", "channels", "routes", "agents", "tools", "permissions", "skills",
-  "memory", "cron", "sessions", "logs", "analytics", "settings",
+  "overview", "channels", "routes", "agents", "tools", "skills",
+  "memory", "cron", "sessions", "todos", "orchestrator",
+  "logs", "analytics", "settings",
 ])
 
 export function currentPage(): string {

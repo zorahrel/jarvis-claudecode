@@ -472,18 +472,7 @@ export function Agents({ onToast }: { onToast: (msg: string, type: 'success' | '
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(isOn ? { removeTool: toolId } : { addTool: toolId }),
       })
-      if (!res.ok) {
-        let detail = ''
-        try {
-          const errBody = await res.json()
-          if (errBody?.error === 'tier_violation') {
-            detail = `${errBody.message ?? `Tier "${errBody.tier}" denies this tool.`}`
-          } else if (errBody?.error || errBody?.message) {
-            detail = String(errBody.error ?? errBody.message)
-          }
-        } catch { /* not JSON */ }
-        throw new Error(detail || `${res.status}`)
-      }
+      if (!res.ok) throw new Error(`${res.status}`)
       const data = await res.json()
       setAgentTools(data.tools || [])
       refresh()

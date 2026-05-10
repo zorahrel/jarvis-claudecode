@@ -95,7 +95,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
   useEffect(() => { loadMcpStatus() }, [loadMcpStatus])
 
   // Per-server action state — disable button + show spinner while in flight.
-  const [mcpActionInflight, setMcpActionInflight] = useState<Record<string, "auth" | "restart" | "logout" | null>>({})
+  const [mcpActionInflight, setMcpActionInflight] = useState<Record<string, "auth" | "restart" | null>>({})
 
   const authenticateMcp = useCallback(async (name: string) => {
     setMcpActionInflight(prev => ({ ...prev, [name]: "auth" }))
@@ -125,24 +125,6 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
       onToast?.(r.ok ? `${name}: restarted (killed ${r.killed})` : `${name}: ${r.error ?? "restart failed"}`, r.ok ? "success" : "error")
     } catch (e: any) {
       onToast?.(`${name}: ${e?.message ?? "restart failed"}`, "error")
-    } finally {
-      setMcpActionInflight(prev => ({ ...prev, [name]: null }))
-      loadMcpStatus()
-    }
-  }, [loadMcpStatus, onToast])
-
-  const disconnectMcp = useCallback(async (name: string) => {
-    if (!confirm(`Disconnect "${name}"?\n\nThis clears the stored OAuth credentials. Click Authenticate to reconnect.`)) return
-    setMcpActionInflight(prev => ({ ...prev, [name]: "logout" }))
-    try {
-      const r = await apiFetch<{ ok: boolean; reason?: string }>("/api/mcp/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      })
-      onToast?.(r.ok ? `${name}: disconnected` : `${name}: ${r.reason ?? "disconnect failed"}`, r.ok ? "success" : "error")
-    } catch (e: any) {
-      onToast?.(`${name}: ${e?.message ?? "disconnect failed"}`, "error")
     } finally {
       setMcpActionInflight(prev => ({ ...prev, [name]: null }))
       loadMcpStatus()
@@ -336,7 +318,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                   {cat === 'MCP' && (() => {
                     const serverName = t.id.replace(/^mcp:/, '')
                     const st = mcpStatus[serverName]
-                    if (!st) return null
+                    if (!st || st.status === 'connected') return null
                     const inflight = mcpActionInflight[serverName]
                     return (
                       <div style={{ display: 'flex', gap: 6, marginBottom: 6 }} onClick={e => e.stopPropagation()}>
@@ -350,27 +332,14 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                             {inflight === 'auth' ? 'Authenticating…' : 'Authenticate'}
                           </Button>
                         )}
-                        {st.status === 'connected' && (
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            disabled={!!inflight}
-                            onClick={() => disconnectMcp(serverName)}
-                            title="Clear stored OAuth credentials"
-                          >
-                            {inflight === 'logout' ? 'Disconnecting…' : 'Disconnect'}
-                          </Button>
-                        )}
-                        {st.status !== 'connected' && (
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            disabled={!!inflight}
-                            onClick={() => restartMcp(serverName)}
-                          >
-                            {inflight === 'restart' ? 'Restarting…' : 'Restart'}
-                          </Button>
-                        )}
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          disabled={!!inflight}
+                          onClick={() => restartMcp(serverName)}
+                        >
+                          {inflight === 'restart' ? 'Restarting…' : 'Restart'}
+                        </Button>
                       </div>
                     )
                   })()}

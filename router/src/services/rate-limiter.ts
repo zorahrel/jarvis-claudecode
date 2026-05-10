@@ -48,37 +48,6 @@ export function checkIncomingRate(channel: string, from: string): boolean {
   return allowed;
 }
 
-/** Per-agent buckets (separate from global so a noisy agent doesn't drain the global window). */
-const agentWindows = new Map<string, number[]>();
-
-/**
- * Per-agent rate-limit check. Override values come from
- * `agent.yaml > rateLimit`. Falls back to the global `rateLimits.incoming`
- * config when no per-agent override is set. No-op when neither is set.
- *
- * Bucket key is `(channel, from, agent)` so the budget is per-conversation
- * for that agent — a chatty user in one chat doesn't starve the agent's
- * other conversations.
- */
-export function checkAgentRate(
-  channel: string,
-  from: string,
-  agentName: string,
-  override?: { maxMessages?: number; windowSeconds?: number },
-): boolean {
-  const config = getConfig();
-  const fallback = config.rateLimits?.incoming;
-  const max = override?.maxMessages ?? fallback?.maxMessages;
-  const win = override?.windowSeconds ?? fallback?.windowSeconds;
-  if (!max || !win) return true;
-  const key = `${channel}:${from}:${agentName}`;
-  const allowed = slidingWindowCheck(agentWindows, key, max, win * 1000);
-  if (!allowed) {
-    log.warn({ key, max, windowSeconds: win, source: override ? "per-agent" : "global" }, "Agent rate limit hit");
-  }
-  return allowed;
-}
-
 /** Check outgoing rate limit. Returns true if allowed. */
 export function checkOutgoingRate(channel: string): boolean {
   const config = getConfig();

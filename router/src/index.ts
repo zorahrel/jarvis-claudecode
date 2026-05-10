@@ -247,13 +247,12 @@ async function main() {
   // Best-effort — failure just means the dashboard falls back to heuristic status.
   ensureHooksInstalled().catch((err) => log.warn({ err }, "hook install failed"));
 
-  // Sweep orphan mcp-remote state left over from previous runs (orphan
-  // locks, aborted OAuth verifiers, duplicate client_info). Each of these
-  // can pop unsolicited OAuth dialogs on next spawn even when a valid
-  // token exists. Cheap, idempotent, completely safe.
+  // Sweep orphan mcp-remote lock files left over from previous runs. These
+  // confuse fresh mcp-remote instances into popping unsolicited OAuth
+  // dialogs even when tokens are valid. Cheap, idempotent, completely safe.
   try {
     const r = cleanupOrphanMcpLocks();
-    if (r.removed > 0) log.info({ ...r }, "Cleaned orphan mcp-remote state");
+    if (r.removed > 0) log.info({ ...r }, "Cleaned orphan mcp-remote locks");
   } catch (err) { log.warn({ err: String(err) }, "mcp-auth cleanup failed"); }
 
   // Cache MCP server health (claude mcp list) so buildSdkOptions can skip
