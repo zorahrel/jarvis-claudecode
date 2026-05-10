@@ -5,7 +5,52 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Added
+- **Per-agent trust tier (`tier`) + whitelist enforcement.** New
+  `AgentConfig.tier` field in `agent.yaml` (`owner|team|family|personal|client`,
+  default `personal`). The dashboard PATCH endpoints (`/api/agents/:name/config`
+  and `/api/agents/:name/tools`) reject any tool that isn't on the tier's
+  allowlist (`TIER_TOOL_WHITELIST` in `types/config.ts`). `fullAccess: true`
+  bypasses the check (owner-equivalent). Stops privilege escalation like
+  giving a `client` agent `fileAccess:full`.
+- **Per-agent rate limits (`rateLimit`).** Optional `rateLimit.maxMessages` /
+  `rateLimit.windowSeconds` in `agent.yaml`. Falls back to global
+  `rateLimits.incoming` when absent. Enforced via new
+  `rate-limiter.ts > checkAgentRate()` after route resolution; bucket key is
+  `(channel, from, agent)` so a chatty user in one chat doesn't starve the
+  agent's other conversations.
+- **ChannelScope editor endpoint.** `PATCH /api/agents/:name/channel-scope`
+  accepts `{discord, whatsapp, telegram}` blocks (allowedJids/Chats/Channels +
+  allowCrossChatWrite). Validates shape and merges into existing.
+- **Permission matrix endpoint.** `GET /api/permission-matrix` returns
+  `{agents, allTools, tiers, tierWhitelist}` for a single-shot dashboard
+  overview of who can access what. Each tool carries `allowedFor: Tier[]`.
+- **Append-only audit log.** New `services/audit-log.ts` writes one
+  JSONL line per permission-mutating action to
+  `~/.claude/jarvis/router/data/audit.jsonl`. Wired into the
+  agent-config / tools / channel-scope / file / mcp-auth / mcp-restart
+  endpoints. Records actor, agent, diff (added/removed), killedSessions,
+  and tier_violation denials. Best-effort: a failed append never breaks
+  the originating request.
+- **`GET /api/audit`** returns the last N entries (default 100, max 1000)
+  with optional `agent=`/`event=` filters.
+- **Dashboard `Permissions` page.** New tab in the sidebar with three
+  views: Matrix (agents × tools grid with tier-aware coloring), Tier
+  rules (regex allowlist per tier), Audit log (last 200 entries with
+  diff/result coloring).
+
 ### Changed
+- **Live-config kill of running sessions.** `services/claude.ts` exports
+  new `killSessionsByAgent(agentName)`. The dashboard PATCH endpoints
+  (`/api/agents/:name/config`, `/api/agents/:name/tools`,
+  `/api/agents/:name/channel-scope`, `/api/agents/file`) now call it
+  after `reloadConfig()`, so the next inbound message for that agent
+  spawns a fresh session reading the freshly-written agent.yaml. Without
+  this the user had to wait up to 15 min (inactivity timeout) to see
+  config changes take effect.
+- **`GET /api/agents` and `getAgentsData()` now expose `tier`,
+  `rateLimit`, and `channelScope`** so the dashboard can render
+  tier-aware UI without an extra round-trip.
 - **Dashboard `/api/mcp/authenticate` now supports `type: http` MCPs.** Previously
   rejected anything that wasn't `npx mcp-remote URL` with "not an mcp-remote-based
   server". The endpoint now branches on transport (detected from

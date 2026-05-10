@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { getProcesses, killProcessByKey, resolveCliPath } from "../services/claude";
+import { getProcesses, killProcessByKey, killSessionsByAgent, resolveCliPath } from "../services/claude";
 import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
@@ -22,6 +22,9 @@ import { queryCosts, aggregateCosts, getTotalCost } from "../services/cost-track
 import { logger } from "../services/logger";
 import { clearLogEntries } from "./state";
 import { corsOrigin, json, parseBody, requireConfirm, validateAgentName, safeReadFile } from "./helpers";
+import { TIER_TOOL_WHITELIST, isToolAllowedForTier, resolveAgentTier } from "../types/config";
+import type { User } from "../types/config";
+import { audit, arrayDiff, AUDIT_LOG_PATH } from "../services/audit-log";
 import { getLogEntries, getCliSessions, getCliSessionsMap, invalidateHtmlCache, persistCliSessionsNow } from "./state";
 import { getRoutesData, getAgentsData, getStatsData, getResponseTimesData, getProcessesWithContext, walkMemoryDir } from "./data";
 import { getAllServices, generatePlist } from "../services/services";
@@ -696,6 +699,11 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
 
         try { child.kill("SIGTERM"); } catch { /* ignore */ }
         await refreshMcpStatus();
+        audit({
+          event: "mcp.authenticate", actor: "dashboard", target: name,
+          result: tokenAppeared ? "ok" : "error",
+          details: { transport: "stdio+mcp-remote", durationMs: Date.now() - start },
+        });
         return json(req, res, {
           ok: tokenAppeared,
           transport: "stdio+mcp-remote",
@@ -849,6 +857,11 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         q.close?.();
         await drain.catch(() => undefined);
 
+        audit({
+          event: "mcp.authenticate", actor: "dashboard", target: name,
+          result: authCompleted ? "ok" : "error",
+          details: { transport: "http", durationMs: Date.now() - start },
+        });
         return json(req, res, {
           ok: authCompleted,
           transport: "http",
@@ -886,7 +899,133 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         execFile("pkill", ["-f", needle], { timeout: 5000 }, () => resolve());
       });
       await refreshMcpStatus();
+      audit({ event: "mcp.restart", actor: "dashboard", target: name, details: { killed: needle } });
       json(req, res, { ok: true, name: name, killed: needle });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AGENT CHANNEL SCOPE — edit allowedJids/Chats/Channels + allowCrossChatWrite ---
+  // Body: { discord?: ChannelScope, whatsapp?: ChannelScope, telegram?: ChannelScope }
+  // Each ChannelScope merges into the existing one — pass `null` to clear.
+  } else if (path.match(/^\/api\/agents\/[^/]+\/channel-scope$/) && req.method === "PATCH") {
+    const agentName = decodeURIComponent(path.split("/")[3]);
+    if (!validateAgentName(agentName)) { json(req, res, { error: "invalid agent name" }, 400); return; }
+    try {
+      const body = await parseBody(req) as Record<string, unknown>;
+      const yamlPath = join(HOME, ".claude/jarvis/agents", agentName, "agent.yaml");
+      if (!existsSync(yamlPath)) { json(req, res, { error: "agent.yaml not found" }, 404); return; }
+      const existing = parseYaml(readFileSync(yamlPath, "utf-8")) ?? {};
+
+      const channels = ["discord", "whatsapp", "telegram"] as const;
+      const before: Record<string, unknown> = {};
+      for (const ch of channels) {
+        before[ch] = existing[ch] ?? null;
+        const incoming = body[ch];
+        if (incoming === undefined) continue;
+        if (incoming === null) { delete existing[ch]; continue; }
+        if (typeof incoming !== "object") { json(req, res, { error: `${ch}: must be object or null` }, 400); return; }
+        // Validate shape (string arrays / boolean only) — defensive against
+        // typo or injection from a user-edited dashboard.
+        const sc = incoming as Record<string, unknown>;
+        const arrayFields = ["allowedGuilds", "allowedChannels", "denyChannels", "allowedJids", "denyJids", "allowedChats", "denyChats"];
+        for (const f of arrayFields) {
+          if (sc[f] === undefined) continue;
+          if (!Array.isArray(sc[f]) || (sc[f] as unknown[]).some(v => typeof v !== "string")) {
+            json(req, res, { error: `${ch}.${f}: must be array of strings` }, 400); return;
+          }
+        }
+        if (sc.allowCrossChatWrite !== undefined && typeof sc.allowCrossChatWrite !== "boolean") {
+          json(req, res, { error: `${ch}.allowCrossChatWrite: must be boolean` }, 400); return;
+        }
+        existing[ch] = { ...(existing[ch] ?? {}), ...sc };
+        // Strip empty arrays / undefined keys for tidiness.
+        for (const k of Object.keys(existing[ch])) {
+          const v = existing[ch][k];
+          if (v === undefined || (Array.isArray(v) && v.length === 0)) delete existing[ch][k];
+        }
+        if (Object.keys(existing[ch]).length === 0) delete existing[ch];
+      }
+
+      writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
+      await reloadConfig();
+      invalidateHtmlCache();
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.channel-scope.patched", actor: "dashboard", agent: agentName,
+        diff: { before, after: { discord: existing.discord ?? null, whatsapp: existing.whatsapp ?? null, telegram: existing.telegram ?? null } },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, killedSessions: killedAgent }, "[dashboard] Patched channel scope");
+      json(req, res, {
+        ok: true,
+        scope: { discord: existing.discord ?? null, whatsapp: existing.whatsapp ?? null, telegram: existing.telegram ?? null },
+        killedSessions: killedAgent,
+      });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- AUDIT LOG — last N entries (default 100, max 1000) ---
+  } else if (path === "/api/audit" && req.method === "GET") {
+    try {
+      const url = new URL(req.url || "/", "http://x");
+      const limit = Math.max(1, Math.min(1000, parseInt(url.searchParams.get("limit") || "100", 10) || 100));
+      const agentFilter = url.searchParams.get("agent") || "";
+      const eventFilter = url.searchParams.get("event") || "";
+      let entries: Array<Record<string, unknown>> = [];
+      if (existsSync(AUDIT_LOG_PATH)) {
+        // Read last ~256KB — way more than `limit` even at the longest line.
+        const buf = readFileSync(AUDIT_LOG_PATH, "utf-8");
+        const tail = buf.length > 262144 ? buf.slice(buf.length - 262144) : buf;
+        for (const line of tail.split("\n")) {
+          if (!line.trim()) continue;
+          try { entries.push(JSON.parse(line)); } catch { /* skip malformed */ }
+        }
+        if (agentFilter) entries = entries.filter(e => e.agent === agentFilter);
+        if (eventFilter) entries = entries.filter(e => e.event === eventFilter);
+        entries = entries.slice(-limit).reverse();
+      }
+      json(req, res, { entries, path: AUDIT_LOG_PATH });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- PERMISSION MATRIX — overview of all agents × all tools ---
+  // Returns a single payload the dashboard can render as a table:
+  //   { agents: [{name, tier, fullAccess, tools, scope, killedRouteCount}],
+  //     allTools: [{id, type, label, category, allowedFor: ["owner","team",...]}],
+  //     tierWhitelist: { owner: [...], team: [...], ... } }
+  } else if (path === "/api/permission-matrix" && req.method === "GET") {
+    try {
+      const agentRegistry = getAgentRegistry();
+      const toolRegistry = getToolRegistry();
+      const tools = Object.values(toolRegistry).map((t: any) => {
+        const allowedFor: string[] = [];
+        for (const tier of Object.keys(TIER_TOOL_WHITELIST) as Array<keyof typeof TIER_TOOL_WHITELIST>) {
+          if (isToolAllowedForTier(t.id, tier)) allowedFor.push(tier);
+        }
+        return { id: t.id, type: t.type, label: t.label, icon: t.icon ?? null, allowedFor };
+      });
+      const agents = Object.values(agentRegistry).map((a: any) => {
+        const tier = resolveAgentTier(a);
+        return {
+          name: a.name,
+          tier,
+          fullAccess: a.fullAccess === true,
+          tools: Array.isArray(a.tools) ? a.tools : [],
+          inheritUserScope: a.inheritUserScope !== false,
+          model: a.model ?? null,
+          rateLimit: a.rateLimit ?? null,
+          channelScope: {
+            discord: a.discord ?? null,
+            whatsapp: a.whatsapp ?? null,
+            telegram: a.telegram ?? null,
+          },
+        };
+      });
+      json(req, res, {
+        agents,
+        allTools: tools,
+        tiers: Object.keys(TIER_TOOL_WHITELIST),
+        tierWhitelist: Object.fromEntries(
+          Object.entries(TIER_TOOL_WHITELIST).map(([tier, patterns]) => [tier, patterns.map(p => p.source)]),
+        ),
+      });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- ROUTES GET --- (thin matchers referencing agents by name)
@@ -1095,6 +1234,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         effort: a.effort ?? null,
         fullAccess: a.fullAccess === true,
         inheritUserScope: a.inheritUserScope !== false,
+        tier: resolveAgentTier(a),
+        rateLimit: a.rateLimit ?? null,
+        channelScope: {
+          discord: a.discord ?? null,
+          whatsapp: a.whatsapp ?? null,
+          telegram: a.telegram ?? null,
+        },
         usedBy: usedBy[a.name!] ?? [],
       }));
       json(req, res, agents);
@@ -1130,7 +1276,36 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         }
       }
       if (body.tools !== undefined && existing.fullAccess !== true) {
-        existing.tools = Array.isArray(body.tools) ? body.tools : [];
+        const candidateTools = Array.isArray(body.tools) ? body.tools : [];
+        // Tier-based whitelist enforcement (same rule as PATCH /tools).
+        const tier = resolveAgentTier(existing as { tier?: User["type"]; fullAccess?: boolean });
+        const denied = candidateTools.filter((t: string) => typeof t === "string" && !isToolAllowedForTier(t, tier));
+        if (denied.length > 0) {
+          json(req, res, {
+            error: "tier_violation",
+            tier,
+            deniedTools: denied,
+            message: `Tier "${tier}" does not permit: ${denied.join(", ")}.`,
+          }, 403);
+          return;
+        }
+        existing.tools = candidateTools;
+      }
+      if (body.tier !== undefined) {
+        const valid: User["type"][] = ["owner", "team", "family", "personal", "client"];
+        if (body.tier === null || body.tier === "") delete existing.tier;
+        else if (valid.includes(body.tier)) existing.tier = body.tier;
+        else { json(req, res, { error: `invalid tier: ${body.tier}. Must be one of: ${valid.join(", ")}` }, 400); return; }
+      }
+      if (body.rateLimit !== undefined) {
+        if (body.rateLimit === null) delete existing.rateLimit;
+        else if (typeof body.rateLimit === "object") {
+          const rl: Record<string, number> = {};
+          if (Number.isFinite(body.rateLimit.maxMessages)) rl.maxMessages = body.rateLimit.maxMessages;
+          if (Number.isFinite(body.rateLimit.windowSeconds)) rl.windowSeconds = body.rateLimit.windowSeconds;
+          if (Object.keys(rl).length > 0) existing.rateLimit = rl;
+          else delete existing.rateLimit;
+        }
       }
       if (body.inheritUserScope !== undefined) {
         // Default is true; only persist when explicitly false.
@@ -1143,8 +1318,23 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
       await reloadConfig();
       invalidateHtmlCache();
-      log.info("[dashboard] Updated agent.yaml for %s", agentName);
-      json(req, res, { ok: true });
+      // Kill live sessions of this agent so the next inbound message
+      // respawns with the freshly-written config (otherwise users see
+      // their changes "not take effect" until inactivity timeout).
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.config.updated",
+        actor: "dashboard",
+        agent: agentName,
+        details: {
+          fields: Object.keys(body).filter(k => body[k] !== undefined),
+          tier: existing.tier,
+          fullAccess: existing.fullAccess === true,
+        },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, killedSessions: killedAgent }, "[dashboard] Updated agent.yaml");
+      json(req, res, { ok: true, killedSessions: killedAgent });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- AGENT SCOPE TOGGLE (adds/removes an @import line in CLAUDE.md) ---
@@ -1227,15 +1417,47 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       if (!existsSync(yamlPath)) { json(req, res, { error: "agent.yaml not found" }, 404); return; }
       const existing = parseYaml(readFileSync(yamlPath, "utf-8")) ?? {};
       if (existing.fullAccess) { json(req, res, { error: "agent has fullAccess; tools list is ignored" }, 400); return; }
+      const beforeTools: string[] = Array.isArray(existing.tools) ? [...existing.tools] : [];
       existing.tools = Array.isArray(existing.tools) ? existing.tools : [];
+
+      // Tier-based whitelist enforcement: reject any tool that isn't
+      // permitted by this agent's trust tier. Prevents privilege
+      // escalation (e.g. assigning fileAccess:full to a client agent).
+      const tier = resolveAgentTier(existing as { tier?: User["type"]; fullAccess?: boolean });
+      const wouldAdd: string[] = [];
+      if (body.addTool) wouldAdd.push(body.addTool);
+      if (Array.isArray(body.tools)) wouldAdd.push(...body.tools);
+      const denied = wouldAdd.filter((t: string) => typeof t === "string" && !isToolAllowedForTier(t, tier));
+      if (denied.length > 0) {
+        audit({
+          event: "agent.tools.patched", actor: "dashboard", agent: agentName,
+          result: "denied", reason: "tier_violation",
+          details: { tier, attempted: wouldAdd, deniedTools: denied },
+        });
+        json(req, res, {
+          error: "tier_violation",
+          tier,
+          deniedTools: denied,
+          message: `Tier "${tier}" does not permit: ${denied.join(", ")}. Raise the agent's tier in agent.yaml to grant.`,
+        }, 403);
+        return;
+      }
+
       if (body.addTool && !existing.tools.includes(body.addTool)) existing.tools.push(body.addTool);
       if (body.removeTool) existing.tools = existing.tools.filter((t: string) => t !== body.removeTool);
       if (Array.isArray(body.tools)) existing.tools = body.tools;
       writeFileSync(yamlPath, stringifyYaml(existing, { lineWidth: 120 }), "utf-8");
       await reloadConfig();
       invalidateHtmlCache();
-      log.info("[dashboard] Patched tools for agent %s", agentName);
-      json(req, res, { ok: true, tools: existing.tools });
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.tools.patched", actor: "dashboard", agent: agentName,
+        diff: arrayDiff(beforeTools, existing.tools),
+        details: { tier, after: existing.tools },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, killedSessions: killedAgent }, "[dashboard] Patched tools");
+      json(req, res, { ok: true, tools: existing.tools, tier, killedSessions: killedAgent });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- AGENT CLAUDE.MD ---
@@ -1605,8 +1827,16 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       const abs = join(HOME, ".claude/jarvis/agents", agentName, fileName);
       writeFileSync(abs, body.content ?? "", "utf-8");
       invalidateHtmlCache();
-      log.info("[dashboard] Saved agent file %s/%s", agentName, fileName);
-      json(req, res, { ok: true });
+      // CLAUDE.md/MEMORY.md/etc are read at session spawn into the system
+      // prompt; restart live sessions so changes take effect immediately.
+      const killedAgent = killSessionsByAgent(agentName);
+      audit({
+        event: "agent.file.saved", actor: "dashboard", agent: agentName, target: fileName,
+        details: { bytes: (body.content ?? "").length },
+        killedSessions: killedAgent,
+      });
+      log.info({ agentName, fileName, killedSessions: killedAgent }, "[dashboard] Saved agent file");
+      json(req, res, { ok: true, killedSessions: killedAgent });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // -- Shared files CRUD (~/.claude/jarvis/agents/_shared/) --
