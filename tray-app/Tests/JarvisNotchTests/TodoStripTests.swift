@@ -11,6 +11,12 @@ import SwiftUI
 /// `_test_longPressOpensPicker(id:)`.
 final class TodoStripTests: XCTestCase {
     @MainActor
+    override func setUp() {
+        super.setUp()
+        NotchEventBus.shared.resetForTesting()
+    }
+
+    @MainActor
     func testRendersTopThreeOnly() {
         let todos: [TodoSummary] = [
             .init(id: "1", title: "first", pid: nil, phase: nil),

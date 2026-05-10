@@ -361,14 +361,42 @@ struct NotchDot: View {
 
 // MARK: - Expanded view (SwiftUI)
 
+/// Expanded notch composition — Plan 02-03 adds two new views around the
+/// existing chat WebView:
+///   - `TodoStripView` (top thin row): top-3 open todos from Reminders.
+///   - `SessionsSidebarView` (right peek): live Claude Code sessions with
+///     status badges.
+/// Both views subscribe to `NotchEventBus.shared` directly (`onAppear`)
+/// and unsubscribe in `onDisappear` — they do not depend on controller
+/// state so adding them is fully additive. Existing chat/TTS/abort visuals
+/// are preserved; the WebView keeps its 420×540 frame and is now inside an
+/// HStack with the sidebar.
 struct NotchExpandedView: View {
     @ObservedObject var controller: NotchController
 
+    /// Local view-model state for the orchestrator HUD. Both views populate
+    /// these via `NotchEventBus.subscribe` which replays the last-known
+    /// snapshot on subscribe + on reconnect (ORC-14).
+    @State private var sessions: [SessionStatusEntry] = []
+    @State private var todos: [TodoSummary] = []
+
     var body: some View {
-        SharedWebContainer(webView: controller.webView)
-            .frame(width: 420, height: 540)
-            .background(.clear)
-            .cornerRadius(22)
+        VStack(spacing: 4) {
+            // Top thin strip — top-3 todos from Apple Reminders.
+            TodoStripView(todos: $todos)
+                .frame(maxWidth: .infinity)
+
+            HStack(alignment: .top, spacing: 6) {
+                SharedWebContainer(webView: controller.webView)
+                    .frame(width: 420, height: 540)
+                    .background(.clear)
+                    .cornerRadius(22)
+
+                // Right peek — live sessions list with status badges.
+                SessionsSidebarView(sessions: $sessions)
+                    .frame(width: 160)
+            }
+        }
     }
 }
 

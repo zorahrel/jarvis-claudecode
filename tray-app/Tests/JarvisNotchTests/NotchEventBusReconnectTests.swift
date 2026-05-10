@@ -15,6 +15,12 @@ import XCTest
 /// `#if DEBUG` block (so production API stays clean).
 final class NotchEventBusReconnectTests: XCTestCase {
     @MainActor
+    override func setUp() {
+        super.setUp()
+        NotchEventBus.shared.resetForTesting()
+    }
+
+    @MainActor
     func testReconnectReplaysLastSnapshot() async throws {
         let payload = SessionsUpdatePayload(
             pids: [1, 2],

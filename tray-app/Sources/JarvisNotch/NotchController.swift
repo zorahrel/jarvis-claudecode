@@ -1372,6 +1372,11 @@ final class NotchController: ObservableObject {
             NotchSpeechSynthesizer.shared.speak(text, voiceId: voice)
         case .ttsStop:
             NotchSpeechSynthesizer.shared.stop()
+        case .sessionsUpdate, .todosUpdate:
+            // Plan 02-03 — orchestrator HUD events are consumed directly by
+            // SessionsSidebarView / TodoStripView via NotchEventBus.subscribe;
+            // the controller's primary handler does not react to them.
+            break
         }
     }
 
