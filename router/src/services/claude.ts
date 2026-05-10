@@ -1654,6 +1654,44 @@ export function killSessionsByAgent(agentName: string): number {
 }
 
 /**
+ * Kill every live SDK session whose agent COULD use a given MCP server.
+ * Called after a dashboard mcp.authenticate / mcp.disconnect / mcp.restart
+ * so live sessions don't keep their stale snapshot (the SDK initializes
+ * the MCP transport once at session spawn — newly authed servers are
+ * invisible to existing sessions until respawn).
+ *
+ * "Could use" means:
+ *   - the agent has `fullAccess: true` (gets every healthy MCP), OR
+ *   - the agent's `tools` array contains `mcp:<mcpName>`
+ *
+ * Returns the count of sessions killed. The next inbound message for
+ * each affected (channel, target, agent) tuple respawns fresh and
+ * picks up the new MCP state.
+ */
+export function killSessionsUsingMcp(mcpName: string): number {
+  if (!mcpName) return 0;
+  const wanted = `mcp:${mcpName}`;
+  let count = 0;
+  for (const key of Array.from(sessions.keys())) {
+    const s = sessions.get(key);
+    if (!s) continue;
+    const agent = s.agentConfig;
+    const may = agent?.fullAccess === true || (Array.isArray(agent?.tools) && agent.tools.includes(wanted));
+    if (!may) continue;
+    if (s.pendingReject) {
+      const reject = s.pendingReject;
+      s.pendingResolve = null; s.pendingOnChunk = null; s.pendingReject = null;
+      reject(new Error("MCP_CONFIG_CHANGED"));
+    }
+    killSession(s);
+    sessions.delete(key);
+    count++;
+  }
+  if (count > 0) log.info({ mcpName, killed: count }, "Killed live sessions after MCP state change");
+  return count;
+}
+
+/**
  * Interrupt every in-flight session for `${channel}:${target}` (across agent
  * suffixes). Replaces the pending caller's rejection reason with `INTERRUPTED`
  * so the handler can distinguish a user-triggered stop from a crash, then
