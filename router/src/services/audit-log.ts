@@ -38,6 +38,7 @@ export type AuditEvent =
   | "agent.created"
   | "agent.deleted"
   | "mcp.authenticate"
+  | "mcp.disconnect"
   | "mcp.restart"
   | "config.yaml.saved";
 
