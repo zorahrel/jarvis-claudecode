@@ -51,10 +51,10 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 
 #### Notch HUD (Plan 02-03)
 
-- [ ] **ORC-11**: Vista Swift "Sessions sidebar" in `tray-app/Sources/JarvisNotch/` (right peek): lista compatta delle sessioni live con badge stato colorato; click apre dashboard tab Orchestrator filtrato sulla sessione
-- [ ] **ORC-12**: Vista Swift "Todo strip" (top o bottom thin row): top-3 todo aperti dalla lista Reminders; sempre visibile in modalità expanded
-- [ ] **ORC-13**: Click su todo = mark complete (chiama `POST /api/todos/:uuid/complete`); long-press = picker per riassegnare a sessione attiva (sceglie un `pid`)
-- [ ] **ORC-14**: Notch riceve `sessions:update` (esistente) + nuovo `todos:update` via NotchConnector subscribe/emit; reconnect graceful senza perdita di stato
+- [x] **ORC-11**: Vista Swift "Sessions sidebar" in `tray-app/Sources/JarvisNotch/` (right peek): lista compatta delle sessioni live con badge stato colorato; click apre dashboard tab Orchestrator filtrato sulla sessione ✓ 02-03
+- [x] **ORC-12**: Vista Swift "Todo strip" (top o bottom thin row): top-3 todo aperti dalla lista Reminders; sempre visibile in modalità expanded ✓ 02-03
+- [x] **ORC-13**: Click su todo = mark complete (chiama `POST /api/todos/:uuid/complete`); long-press = picker per riassegnare a sessione attiva (sceglie un `pid`) ✓ 02-03
+- [x] **ORC-14**: Notch riceve `sessions:update` (esistente) + nuovo `todos:update` via NotchConnector subscribe/emit; reconnect graceful senza perdita di stato ✓ 02-03
 
 #### tmux inject control (Plan 02-04)
 
@@ -131,10 +131,10 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 | ORC-08 | Phase 2 | Complete |
 | ORC-09 | Phase 2 | Complete |
 | ORC-10 | Phase 2 | Complete |
-| ORC-11 | Phase 2 | Pending |
-| ORC-12 | Phase 2 | Pending |
-| ORC-13 | Phase 2 | Pending |
-| ORC-14 | Phase 2 | Pending |
+| ORC-11 | Phase 2 | Complete |
+| ORC-12 | Phase 2 | Complete |
+| ORC-13 | Phase 2 | Complete |
+| ORC-14 | Phase 2 | Complete |
 | ORC-15 | Phase 2 | Pending |
 | ORC-16 | Phase 2 | Pending |
 | ORC-17 | Phase 2 | Pending |

@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_plan: 02-03 (next — Notch HUD)
+current_plan: 02-04 (running concurrently — tmux inject)
 status: in_progress
-last_updated: "2026-05-10T10:59:09Z"
+last_updated: "2026-05-10T11:17:30Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 13
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # State: Jarvis Router
@@ -18,9 +18,9 @@ progress:
 
 **Active milestone:** v1
 **Active phase:** Phase 2 — Orchestrator Multi-Session (executing)
-**Current plan:** 02-03 (next — Notch HUD subscribes to todos:update + sessions:update)
+**Current plan:** 02-03 completed — Notch HUD; 02-04 running concurrently — tmux inject (Wave 1b parallel)
 **Branch:** feature/orchestrator (rebased on main dd4345d)
-**Last session:** 2026-05-10T10:59:09Z — Completed 02-02-PLAN.md (Reminders bridge)
+**Last session:** 2026-05-10T11:17:30Z — Completed 02-03-PLAN.md (Notch HUD)
 
 ## Accumulated Context
 
@@ -30,6 +30,7 @@ progress:
 - 2026-05-10: Phase 2 added — Orchestrator multi-sessione (cruscotto unificato per pilotare N sessioni Claude Code attive con todo backbone Apple Reminders e HUD notch; 5 plan in waves)
 - 2026-05-10: Phase 2 Plan 01 completed — read-side observatory: refinedStatus + suggestion + lock + 2 HTTP endpoints + /orchestrator skill. 47 tests GREEN, typecheck GREEN.
 - 2026-05-10: Phase 2 Plan 02 completed — Reminders bridge: remindctl wrapper + 3s polling + /api/todos endpoints + TodosTab dashboard with Vitest+RTL. 33 new tests GREEN, typecheck GREEN, dashboard build GREEN, no notch/events.ts pollution. ORC-06..10 closed.
+- 2026-05-10: Phase 2 Plan 03 completed — Notch HUD: SessionsSidebarView + TodoStripView + NotchEventBus multi-subscriber + reconnect-replay-last-snapshot + router orchestrator-events bridge. 10 XCTest cases GREEN, 68 prior router tests still GREEN, typecheck GREEN, swift build GREEN, tray-app/make-app.sh GREEN, notch/events.ts UNCHANGED. ORC-11..14 closed.
 
 ### Decisions Log
 
@@ -46,6 +47,11 @@ progress:
 - 2026-05-10 (Plan 02-02): Vitest+RTL+jsdom installed in dashboard package as one-time infrastructure; future React component specs land for free.
 - 2026-05-10 (Plan 02-02): `notch/orchestrator-events.ts` separate from `notch/events.ts` — RESEARCH.md anti-pattern explicitly avoided. Sessions/todos events do NOT pollute the WKWebView wire protocol.
 - 2026-05-10 (Plan 02-02): PATCH /api/todos/:uuid landed here (B2 fix) instead of Plan 02-03 — keeps the four todo handlers cohesive in one module.
+- 2026-05-10 (Plan 02-03): Bridge boots from `server.ts`, not `api.ts`. The parallel-execution constraint forbade touching `api.ts` while Plan 02-04's agent owned the snapshot/inject regions. `server.ts` already owns `startReminderPolling` lifecycle — natural co-location for `startOrchestratorBridge`. Plan explicitly permitted this with "or wherever the dashboard server is bootstrapped".
+- 2026-05-10 (Plan 02-03): NotchEventBus gains a multi-subscriber `subscribe(_:)` API alongside the existing `start(_:)` API. Backwards-compatible — existing controller handler keeps working unchanged.
+- 2026-05-10 (Plan 02-03): Last-known-snapshot cache lives on the bus, not the views. Replays on subscribe + on reconnect (`replayCachedSnapshots` from `scheduleReconnect`). Single source of truth — no per-view caching, no race between bus and view-model. Solves ORC-14 reconnect-state preservation.
+- 2026-05-10 (Plan 02-03): Test affordances behind `#if DEBUG` extensions on the bus + the views (`publishForTesting`, `simulateDisconnectForTesting`, `lastSessionsForTesting`, `resetForTesting`, `_test_complete(id:session:)`, `_test_longPressOpensPicker(id:)`, `_test_installSubscription`). Production API stays clean; XCTest drives the same code paths the production lifecycle modifiers register.
+- 2026-05-10 (Plan 02-03): NotchConnector forwards orchestrator events via the EXISTING `emitNotch({type, data})` transport. No new endpoint, no new SSE channel. The Swift `NotchEventBus.parse(line:)` updates recognize the two new types and route them to orchestrator subscribers. RESEARCH.md anti-pattern preserved end-to-end — `notch/events.ts` UNCHANGED.
 
 ### Open Stashes
 
@@ -57,3 +63,4 @@ progress:
 | ----- | -------- | ----- | ----- | ----------- | ------------------------ |
 | 02-01 | 24 min   | 4/4   | 21    | 26 (47 GREEN total) | 2026-05-10T10:29:24Z |
 | 02-02 | 23 min   | 4/4   | 30    | 33 (62 GREEN total)  | 2026-05-10T10:59:09Z |
+| 02-03 | 10 min   | 3/3   | 13    | 10 XCTest (Swift) + 0 router (router specs unchanged, all 68 still GREEN) | 2026-05-10T11:17:30Z |
