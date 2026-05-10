@@ -38,12 +38,18 @@ function makeExecStub(behaviors: Array<(call: ExecCall) => { stdout: string; std
   return { fn, calls };
 }
 
-test("listTodos: returns parsed array from sample-show-active.json fixture", async () => {
+test("listTodos: returns parsed array from sample-show-active.json fixture (live remindctl 0.1.1 shape)", async () => {
   const fixture = await readFile(join(FIXTURES, "sample-show-active.json"), "utf8");
   const stub = makeExecStub([() => ({ stdout: fixture })]);
   const todos = await listTodos("Jarvis/ActiveTasks", "remindctl", stub.fn);
   assert.equal(todos.length, 3);
   assert.equal(todos[0].title, "Plan 02-01 — refinedStatus");
+  // Normalizer: live remindctl emits `listName` + `isCompleted` + string priority;
+  // we must surface them as `list` + `completed` + numeric priority so the
+  // documented ReminderTodo contract holds.
+  assert.equal(todos[0].list, "Jarvis/ActiveTasks");
+  assert.equal(todos[0].completed, false);
+  assert.equal(todos[0].priority, 0); // "none" → 0
   // Metadata parsed alongside raw notes
   assert.equal(todos[0].metadata.pid, 12345);
   assert.equal(todos[0].metadata.repo, "jarvis");
@@ -55,6 +61,21 @@ test("listTodos: returns parsed array from sample-show-active.json fixture", asy
   assert.deepEqual(todos[2].metadata, {});
   // Verify the call args
   assert.deepEqual(stub.calls[0].args, ["show", "all", "--list", "Jarvis/ActiveTasks", "--json"]);
+});
+
+test("listTodos: normalizer maps priority strings (none/low/medium/high) to 0/1/5/9", async () => {
+  const raw = JSON.stringify([
+    { id: "1", title: "n", listName: "L", notes: null, due: null, priority: "none", isCompleted: false },
+    { id: "2", title: "l", listName: "L", notes: null, due: null, priority: "low", isCompleted: false },
+    { id: "3", title: "m", listName: "L", notes: null, due: null, priority: "medium", isCompleted: false },
+    { id: "4", title: "h", listName: "L", notes: null, due: null, priority: "high", isCompleted: false },
+  ]);
+  const stub = makeExecStub([() => ({ stdout: raw })]);
+  const todos = await listTodos("L", "remindctl", stub.fn);
+  assert.equal(todos[0].priority, 0);
+  assert.equal(todos[1].priority, 1);
+  assert.equal(todos[2].priority, 5);
+  assert.equal(todos[3].priority, 9);
 });
 
 test("addTodo: builds correct execFile args including metadata appended to notes", async () => {

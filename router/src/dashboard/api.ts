@@ -42,6 +42,24 @@ import {
   type SpawnConfig,
 } from "../services/contextInspector/index.js";
 import { buildSnapshot, buildTranscript } from "../services/orchestrator/index.js";
+import {
+  listTodos as listRemindersTodos,
+  addTodo as addReminderTodo,
+  completeTodo as completeReminderTodo,
+  probeAuth as probeReminderAuth,
+} from "../services/reminders/index.js";
+import {
+  handleListTodos,
+  handleAddTodo,
+  handleCompleteTodo,
+  handlePatchTodo,
+  type TodosDeps,
+} from "./api.todos.js";
+import { execFile as remindctlExecFile } from "child_process";
+import { promisify as remindctlPromisify } from "util";
+
+/** Promisified execFile used ONLY for the remindctl edit invocation in PATCH /api/todos/:uuid. */
+const remindctlExecFileAsync = remindctlPromisify(remindctlExecFile);
 import { getSessionMetadata } from "../services/claude";
 import { promises as fsPromises } from "fs";
 import { homedir as getHomedir } from "os";
@@ -84,6 +102,29 @@ export const SCOPE_HELP: Record<string, string> = {
   business: "Default scope for conversations — work / clients / routing",
   global: "General purpose scope — cross-cutting notes",
 };
+
+/**
+ * Build the dependency bundle for the /api/todos handlers (api.todos.ts).
+ *
+ * Production: thin wrapper over the reminders service primitives + a
+ * `editNotes` adapter that shells out to `remindctl edit <uuid> --notes …`
+ * via execFile (arg-array — no shell, no injection).
+ *
+ * Tests pass their own `TodosDeps` so this function is never reached
+ * during `npx tsx --test src/dashboard/api.todos.spec.ts`.
+ */
+function buildTodosDeps(): TodosDeps {
+  return {
+    listTodos: (list, cli) => listRemindersTodos(list, cli),
+    addTodo: (input, list, cli) => addReminderTodo(input, list, cli),
+    completeTodo: (id, cli) => completeReminderTodo(id, cli),
+    probeAuth: (cli) => probeReminderAuth(cli),
+    editNotes: async (uuid, notes) => {
+      // execFile arg-array → no shell, no injection (CLAUDE.md convention).
+      await remindctlExecFileAsync("remindctl", ["edit", uuid, "--notes", notes, "--json"]);
+    },
+  };
+}
 
 export async function handleApi(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
   // Strip query string so endpoint matches with `path === "..."` work correctly
@@ -2280,6 +2321,37 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       log.warn({ err, pid }, "[orchestrator] transcript discovery failed");
       json(req, res, { error: "transcript_failed", message: (err as Error)?.message ?? "unknown" }, 500);
     }
+
+  } else if (req.method === "GET" && path === "/api/todos") {
+    // GET /api/todos — Phase 2 Plan 02-02 (ORC-09).
+    // Returns max 100 OPEN todos sorted by due-date asc (null due last).
+    // On auth-denied / list-missing returns 200 with a banner-friendly
+    // payload so the dashboard never sees a 500 from this endpoint.
+    const out = await handleListTodos(buildTodosDeps());
+    json(req, res, out.body, out.status);
+
+  } else if (req.method === "POST" && path === "/api/todos") {
+    // POST /api/todos — body: {title, notes?, due?, metadata?}.
+    let body: { title?: unknown; notes?: unknown; due?: unknown; metadata?: unknown };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const out = await handleAddTodo(buildTodosDeps(), body);
+    json(req, res, out.body, out.status);
+
+  } else if (req.method === "POST" && /^\/api\/todos\/[^/]+\/complete$/.test(path)) {
+    // POST /api/todos/:uuid/complete — mark a reminder completed.
+    const uuid = decodeURIComponent(path.split("/")[3] ?? "");
+    const out = await handleCompleteTodo(buildTodosDeps(), uuid);
+    json(req, res, out.body, out.status);
+
+  } else if (req.method === "PATCH" && /^\/api\/todos\/[^/]+$/.test(path)) {
+    // PATCH /api/todos/:uuid — body: {metadata: {pid, repo?, phase?}}.
+    // Used by the notch long-press reassign flow (ORC-13). Moved here
+    // from Plan 02-03 (B2 fix) so the four todo handlers stay together.
+    const uuid = decodeURIComponent(path.split("/")[3] ?? "");
+    let body: { metadata?: unknown };
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    const out = await handlePatchTodo(buildTodosDeps(), uuid, body);
+    json(req, res, out.body, out.status);
 
   } else if (req.method === "GET" && /^\/api\/sessions\/[^/]+\/breakdown$/.test(path)) {
     // GET /api/sessions/:sessionId/breakdown — drill-down 8-category view (CTX-14).

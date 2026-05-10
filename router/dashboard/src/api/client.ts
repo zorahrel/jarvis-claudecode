@@ -491,6 +491,40 @@ export interface EmailAccount {
   account: string
 }
 
+// ── Reminders / Todos (Phase 2 Plan 02-02 — ORC-09/ORC-10) ────────────────
+// Mirrors the server-side ReminderTodo type. Re-declared here because
+// the dashboard is a separate package and does not import from
+// ../../router/src/. Keep these in sync with services/reminders/types.ts.
+
+export interface TodoMetadataDTO {
+  pid?: number
+  repo?: string
+  phase?: 'plan' | 'exec' | 'review'
+}
+
+export interface ReminderTodoDTO {
+  id: string
+  title: string
+  list: string
+  notes: string | null
+  due: string | null
+  priority: number
+  completed: boolean
+  metadata: TodoMetadataDTO
+}
+
+export interface TodosResponse {
+  todos: ReminderTodoDTO[]
+  unauthorized: boolean
+}
+
+export interface AddTodoInput {
+  title: string
+  notes?: string
+  due?: string
+  metadata?: { pid: number; repo: string; phase: 'plan' | 'exec' | 'review' }
+}
+
 // API client
 
 const BASE = ''
@@ -779,4 +813,24 @@ export const api = {
     request<SessionBreakdown>(`/api/sessions/${encodeURIComponent(sessionId)}/breakdown`),
   sessionsCruft: () => request<CruftResponse>('/api/sessions/cruft'),
   agentsBaseline: () => request<AgentBaselineResponse>('/api/agents/baseline'),
+
+  // Reminders / Todos (Phase 2 Plan 02-02 — ORC-09/ORC-10)
+  // GET /api/todos returns either {todos, unauthorized:false} (auth ok) or
+  // {todos:[], unauthorized:true} (auth missing — dashboard renders banner).
+  // Never crashes the router.
+  todos: () => request<TodosResponse>('/api/todos'),
+  addTodo: (input: AddTodoInput) =>
+    request<ReminderTodoDTO>('/api/todos', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  completeTodo: (uuid: string) =>
+    request<{ ok: boolean }>(`/api/todos/${encodeURIComponent(uuid)}/complete`, {
+      method: 'POST',
+    }),
+  patchTodo: (uuid: string, metadata: { pid: number; repo?: string; phase?: 'plan' | 'exec' | 'review' }) =>
+    request<{ ok: boolean }>(`/api/todos/${encodeURIComponent(uuid)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ metadata }),
+    }),
 }

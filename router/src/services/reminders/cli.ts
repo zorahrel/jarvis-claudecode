@@ -29,6 +29,55 @@ import { homedir } from "os";
 import type { ReminderTodo, RemindersCli, CliProbe, TodoMetadata } from "./types.js";
 import { parseTodoMetadata, formatTodoMetadata } from "./metadata.js";
 
+/**
+ * Live remindctl 0.1.1 JSON shape — captured from `remindctl show all
+ * --list "..." --json` on macOS 25.2.0. Differs from the documented
+ * ReminderTodo:
+ *   - `isCompleted` (bool) instead of `completed`
+ *   - `listName`    (str)  instead of `list`
+ *   - `priority`    is "none"|"low"|"medium"|"high" instead of number
+ *   - extra fields: `listID`, `completionDate`
+ *
+ * `normalizeRemindCtl` adapts the live shape to our internal contract so
+ * downstream consumers (dashboard, polling diff, snapshot enricher) get
+ * one stable `ReminderTodo` regardless of CLI version drift.
+ *
+ * If we ever swap to apple-reminders-cli or ekctl their shapes will be
+ * different again — add a sibling normalizer per CLI flavor.
+ */
+interface RemindCtlRaw {
+  id: string;
+  title: string;
+  list?: string;
+  listName?: string;
+  notes?: string | null;
+  due?: string | null;
+  priority?: string | number;
+  completed?: boolean;
+  isCompleted?: boolean;
+}
+
+const PRIORITY_TO_NUM: Record<string, number> = {
+  none: 0,
+  low: 1,
+  medium: 5,
+  high: 9,
+};
+
+function normalizeRemindCtl(raw: RemindCtlRaw): Omit<ReminderTodo, "metadata"> {
+  return {
+    id: raw.id,
+    title: raw.title,
+    list: raw.list ?? raw.listName ?? "",
+    notes: raw.notes ?? null,
+    due: raw.due ?? null,
+    priority: typeof raw.priority === "number"
+      ? raw.priority
+      : (PRIORITY_TO_NUM[String(raw.priority ?? "none").toLowerCase()] ?? 0),
+    completed: raw.completed ?? raw.isCompleted ?? false,
+  };
+}
+
 const execFileDefault = promisify(execFileCb);
 
 /** Minimal exec contract — return shape mirrors `promisify(execFile)`. */
@@ -134,8 +183,11 @@ export async function listTodos(
     ? ["show", "all", "--list", list, "--json"]
     : ["show", "--list", list, "--json"];
   const { stdout } = await execFn(bin, args);
-  const arr = JSON.parse(stdout || "[]") as Array<Omit<ReminderTodo, "metadata">>;
-  return arr.map((t) => ({ ...t, metadata: parseTodoMetadata(t.notes) }));
+  const raw = JSON.parse(stdout || "[]") as RemindCtlRaw[];
+  return raw.map((r) => {
+    const normalized = normalizeRemindCtl(r);
+    return { ...normalized, metadata: parseTodoMetadata(normalized.notes) };
+  });
 }
 
 interface AddTodoInput {
@@ -195,8 +247,9 @@ export async function addTodo(
   }
   args.push("--json");
   const { stdout } = await execFn(bin, args);
-  const created = JSON.parse(stdout) as Omit<ReminderTodo, "metadata">;
-  return { ...created, metadata: parseTodoMetadata(created.notes) };
+  const created = JSON.parse(stdout) as RemindCtlRaw;
+  const normalized = normalizeRemindCtl(created);
+  return { ...normalized, metadata: parseTodoMetadata(normalized.notes) };
 }
 
 /**

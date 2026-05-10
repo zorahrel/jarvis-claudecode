@@ -86,6 +86,12 @@ export function startReminderPolling(opts: PollOptions): void {
         }
       }
     } catch (err) {
+      // First-run: Jarvis/ActiveTasks list doesn't exist yet. Swallow
+      // silently — the user creates it via their iPhone/Mac Reminders app
+      // (the dashboard's `listMissing` banner explains the path). Logging
+      // a WARN every 3s would spam the router log indefinitely.
+      const msg = String((err as Error).message ?? err);
+      if (/list not found/i.test(msg) || /no such list/i.test(msg)) return;
       opts.onError?.(err);
     }
   };
