@@ -1,0 +1,29 @@
+[
+  {
+    "id":"AAAA0001-2222-44A4-84A8-58A9D976D920",
+    "title":"Plan 02-01 — refinedStatus",
+    "list":"Jarvis/ActiveTasks",
+    "due":"2026-05-08T17:00:00Z",
+    "notes":"pid:12345 repo:jarvis phase:plan",
+    "priority":0,
+    "completed":false
+  },
+  {
+    "id":"AAAA0001-3333-44A4-84A8-58A9D976D921",
+    "title":"Wire dashboard tab",
+    "list":"Jarvis/ActiveTasks",
+    "due":null,
+    "notes":"Note from user about UX\n\npid:67890 repo:jarvis phase:exec",
+    "priority":0,
+    "completed":false
+  },
+  {
+    "id":"AAAA0001-4444-44A4-84A8-58A9D976D922",
+    "title":"Buy groceries",
+    "list":"Jarvis/ActiveTasks",
+    "due":null,
+    "notes":null,
+    "priority":0,
+    "completed":false
+  }
+]
