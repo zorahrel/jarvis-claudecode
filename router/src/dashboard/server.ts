@@ -7,7 +7,10 @@ import { pushLog, type LogEntry } from "./state";
 import { handleApi } from "./api";
 import { attachWebSocket, broadcast, clientCount } from "./ws";
 import { startReminderPolling } from "../services/reminders/index.js";
-import { emit as emitOrchestratorEvent } from "../notch/orchestrator-events.js";
+import {
+  emit as emitOrchestratorEvent,
+  startOrchestratorBridge,
+} from "../notch/orchestrator-events.js";
 
 // Re-export for external consumers (handler.ts, index.ts)
 export { pushLog, trackMessage, trackResponseTime, getCliSessions } from "./state";
@@ -161,6 +164,19 @@ export function startDashboard(port: number): void {
       log.info("[reminders] polling started (3s, list=Jarvis/ActiveTasks)");
     } catch (err) {
       log.warn({ err }, "[reminders] polling failed to start");
+    }
+
+    // ── Phase 2 Plan 02-03 — orchestrator → notch event bridge.
+    // 5s tick: buildSnapshot() → emit `sessions:update` with the rich
+    // {pid, repo, status, conflict} array consumed by SessionsSidebarView.
+    // 1s debounce on todo:added/completed/updated → listTodos() → emit
+    // `todos:update` with topThree consumed by TodoStripView.
+    // Same JARVIS_NO_POLL escape hatch as the reminders loop.
+    try {
+      startOrchestratorBridge({ snapshotIntervalMs: 5000 });
+      log.info("[orchestrator-bridge] started (5s snapshot tick + 1s todos debounce)");
+    } catch (err) {
+      log.warn({ err }, "[orchestrator-bridge] failed to start");
     }
   }
 
