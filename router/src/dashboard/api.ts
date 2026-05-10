@@ -42,6 +42,9 @@ import {
   type SpawnConfig,
 } from "../services/contextInspector/index.js";
 import { buildSnapshot, buildTranscript } from "../services/orchestrator/index.js";
+import { findPaneForPid, sendKeys, capturePane } from "../services/orchestrator/tmuxMap.js";
+import { appendAudit } from "../services/orchestrator/audit.js";
+import { detectConflict } from "../services/orchestrator/lock.js";
 import {
   listTodos as listRemindersTodos,
   addTodo as addReminderTodo,
@@ -55,6 +58,7 @@ import {
   handlePatchTodo,
   type TodosDeps,
 } from "./api.todos.js";
+import { handleTmuxLookup, handleInject, type TmuxDeps } from "./api.tmux.js";
 import { execFile as remindctlExecFile } from "child_process";
 import { promisify as remindctlPromisify } from "util";
 
@@ -123,6 +127,22 @@ function buildTodosDeps(): TodosDeps {
       // execFile arg-array → no shell, no injection (CLAUDE.md convention).
       await remindctlExecFileAsync("remindctl", ["edit", uuid, "--notes", notes, "--json"]);
     },
+  };
+}
+
+/**
+ * Build the dependency surface for tmux/inject handlers.
+ * Production wiring of services/orchestrator/tmuxMap + audit + lock + discovery.
+ * The handler module (api.tmux.ts) is fully testable with stubbed deps.
+ */
+function buildTmuxDeps(): TmuxDeps {
+  return {
+    discoverSessions: () => discoverLocalSessions(),
+    findPane: (pid) => findPaneForPid(pid),
+    sendKeys: (paneId, text) => sendKeys(paneId, text),
+    capturePane: (paneId, lines) => capturePane(paneId, lines),
+    detectConflict: (a, b) => detectConflict(a, b),
+    appendAudit: (entry) => appendAudit(entry),
   };
 }
 
@@ -2320,6 +2340,35 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     } catch (err: unknown) {
       log.warn({ err, pid }, "[orchestrator] transcript discovery failed");
       json(req, res, { error: "transcript_failed", message: (err as Error)?.message ?? "unknown" }, 500);
+    }
+
+  } else if (req.method === "GET" && /^\/api\/sessions\/\d+\/tmux$/.test(path)) {
+    // GET /api/sessions/:pid/tmux — Phase 2 Plan 02-04 (ORC-15).
+    // Returns {has_tmux, session_name?, pane_id?}. has_tmux:false for bare-TTY
+    // sessions (CONTEXT.md locked decision — no inject for non-tmux sessions).
+    const pid = parseInt(path.split("/")[3] ?? "0", 10);
+    try {
+      const out = await handleTmuxLookup(buildTmuxDeps(), pid);
+      json(req, res, out.body, out.status);
+    } catch (err: unknown) {
+      log.warn({ err, pid }, "[orchestrator] tmux lookup failed");
+      json(req, res, { error: "tmux_lookup_failed", message: (err as Error)?.message ?? "unknown" }, 500);
+    }
+
+  } else if (req.method === "POST" && /^\/api\/sessions\/\d+\/inject$/.test(path)) {
+    // POST /api/sessions/:pid/inject — Phase 2 Plan 02-04 (ORC-16, ORC-17, ORC-19).
+    // Body: {text, source: "user-approved"|"auto"|"skill", confidence?, reason?, force?}.
+    // 200 on success; 409 on no_tmux or lock_conflict; 404 on session_not_found
+    // or pane_lost; 400 on invalid body. Audit JSONL appended on success.
+    const pid = parseInt(path.split("/")[3] ?? "0", 10);
+    let body: unknown = null;
+    try { body = await parseBody(req); } catch { json(req, res, { error: "bad body" }, 400); return; }
+    try {
+      const out = await handleInject(buildTmuxDeps(), pid, body);
+      json(req, res, out.body, out.status);
+    } catch (err: unknown) {
+      log.warn({ err, pid }, "[orchestrator] inject failed");
+      json(req, res, { error: "inject_failed", message: (err as Error)?.message ?? "unknown" }, 500);
     }
 
   } else if (req.method === "GET" && path === "/api/todos") {

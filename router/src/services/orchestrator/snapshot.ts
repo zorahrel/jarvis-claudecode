@@ -6,6 +6,7 @@ import {
 import { refinedStatusFor } from "./refinedStatus.js";
 import { suggestNext } from "./suggest.js";
 import { detectConflict } from "./lock.js";
+import { findPaneForPid, listAllPanes, type PaneRow } from "./tmuxMap.js";
 import type { LocalSession } from "../localSessions/types.js";
 import type {
   OrchestratorSnapshot,
@@ -90,25 +91,51 @@ export async function buildTranscript(
 
 /**
  * Phase 2 Plan 02-01 — orchestrator snapshot composer.
+ * Plan 02-04 enriches the composer with tmux pid→pane info.
  *
  * Two functions:
- *  1. `composeSnapshot` (PURE) — synchronous, takes pre-fetched inputs.
- *     Easy to unit-test without tmpdirs or env mocking.
- *  2. `buildSnapshot` (ASYNC) — fetches all inputs via discoverLocalSessions
- *     + refinedStatusFor + extractLastAssistantTurn + detectConflict, then
- *     delegates to composeSnapshot.
+ *  1. `composeSnapshot` (PURE) — synchronous, takes pre-fetched inputs
+ *     including a `tmuxByPid` map. Easy to unit-test without tmpdirs or
+ *     env mocking.
+ *  2. `buildSnapshot` (ASYNC) — fetches all inputs (discoverLocalSessions
+ *     + refinedStatusFor + extractLastAssistantTurn + detectConflict +
+ *     getTmuxPanesOnce + findPaneForPid for parent-walking) then delegates
+ *     to composeSnapshot.
  *
- * Future plans add:
- *  - Plan 02-02 populates `todo_link` from Reminders metadata.
- *  - Plan 02-04 populates `tmux` from pid→pane resolver.
- * Plan 02-01 always emits `todo_link: null` and `tmux: null`.
+ * `todo_link` still emitted as null — that's Plan 02-02's job at write time
+ * (it's populated by enriching with Reminders metadata if a snapshot consumer
+ * needs it).
  */
+
+/**
+ * (W4 FIX) Build a pid → paneInfo map ONCE per snapshot invocation.
+ *
+ * `findPaneForPid` normally shells out to `tmux list-panes` per call. At a 5s
+ * polling cadence with N sessions, that's N tmux exec calls every 5s. Here we
+ * shell out exactly once and reuse the cache for every pane lookup in this
+ * snapshot — same trick `refinedStatusFor` uses with its 2s cache.
+ *
+ * Returns an empty Map on tmux failure (no tmux running, exec error). Bare
+ * Terminal.app sessions live in this codepath as null tmux info — that's the
+ * locked CONTEXT.md decision.
+ */
+async function getTmuxPanesOnce(): Promise<Map<number, { session: string; pane: string }>> {
+  const out = new Map<number, { session: string; pane: string }>();
+  try {
+    const rows: PaneRow[] = await listAllPanes();
+    for (const r of rows) out.set(r.pid, { session: r.session, pane: r.pane });
+  } catch {
+    /* tmux not running — degraded path is fine. */
+  }
+  return out;
+}
 
 export function composeSnapshot(
   sessions: LocalSession[],
   statusMap: Map<number, RefinedStatus>,
   lastByPid: Map<number, string | null>,
   conflictMap: Map<number, number | null>,
+  tmuxByPid?: Map<number, { session: string; pane: string } | null>,
 ): OrchestratorSnapshot {
   const entries: SnapshotEntry[] = sessions.map((s) => {
     const status = statusMap.get(s.pid) ?? "idle";
@@ -124,8 +151,8 @@ export function composeSnapshot(
       suggestion: sug.text,
       action: sug.action,
       confidence: sug.confidence,
-      todo_link: null, // populated by Plan 02-02
-      tmux: null, // populated by Plan 02-04
+      todo_link: null, // populated by Plan 02-02 at consumer-side enrichment time
+      tmux: tmuxByPid?.get(s.pid) ?? null,
       conflict: conflictMap.get(s.pid) ?? null,
     };
   });
@@ -163,5 +190,20 @@ export async function buildSnapshot(): Promise<OrchestratorSnapshot> {
     conflictMap.set(sessions[i].pid, conflictPid);
   }
 
-  return composeSnapshot(sessions, statusMap, lastByPid, conflictMap);
+  // (W4 FIX) tmux enrichment — single shell-out for the whole snapshot.
+  const tmuxCache = await getTmuxPanesOnce();
+  const tmuxByPid = new Map<number, { session: string; pane: string } | null>();
+  for (const s of sessions) {
+    // Direct hit first; otherwise walk parents (still cheap — only `ps -o
+    // ppid=` shell-outs, no further tmux calls thanks to the cache pass).
+    const direct = tmuxCache.get(s.pid);
+    if (direct) {
+      tmuxByPid.set(s.pid, direct);
+      continue;
+    }
+    const walked = await findPaneForPid(s.pid, undefined, tmuxCache).catch(() => null);
+    tmuxByPid.set(s.pid, walked);
+  }
+
+  return composeSnapshot(sessions, statusMap, lastByPid, conflictMap, tmuxByPid);
 }

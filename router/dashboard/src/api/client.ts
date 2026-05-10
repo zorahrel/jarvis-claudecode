@@ -525,6 +525,64 @@ export interface AddTodoInput {
   metadata?: { pid: number; repo: string; phase: 'plan' | 'exec' | 'review' }
 }
 
+// ── Orchestrator snapshot + tmux + inject (Phase 2 Plan 02-04 — ORC-15..19) ──
+// Mirrors the server-side OrchestratorSnapshot / SnapshotEntry types. Re-declared
+// here because the dashboard is a separate package. Keep in sync with
+// router/src/services/orchestrator/types.ts.
+
+export type RefinedStatusDTO =
+  | 'awaiting_user_input'
+  | 'tool_pending'
+  | 'crashed'
+  | 'working'
+  | 'idle'
+
+export type ConfidenceDTO = 'low' | 'medium' | 'high'
+
+export type SnapshotActionDTO =
+  | { type: 'inject'; text: string }
+  | { type: 'abort' }
+  | { type: 'restart' }
+  | { type: 'none'; reason?: string }
+
+export interface SnapshotEntryDTO {
+  pid: number
+  repo: string
+  branch: string | null
+  cwd: string
+  status: RefinedStatusDTO
+  last_assistant_summary: string | null
+  suggestion: string
+  action: SnapshotActionDTO
+  confidence: ConfidenceDTO
+  todo_link: string | null
+  tmux: { session: string; pane: string } | null
+  conflict: number | null
+}
+
+export interface OrchestratorSnapshotDTO {
+  generated_at: string
+  sessions: SnapshotEntryDTO[]
+}
+
+export interface TmuxLookupResponse {
+  has_tmux: boolean
+  session_name?: string
+  pane_id?: string
+}
+
+export interface InjectBody {
+  text: string
+  source: 'user-approved' | 'auto' | 'skill'
+  confidence?: ConfidenceDTO
+  reason?: string
+  force?: boolean
+}
+
+export type InjectResponse =
+  | { ok: true; paneId: string; auditTs: number; echoTail?: string }
+  | { error: string; message?: string; conflictPid?: number }
+
 // API client
 
 const BASE = ''
@@ -833,4 +891,24 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ metadata }),
     }),
+
+  // ── Orchestrator (Phase 2 Plan 02-04 — ORC-15..19) ────────────────────────
+  // snapshot: read-side observatory (refinedStatus + suggestion + tmux info).
+  // tmux: pid → pane mapping (has_tmux false for bare-TTY sessions).
+  // inject: write-side. May return error envelope for lock_conflict / no_tmux —
+  // the dashboard handles those without a thrown error.
+  snapshot: () => request<OrchestratorSnapshotDTO>('/api/sessions/snapshot'),
+  tmux: (pid: number) =>
+    request<TmuxLookupResponse>(`/api/sessions/${pid}/tmux`),
+  inject: async (pid: number, body: InjectBody): Promise<InjectResponse> => {
+    // Always parse the JSON body — error responses (409 lock_conflict /
+    // no_tmux, 404 pane_lost / session_not_found) are valid JSON envelopes
+    // we want to surface to the UI rather than throw on.
+    const r = await fetch(`/api/sessions/${pid}/inject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    return r.json() as Promise<InjectResponse>
+  },
 }
