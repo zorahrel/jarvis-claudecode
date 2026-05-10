@@ -41,6 +41,7 @@ import {
   analyzeAgentBaselines,
   type SpawnConfig,
 } from "../services/contextInspector/index.js";
+import { buildSnapshot, buildTranscript } from "../services/orchestrator/index.js";
 import { getSessionMetadata } from "../services/claude";
 import { promises as fsPromises } from "fs";
 import { homedir as getHomedir } from "os";
@@ -2224,6 +2225,60 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     } catch (err: unknown) {
       log.warn({ err }, "[local-sessions] discovery failed");
       json(req, res, { error: "discovery failed" }, 500);
+    }
+
+  } else if (req.method === "GET" && path === "/api/sessions/snapshot") {
+    // GET /api/sessions/snapshot — Phase 2 Plan 02-01 (ORC-03).
+    // Returns OrchestratorSnapshot: full view of every live Claude Code
+    // session enriched with refinedStatus, suggestion/action/confidence,
+    // and a conflict map for cwd lock detection. Read-only — write-side
+    // (inject) lives in Plan 02-04.
+    try {
+      const snapshot = await buildSnapshot();
+      json(req, res, snapshot);
+    } catch (err: unknown) {
+      log.warn({ err }, "[orchestrator] snapshot failed");
+      json(req, res, { error: "snapshot_failed", message: (err as Error)?.message ?? "unknown" }, 500);
+    }
+
+  } else if (req.method === "GET" && /^\/api\/sessions\/\d+\/transcript$/.test(path)) {
+    // GET /api/sessions/:pid/transcript?limit=N — Phase 2 Plan 02-01 (ORC-01).
+    // Returns the last-N JSON-structured turns from the session JSONL,
+    // projected to {role, content, stop_reason, timestamp, uuid}. Skips
+    // attachment / last-prompt rows.
+    const parts = path.split("/");
+    const pid = parseInt(parts[3], 10);
+    let limit = 10;
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const lim = url.searchParams.get("limit");
+      if (lim) {
+        const n = parseInt(lim, 10);
+        if (Number.isFinite(n) && n > 0 && n <= 200) limit = n;
+      }
+    } catch { /* fallback to default */ }
+
+    try {
+      const sessions = await discoverLocalSessions();
+      const target = sessions.find((s) => s.pid === pid);
+      if (!target) {
+        json(req, res, { error: "not_found", message: "no session for pid" }, 404);
+        return;
+      }
+      if (!target.transcriptPath) {
+        json(req, res, { pid, turns: [] });
+        return;
+      }
+      try {
+        const out = await buildTranscript(target.transcriptPath, pid, limit);
+        json(req, res, out);
+      } catch (e: unknown) {
+        log.warn({ err: e, pid }, "[orchestrator] transcript read failed");
+        json(req, res, { error: "transcript_read_failed", message: (e as Error)?.message ?? "unknown" }, 500);
+      }
+    } catch (err: unknown) {
+      log.warn({ err, pid }, "[orchestrator] transcript discovery failed");
+      json(req, res, { error: "transcript_failed", message: (err as Error)?.message ?? "unknown" }, 500);
     }
 
   } else if (req.method === "GET" && /^\/api\/sessions\/[^/]+\/breakdown$/.test(path)) {

@@ -41,6 +41,15 @@ export interface LocalSession {
   fullAccess?: boolean;
   /** inheritUserScope flag for the agent (resolved from sidecar). */
   inheritUserScope?: boolean;
+  // ─── Phase 2 (Plan 02-01) — orchestrator extensions ──────────────────────
+  // All optional — Phase 1 consumers ignore them. Populated by the new
+  // /api/sessions/snapshot pipeline, NOT by /api/local-sessions (Phase 1).
+  /** Refined 5-state status (awaiting_user_input | tool_pending | crashed | working | idle). */
+  refinedStatus?: import("../orchestrator/types.js").RefinedStatus;
+  /** Resolved tmux pane mapping (Plan 02-04 wires the resolver — Plan 02-01 always emits null). */
+  tmux?: { session: string; pane: string } | null;
+  /** Other session pid that conflicts on this cwd (sub-path with same git root). */
+  lockConflict?: number | null;
 }
 
 export type OpenTargetId = "iterm" | "terminal" | "topics" | "finder" | "editor" | "pr";
