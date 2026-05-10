@@ -35,11 +35,11 @@ Requirements per il MVP del Context Inspector (Phase 1). Derivati dalla proposta
 
 #### Conductor read-only (Plan 02-01)
 
-- [ ] **ORC-01**: `GET /api/sessions/:pid/transcript?limit=N` ritorna last-N turn JSON-strutturati dal JSONL della sessione (`~/.claude/projects/-Users-.../<uuid>.jsonl`), con campi `role`, `content`, `tool_use[]`, `tool_result[]`, `stop_reason`, `timestamp`
-- [ ] **ORC-02**: Endpoint deriva uno `refinedStatus` per sessione: `awaiting_user_input` | `tool_pending` | `crashed` | `working` | `idle` (regole in CONTEXT.md). Aggiunto a `LocalSession` esteso o restituito accanto.
-- [ ] **ORC-03**: Skill `/orchestrator` (in `~/jarvis/skills-marketplace/skills/orchestrator/`) chiama `/api/local-sessions` + `/transcript` per ogni sessione e ritorna JSON con un entry per sessione: `{pid, repo, branch, status, last_assistant_summary, suggestion, action, todo_link}`
-- [ ] **ORC-04**: Suggestion engine genera `suggestion` umana e `action.type ∈ {inject, abort, restart, none}` deterministicamente da `refinedStatus` + ultimo turno; nessun LLM call per la suggestion
-- [ ] **ORC-05**: Skill output rispetta lock per `cwd` (sub-path detection) — sessioni che condividono path producono un warning `conflict: <other_pid>` e nessun action automatico
+- [x] **ORC-01**: `GET /api/sessions/:pid/transcript?limit=N` ritorna last-N turn JSON-strutturati dal JSONL della sessione (`~/.claude/projects/-Users-.../<uuid>.jsonl`), con campi `role`, `content`, `tool_use[]`, `tool_result[]`, `stop_reason`, `timestamp` ✓ 02-01
+- [x] **ORC-02**: Endpoint deriva uno `refinedStatus` per sessione: `awaiting_user_input` | `tool_pending` | `crashed` | `working` | `idle` (regole in CONTEXT.md). Aggiunto a `LocalSession` esteso o restituito accanto. ✓ 02-01
+- [x] **ORC-03**: Skill `/orchestrator` (in `~/jarvis/skills-marketplace/skills/orchestrator/`) chiama `/api/local-sessions` + `/transcript` per ogni sessione e ritorna JSON con un entry per sessione: `{pid, repo, branch, status, last_assistant_summary, suggestion, action, todo_link}` ✓ 02-01
+- [x] **ORC-04**: Suggestion engine genera `suggestion` umana e `action.type ∈ {inject, abort, restart, none}` deterministicamente da `refinedStatus` + ultimo turno; nessun LLM call per la suggestion ✓ 02-01
+- [x] **ORC-05**: Skill output rispetta lock per `cwd` (sub-path detection) — sessioni che condividono path producono un warning `conflict: <other_pid>` e nessun action automatico ✓ 02-01
 
 #### Reminders bridge (Plan 02-02)
 

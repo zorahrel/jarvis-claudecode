@@ -45,7 +45,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Context Inspector | 8/8 | Code complete (UAT pending user) | 2026-05-01 |
-| 2. Orchestrator Multi-Session | 0/5 | Plans verified PASSED, ready to execute | — |
+| 2. Orchestrator Multi-Session | 1/5 | Plan 02-01 done; 02-02..05 pending | — |
 
 ### Phase 2: Orchestrator Multi-Session
 **Goal**: Cruscotto unificato per pilotare N sessioni Claude Code attive (router-spawned + bare CLI under tmux). Trasforma 5+ sessioni scollegate in un'orchestra controllabile da un punto: skill `/orchestrator` produce snapshot con next-step suggerito per ogni sessione; Reminders Mac come intent layer (sync iPhone/Watch/Siri); notch HUD always-on con top-3 todo + badge sessioni; tmux send-keys come canale di inject approvato dall'utente. Read-only first (Plan 02-01) + sync (02-02..03) + write con approvazione (02-04) + auto-pilot opt-in (02-05). Estende infrastructure di Phase 1 (`/api/local-sessions`), nessuna riscrittura.
@@ -63,7 +63,7 @@ Plans:
 **Plans**: 5 plans in 4 effective waves (02-05 deferred behind manual gate)
 
 Plans:
-- [ ] 02-01-PLAN.md — Wave 0: Conductor read-only — fixtures + transcriptReader/refinedStatus/cwdLock/suggestionEngine + /api/sessions/:pid/{transcript,snapshot} + skill /orchestrator (HTTP-only). Requirements: ORC-01..05
+- [x] 02-01-PLAN.md — Wave 0: Conductor read-only — fixtures + transcriptReader/refinedStatus/cwdLock/suggestionEngine + /api/sessions/:pid/{transcript,snapshot} + skill /orchestrator (HTTP-only). Requirements: ORC-01..05 ✓ 2026-05-10
 - [ ] 02-02-PLAN.md — Wave 1: Reminders bridge — remindctl wrapper + 3s polling + metadata schema (pid/repo/phase) + /api/todos GET/POST/PATCH/complete + TodosTab.tsx + auth banner. Requirements: ORC-06..10. Depends on 02-01.
 - [ ] 02-03-PLAN.md — Wave 1: Notch HUD Swift views — SessionsSidebarView + TodoStripView + NotchEventBus reconnect + bridge in connectors/notch.ts. Requirements: ORC-11..14. Depends on 02-02.
 - [ ] 02-04-PLAN.md — Wave 2: tmux inject control — pid→pane resolver (cached) + /api/sessions/:pid/{tmux,inject} + audit JSONL + Approve/Skip/Custom dashboard + force-confirm modal. Requirements: ORC-15..19. Depends on 02-01 + 02-02.
