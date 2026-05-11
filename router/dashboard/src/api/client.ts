@@ -853,4 +853,40 @@ export const api = {
     request<SessionBreakdown>(`/api/sessions/${encodeURIComponent(sessionId)}/breakdown`),
   sessionsCruft: () => request<CruftResponse>('/api/sessions/cruft'),
   agentsBaseline: () => request<AgentBaselineResponse>('/api/agents/baseline'),
+
+  // ── MCP Auth Manager (Phase 3) ────────────────────────────────────────────
+  // Pairs with the dashboard `MCP Health` tab and the three boot-time
+  // services in router/src/services/mcp-{health-monitor,auth-backup,refresh-trigger}.ts.
+  mcpStatus: async (): Promise<McpServerStatus[]> => {
+    const r = await fetch('/api/mcp-status')
+    if (!r.ok) throw new Error(`mcp-status failed: ${r.status}`)
+    const body = (await r.json()) as { servers?: McpServerStatus[] }
+    return body.servers ?? []
+  },
+  mcpRefresh: () =>
+    request<{ ok: boolean; servers: McpServerStatus[] }>('/api/mcp/refresh', { method: 'POST' }),
+  mcpAuthenticate: async (name: string): Promise<McpAuthResult> => {
+    const r = await fetch('/api/mcp/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    return r.json() as Promise<McpAuthResult>
+  },
+}
+
+// ── MCP Auth Manager — public types (consumed by MCPHealth tab) ─────────────
+
+export interface McpServerStatus {
+  name: string
+  target: string
+  status: 'connected' | 'auth' | 'failed' | 'unknown'
+  statusText: string
+}
+
+export interface McpAuthResult {
+  ok: boolean
+  reason?: string
+  name?: string
+  url?: string
 }

@@ -16,6 +16,9 @@ import { killAllProcesses, getDiagnostics } from "./services/claude";
 import { ensureHooksInstalled } from "./services/localSessions";
 import { startMcpStatusWatcher } from "./services/mcp-status";
 import { cleanupOrphanMcpLocks } from "./services/mcp-auth-cleanup";
+import { startMcpHealthMonitor } from "./services/mcp-health-monitor";
+import { startMcpAuthBackup } from "./services/mcp-auth-backup";
+import { startMcpRefreshTrigger } from "./services/mcp-refresh-trigger";
 
 const log = logger.child({ module: "main" });
 
@@ -260,6 +263,20 @@ async function main() {
   // needs-auth / failed servers BEFORE spawning sessions, avoiding OAuth
   // popup loops. Refreshes every 60s + on-demand from dashboard endpoints.
   startMcpStatusWatcher();
+
+  // MCP Auth Manager — three background services that prevent silent token
+  // loss and make scadenze visible:
+  //   1. Health monitor: every 6h, emit notch alert if any MCP needs auth.
+  //   2. Auth backup: daily snapshot of ~/.mcp-auth + Claude Code's auth cache,
+  //      30-day rotation, so a botched upgrade can be rolled back manually.
+  //   3. Refresh trigger: every 4h, send a lightweight `initialize` ping to
+  //      every stdio + npx mcp-remote MCP. mcp-remote handles 401 by hitting
+  //      the OAuth refresh endpoint with the cached refresh_token, so tokens
+  //      whose providers support refresh tokens (Google, Vercel, Cloudflare,
+  //      Supabase, ...) rotate transparently without user action.
+  startMcpHealthMonitor();
+  startMcpAuthBackup();
+  startMcpRefreshTrigger();
 
   // Start dashboard
   startDashboard(3340);
