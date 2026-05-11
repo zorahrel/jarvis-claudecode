@@ -64,7 +64,7 @@ export function Permissions({ onToast }: { onToast?: (msg: string, type: 'succes
         title="Permissions"
         description="Per-agent tier, tools allowlist, channel scope, audit trail. The dashboard rejects tier violations server-side."
         actions={
-          <IconButton icon={<RefreshCw size={16} className={loading ? 'spin' : ''} />} onClick={refresh} title="Refresh" disabled={loading} />
+          <IconButton icon={<RefreshCw size={16} className={loading ? 'spin' : ''} />} onClick={refresh} title="Refresh" label="Refresh" disabled={loading} />
         }
       />
 
