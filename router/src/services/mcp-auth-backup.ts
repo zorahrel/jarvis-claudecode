@@ -67,10 +67,27 @@ async function copyDirRecursive(src: string, dst: string): Promise<void> {
   }
 }
 
+/**
+ * Where to write backups. Default: `~/Library/Application Support/jarvis/auth-backups/`
+ * — DELIBERATELY outside `~/.claude/jarvis/` so a runaway `git add -A` from
+ * the Jarvis repo can NEVER stage them. Override with the env var
+ * `JARVIS_AUTH_BACKUP_DIR` if you want a different location.
+ *
+ * Why this matters: an earlier version of this service wrote inside the repo
+ * tree (`~/.claude/jarvis/backups/`). On 2026-05-11 a `git add -A` swept the
+ * snapshot into a commit, briefly exposing the OAuth tokens on the public
+ * GitHub mirror before being scrubbed via `git filter-repo`. The path here
+ * is the structural fix so that class of mistake is no longer possible.
+ */
+function backupRoot(): string {
+  const override = process.env.JARVIS_AUTH_BACKUP_DIR;
+  if (override) return override;
+  return join(homedir(), "Library", "Application Support", "jarvis", "auth-backups");
+}
+
 async function snapshotAuthState(): Promise<void> {
-  const home = homedir();
   const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const targetDir = join(home, ".claude", "jarvis", "backups", "auth", date);
+  const targetDir = join(backupRoot(), date);
   await fs.mkdir(targetDir, { recursive: true });
 
   let copied = 0;
@@ -93,17 +110,16 @@ async function snapshotAuthState(): Promise<void> {
 }
 
 async function rotateOldBackups(): Promise<void> {
-  const home = homedir();
-  const backupRoot = join(home, ".claude", "jarvis", "backups", "auth");
-  if (!existsSync(backupRoot)) return;
+  const root = backupRoot();
+  if (!existsSync(root)) return;
 
   const cutoffMs = Date.now() - KEEP_DAYS * 24 * 60 * 60 * 1000;
-  const entries = await fs.readdir(backupRoot, { withFileTypes: true });
+  const entries = await fs.readdir(root, { withFileTypes: true });
 
   let purged = 0;
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const dirPath = join(backupRoot, entry.name);
+    const dirPath = join(root, entry.name);
     try {
       const stat = await fs.stat(dirPath);
       if (stat.mtimeMs < cutoffMs) {

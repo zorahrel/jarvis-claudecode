@@ -84,3 +84,18 @@ mem0-history.db
 # Local promo/marketing material
 promo/
 active-sessions/
+
+# ─── Security hardening (2026-05-11) ──────────────────────────────────────────
+# MCP Auth Manager creates daily backups of OAuth credentials. These MUST NEVER
+# be committed. The backup service in v3.1+ writes to ~/Library/Application
+# Support/jarvis/auth-backups/ instead of inside the repo, but keep this guard
+# in case someone copies an old version of the code.
+backups/
+auth-backups/
+*.credentials.json
+mcp-needs-auth-cache*.json
+.mcp-auth/
+
+# Token files of any kind
+*token*.json
+*credential*.json
