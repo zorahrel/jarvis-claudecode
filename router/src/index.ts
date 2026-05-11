@@ -17,7 +17,6 @@ import { ensureHooksInstalled } from "./services/localSessions";
 import { startMcpStatusWatcher } from "./services/mcp-status";
 import { cleanupOrphanMcpLocks } from "./services/mcp-auth-cleanup";
 import { startMcpHealthMonitor } from "./services/mcp-health-monitor";
-import { startMcpAuthBackup } from "./services/mcp-auth-backup";
 import { startMcpRefreshTrigger } from "./services/mcp-refresh-trigger";
 
 const log = logger.child({ module: "main" });
@@ -264,18 +263,30 @@ async function main() {
   // popup loops. Refreshes every 60s + on-demand from dashboard endpoints.
   startMcpStatusWatcher();
 
-  // MCP Auth Manager — three background services that prevent silent token
-  // loss and make scadenze visible:
-  //   1. Health monitor: every 6h, emit notch alert if any MCP needs auth.
-  //   2. Auth backup: daily snapshot of ~/.mcp-auth + Claude Code's auth cache,
-  //      30-day rotation, so a botched upgrade can be rolled back manually.
-  //   3. Refresh trigger: every 4h, send a lightweight `initialize` ping to
+  // MCP Auth Manager — two background services that together keep OAuth
+  // credentials alive without user intervention:
+  //
+  //   1. Refresh trigger: every 4h, send a lightweight `initialize` ping to
   //      every stdio + npx mcp-remote MCP. mcp-remote handles 401 by hitting
   //      the OAuth refresh endpoint with the cached refresh_token, so tokens
   //      whose providers support refresh tokens (Google, Vercel, Cloudflare,
-  //      Supabase, ...) rotate transparently without user action.
+  //      Supabase, ...) rotate transparently. Standard RFC 6749 §6 flow,
+  //      nothing reinvented — we just trigger the path that mcp-remote
+  //      already implements but only fires on demand.
+  //
+  //   2. Health monitor: every 6h, emit notch alert if any MCP still ends up
+  //      in needs-auth / failed (e.g. providers without refresh tokens like
+  //      Tally/Twenty whose access_token was the only credential). Visibility
+  //      is the cheapest reliability tool — if we know within 6h that
+  //      something needs a click, we can act.
+  //
+  // NOT included by design:
+  //   - Auth-state backup: REMOVED 2026-05-11 — it was duct-tape for
+  //     "what if mcp-remote bumps version and tokens look lost". The actual
+  //     fix is to pin the mcp-remote version in the MCP server config so the
+  //     auth directory path stays stable. Backup just added another file
+  //     with secrets to worry about.
   startMcpHealthMonitor();
-  startMcpAuthBackup();
   startMcpRefreshTrigger();
 
   // Start dashboard
