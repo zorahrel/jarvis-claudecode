@@ -911,4 +911,40 @@ export const api = {
     })
     return r.json() as Promise<InjectResponse>
   },
+
+  // ── MCP Auth Manager (Phase 3 — MCP server health + re-auth) ──────────────
+  // mcpStatus: cached list of MCP servers + connected/auth/failed state.
+  // mcpRefresh: force re-shell `claude mcp list` and update the cache.
+  // mcpAuthenticate: spawn the right re-auth flow for the server's transport.
+  mcpStatus: async (): Promise<McpServerStatus[]> => {
+    const r = await fetch('/api/mcp-status')
+    if (!r.ok) throw new Error(`mcp-status failed: ${r.status}`)
+    const body = (await r.json()) as { servers?: McpServerStatus[] }
+    return body.servers ?? []
+  },
+  mcpRefresh: () => request<{ ok: boolean; servers: McpServerStatus[] }>('/api/mcp/refresh', { method: 'POST' }),
+  mcpAuthenticate: async (name: string): Promise<McpAuthResult> => {
+    const r = await fetch('/api/mcp/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    return r.json() as Promise<McpAuthResult>
+  },
+}
+
+// ── MCP Auth Manager — public types (consumed by MCPHealth tab) ─────────────
+
+export interface McpServerStatus {
+  name: string
+  target: string
+  status: 'connected' | 'auth' | 'failed' | 'unknown'
+  statusText: string
+}
+
+export interface McpAuthResult {
+  ok: boolean
+  reason?: string
+  name?: string
+  url?: string
 }

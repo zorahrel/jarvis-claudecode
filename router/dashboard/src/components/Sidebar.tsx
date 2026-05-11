@@ -17,6 +17,7 @@ const navItems: { id: string; label: string; hint: string }[] = [
   { id: 'sessions',  label: 'Sessions',  hint: 'Active and historical conversations across channels' },
   { id: 'todos',     label: 'Todos',     hint: 'Apple Reminders bridge — Jarvis/ActiveTasks intent layer (Phase 2)' },
   { id: 'orchestrator', label: 'Orchestrator', hint: 'Multi-session control plane — Approve/Skip/Custom inject (Phase 2)' },
+  { id: 'mcp-health', label: 'MCP Health', hint: 'Live MCP server status + one-click OAuth re-authorization (Phase 3)' },
   { id: 'analytics', label: 'Analytics', hint: 'Message volume, costs, and response-time trends' },
   { id: 'settings',  label: 'Settings',  hint: 'Router, hooks, and MCP server configuration' },
   { id: 'logs',      label: 'Logs',      hint: 'Live router log stream' },

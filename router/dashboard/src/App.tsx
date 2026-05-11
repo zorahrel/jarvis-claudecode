@@ -12,6 +12,7 @@ import { Memory } from './pages/Memory'
 import { Sessions } from './pages/Sessions'
 import TodosTab from './pages/TodosTab'
 import OrchestratorTab from './pages/OrchestratorTab'
+import { MCPHealth } from './pages/MCPHealth'
 import { Logs } from './pages/Logs'
 import { Settings } from './pages/Settings'
 import { Cron } from './pages/Cron'
@@ -99,6 +100,8 @@ function App() {
         return <TodosTab />
       case 'orchestrator':
         return <OrchestratorTab />
+      case 'mcp-health':
+        return <MCPHealth onToast={addToast} />
       case 'logs':
         return <Logs />
       case 'analytics':

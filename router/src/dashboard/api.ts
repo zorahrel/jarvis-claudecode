@@ -668,94 +668,278 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, servers: listMcpStatus() });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
-  // --- MCP AUTHENTICATE — spawn one-shot mcp-remote (or claude mcp) for OAuth ---
+  // --- MCP AUTHENTICATE — spawn one-shot OAuth flow ---
   // The user clicks "Authenticate" on a needs-auth MCP. We launch the auth
   // flow directly (one popup, not N parallel ones), wait for it to finish,
-  // then refresh status. Works for stdio MCPs whose `command` is `npx mcp-remote URL`
-  // — we re-invoke that command which triggers the OAuth dance.
+  // then refresh status.
+  //
+  // Two transports are supported:
+  //   1) stdio + npx mcp-remote URL  → spawn `npx mcp-remote URL`, watch
+  //      `~/.mcp-auth/mcp-remote-*/<hash>_tokens.json` for a fresh write.
+  //   2) type: http  (URL with `(HTTP)` suffix in `claude mcp list`) → spawn
+  //      a one-shot `claude --print "ping"` with strictMcpConfig and ONLY this
+  //      server attached. Claude Code's native auth flow opens the browser
+  //      popup and persists the token in its own store
+  //      (`~/.claude/mcp-needs-auth-cache.json` clears the entry on success).
   } else if (path === "/api/mcp/authenticate" && req.method === "POST") {
     try {
       const body = await parseBody(req) as { name?: string };
       if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const name = body.name;
       const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
-      const target = listMcpStatus().find(s => s.name === body.name);
-      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+      const target = listMcpStatus().find(s => s.name === name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${name}` }, 404);
 
-      // Two stores must be in sync for the SDK-spawned mcp-remote to find a
-      // valid token: claude's own fcache + mcp-remote's `~/.mcp-auth/`. The
-      // dashboard's previous "click to auth" path only triggered claude's
-      // half. Spawn `npx mcp-remote URL` directly so it writes to its own
-      // store, which is what the SDK will read on the next session spawn.
-      // Only works for stdio entries whose command is `npx mcp-remote URL`.
-      const m = target.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
-      if (!m) {
-        return json(req, res, {
-          ok: false,
-          reason: `not an mcp-remote-based server (target: ${target.target}). For non-OAuth servers run \`claude mcp\` interactively.`,
-        });
-      }
-      const url = m[1];
       const { spawn } = await import("child_process");
-
-      // mcp-remote in stdio mode runs forever; we keep it alive long enough for
-      // the user to complete OAuth in the browser tab, then kill it. Tokens are
-      // persisted to ~/.mcp-auth/ as soon as OAuth completes, so a kill after
-      // that point is safe.
-      const child = spawn("npx", ["mcp-remote", url], {
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: false,
-      });
-      const start = Date.now();
-      const TIMEOUT_MS = 180_000; // 3 min — enough to log in slowly
-      let stderrBuf = "";
-      child.stdout?.on("data", () => { /* drain */ });
-      child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
-
-      // Watch ~/.mcp-auth/mcp-remote-*/ for a fresh tokens.json — that's the
-      // signal that OAuth completed. Polls every 1s; gives up at TIMEOUT_MS.
-      const { readdirSync, statSync } = await import("fs");
+      const { readdirSync, statSync, readFileSync, existsSync } = await import("fs");
       const { join } = await import("path");
       const HOME = process.env.HOME ?? "";
-      const authRoot = join(HOME, ".mcp-auth");
-      const baselineMtimes = new Map<string, number>();
-      try {
-        for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
-          for (const f of readdirSync(join(authRoot, verDir))) {
-            if (f.endsWith("_tokens.json")) {
-              try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
-            }
-          }
-        }
-      } catch { /* ignore */ }
+      const start = Date.now();
 
-      const tokenAppeared = await new Promise<boolean>((resolve) => {
-        const deadline = Date.now() + TIMEOUT_MS;
-        const interval = setInterval(() => {
-          if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
-          try {
-            for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
-              for (const f of readdirSync(join(authRoot, verDir))) {
-                if (!f.endsWith("_tokens.json")) continue;
-                const key = `${verDir}/${f}`;
-                const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
-                const baseline = baselineMtimes.get(key);
-                if (baseline === undefined || mtime > baseline) {
-                  clearInterval(interval); resolve(true); return;
-                }
+      // Detect transport from `claude mcp list` target string.
+      // Format examples:
+      //   "npx mcp-remote https://example.com" → stdio + mcp-remote
+      //   "https://example.com (HTTP)"          → type: http
+      //   "https://example.com (SSE)"           → type: sse (handled like http)
+      const remoteMatch = target.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
+      const httpMatch = target.target.match(/^(https?:\/\/\S+)\s+\((HTTP|SSE)\)\s*$/);
+
+      // ---------- Branch A: stdio + npx mcp-remote ----------
+      if (remoteMatch) {
+        const url = remoteMatch[1];
+
+        // mcp-remote in stdio mode runs forever; we keep it alive long enough for
+        // the user to complete OAuth in the browser tab, then kill it. Tokens are
+        // persisted to ~/.mcp-auth/ as soon as OAuth completes, so a kill after
+        // that point is safe.
+        const child = spawn("npx", ["mcp-remote", url], {
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: false,
+        });
+        const TIMEOUT_MS = 180_000; // 3 min — enough to log in slowly
+        let stderrBuf = "";
+        child.stdout?.on("data", () => { /* drain */ });
+        child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
+
+        // Watch ~/.mcp-auth/mcp-remote-*/ for a fresh tokens.json — that's the
+        // signal that OAuth completed. Polls every 1s; gives up at TIMEOUT_MS.
+        const authRoot = join(HOME, ".mcp-auth");
+        const baselineMtimes = new Map<string, number>();
+        try {
+          for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+            for (const f of readdirSync(join(authRoot, verDir))) {
+              if (f.endsWith("_tokens.json")) {
+                try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
               }
             }
-          } catch { /* ignore */ }
-        }, 1000);
-        child.on("close", () => { clearInterval(interval); resolve(false); });
-      });
+          }
+        } catch { /* ignore */ }
 
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
-      await refreshMcpStatus();
-      json(req, res, {
-        ok: tokenAppeared,
-        reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
-        durationMs: Date.now() - start,
-        name: body.name,
+        const tokenAppeared = await new Promise<boolean>((resolve) => {
+          const deadline = Date.now() + TIMEOUT_MS;
+          const interval = setInterval(() => {
+            if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
+            try {
+              for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+                for (const f of readdirSync(join(authRoot, verDir))) {
+                  if (!f.endsWith("_tokens.json")) continue;
+                  const key = `${verDir}/${f}`;
+                  const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
+                  const baseline = baselineMtimes.get(key);
+                  if (baseline === undefined || mtime > baseline) {
+                    clearInterval(interval); resolve(true); return;
+                  }
+                }
+              }
+            } catch { /* ignore */ }
+          }, 1000);
+          child.on("close", () => { clearInterval(interval); resolve(false); });
+        });
+
+        try { child.kill("SIGTERM"); } catch { /* ignore */ }
+        await refreshMcpStatus();
+        return json(req, res, {
+          ok: tokenAppeared,
+          transport: "stdio+mcp-remote",
+          reason: tokenAppeared ? undefined : (stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout or canceled)"),
+          durationMs: Date.now() - start,
+          name: name,
+        });
+      }
+
+      // ---------- Branch B: type: http / sse ----------
+      // Spawn a one-shot Claude Code session attaching ONLY this server. The
+      // SDK's native init flow detects needs-auth and opens the browser
+      // popup. Auth completion is signalled by the entry disappearing from
+      // `~/.claude/mcp-needs-auth-cache.json`.
+      if (httpMatch) {
+        // Claude Code caches "needs auth" status per server in
+        // `~/.claude/mcp-needs-auth-cache.json` and will SKIP cached
+        // needs-auth servers at session init to keep startup fast. That
+        // skipping is what makes both `--print` and a fresh interactive
+        // session sit idle: claude never tries to connect, so the OAuth
+        // popup never fires.
+        //
+        // Workaround: snapshot the cache, remove the target entry, spawn
+        // claude in the user's Terminal with ONLY this server attached.
+        // claude now sees a clean slate, attempts init, receives 401,
+        // pops the OAuth window. Verification: poll `claude mcp list`
+        // (via the existing mcp-status cache, which we force-refresh)
+        // until the server reports `connected`. On timeout/cancel we
+        // restore the original cache entry so subsequent SDK sessions
+        // don't get hammered with retry attempts.
+        const claudeJsonPath = join(HOME, ".claude.json");
+        let serverCfg: unknown;
+        try {
+          const cfg = JSON.parse(readFileSync(claudeJsonPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+          serverCfg = cfg.mcpServers?.[name];
+        } catch { /* ignore — fall back to inferred config below */ }
+        if (!serverCfg) {
+          serverCfg = { type: httpMatch[2]!.toLowerCase(), url: httpMatch[1] };
+        }
+        const inlineMcp = JSON.stringify({ mcpServers: { [name]: serverCfg } });
+
+        const claudeBin = process.env.CLAUDE_CLI || `${HOME}/.local/bin/claude`;
+        const claudeBinResolved = existsSync(claudeBin) ? claudeBin : "claude";
+
+        // Snapshot + remove cache entry to force claude to re-attempt init.
+        const cachePath = join(HOME, ".claude/mcp-needs-auth-cache.json");
+        const { writeFileSync: writeFile, mkdtempSync, chmodSync } = await import("fs");
+        let cacheBackup: Record<string, unknown> | null = null;
+        let removedEntry: unknown = undefined;
+        try {
+          const raw = readFileSync(cachePath, "utf8");
+          cacheBackup = JSON.parse(raw) as Record<string, unknown>;
+          if (name in cacheBackup) {
+            removedEntry = cacheBackup[name];
+            const next = { ...cacheBackup };
+            delete next[name];
+            writeFile(cachePath, JSON.stringify(next, null, 4), "utf8");
+          }
+        } catch { /* cache file might not exist yet — that's fine */ }
+
+        // Helper to put the entry back if auth doesn't persist.
+        const restoreCacheEntry = () => {
+          if (removedEntry === undefined) return;
+          try {
+            let current: Record<string, unknown> = {};
+            try { current = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>; } catch { /* fresh */ }
+            // Only restore if claude didn't already write a fresh value.
+            if (!(name in current)) {
+              current[name] = removedEntry;
+              writeFile(cachePath, JSON.stringify(current, null, 4), "utf8");
+            }
+          } catch { /* ignore */ }
+        };
+
+        // Self-cleaning .command script. macOS routes .command files to the
+        // user's default Terminal app even from launchd-spawned processes.
+        //
+        // Plain `claude` lazy-loads MCP servers — they only connect when a
+        // tool is invoked, so an empty TUI session never triggers OAuth.
+        // We drive the TUI with `expect`: spawn claude, wait for the prompt
+        // to render, send `/mcp` (Claude Code's built-in MCP panel slash
+        // command), then `interact` to hand the terminal back to the user
+        // so they can confirm the auth and complete OAuth in the browser.
+        // The MCP panel surfaces a single needs-auth row (only this server
+        // is attached via --mcp-config), and ENTER on it triggers the
+        // OAuth flow.
+        const { tmpdir } = await import("os");
+        const sessDir = mkdtempSync(join(tmpdir(), `jarvis-mcp-auth-${name}-`));
+        const scriptPath = join(sessDir, `auth-${name}.command`);
+        // Expect interprets [] $ \ etc. inside double-quoted strings, but
+        // we ship the JSON via env var to dodge all quoting hazards.
+        // (JSON.stringify never produces literal newlines, only the \n
+        // escape sequence, so a single shell-line export is safe.)
+        const escapedForSingleQuote = inlineMcp.replace(/'/g, "'\\''");
+        // Driving claude TUI with `expect` proved fragile (timing races
+        // with the workspace-trust dialog and lazy MCP init). Simplest
+        // robust path: open claude in HOME (trusted, no extra prompts),
+        // print BIG instructions above the prompt, let the user type
+        // `/mcp` themselves and pick the Authenticate row. Two keystrokes
+        // total. The dashboard polls for connected status either way.
+        const script = [
+          `#!/bin/zsh`,
+          `set -u`,
+          // Bold yellow banner — large + impossible to miss when the user
+          // looks at the new Terminal window.
+          `printf '\\n\\033[1;33m'`,
+          `printf '╔══════════════════════════════════════════════════════════════════╗\\n'`,
+          `printf '║                                                                  ║\\n'`,
+          `printf '║   AUTHENTICATING MCP SERVER: %-36s ║\\n' "${name.toUpperCase()}"`,
+          `printf '║                                                                  ║\\n'`,
+          `printf '║   When claude opens:                                             ║\\n'`,
+          `printf '║     1) Type   /mcp   then press ENTER                            ║\\n'`,
+          `printf '║     2) Select the "%-12s" row and press ENTER     ║\\n' "${name}"`,
+          `printf '║     3) Pick "Authenticate" — your browser opens                  ║\\n'`,
+          `printf '║     4) Complete login in the browser                             ║\\n'`,
+          `printf '║     5) Type   /quit   to close (window auto-closes)              ║\\n'`,
+          `printf '║                                                                  ║\\n'`,
+          `printf '╚══════════════════════════════════════════════════════════════════╝\\n'`,
+          `printf '\\033[0m\\n'`,
+          // cd HOME so the workspace is already trusted — no safety dialog.
+          `cd "$HOME"`,
+          // Run claude with ONLY this server attached so the /mcp panel
+          // shows a single row that's unambiguously the user's target.
+          `${claudeBinResolved} --strict-mcp-config --mcp-config '${escapedForSingleQuote}'`,
+          // After claude exits, close the Terminal window if Terminal.app
+          // is the user's default. iTerm/Ghostty users will see the
+          // process exit message and can close manually — harmless.
+          `osascript -e 'tell application "Terminal" to close (every window whose name contains "auth-${name}")' 2>/dev/null || true`,
+        ].join("\n");
+        try {
+          writeFile(scriptPath, script, "utf8");
+          chmodSync(scriptPath, 0o755);
+        } catch (err: any) {
+          restoreCacheEntry();
+          return json(req, res, {
+            ok: false, transport: "http",
+            reason: `failed to write helper script: ${err?.message ?? err}`,
+            durationMs: Date.now() - start, name,
+          });
+        }
+
+        const opener = spawn("open", [scriptPath], { stdio: "ignore", detached: true });
+        opener.unref();
+
+        // Poll mcp-status (which wraps `claude mcp list`) for status === "connected".
+        // We force-refresh on each poll because the default cache is 60s.
+        const TIMEOUT_MS = 5 * 60 * 1000;
+        const POLL_INTERVAL_MS = 3000;
+        const authCompleted = await new Promise<boolean>((resolve) => {
+          const deadline = Date.now() + TIMEOUT_MS;
+          const tick = async () => {
+            if (Date.now() > deadline) { resolve(false); return; }
+            try {
+              await refreshMcpStatus();
+              const s = listMcpStatus().find(x => x.name === name);
+              if (s?.status === "connected") { resolve(true); return; }
+            } catch { /* ignore — poll again */ }
+            setTimeout(tick, POLL_INTERVAL_MS);
+          };
+          // First tick after a small grace period so claude has time to start.
+          setTimeout(tick, 4000);
+        });
+
+        if (!authCompleted) restoreCacheEntry();
+
+        try { const { rmSync } = await import("fs"); rmSync(sessDir, { recursive: true, force: true }); } catch { /* ignore */ }
+
+        return json(req, res, {
+          ok: authCompleted,
+          transport: "http",
+          reason: authCompleted
+            ? undefined
+            : `terminal opened but server "${name}" did not reach 'connected' state within ${TIMEOUT_MS / 1000}s — user cancelled or auth did not persist`,
+          durationMs: Date.now() - start,
+          name,
+        });
+      }
+
+      // ---------- Unrecognised transport ----------
+      return json(req, res, {
+        ok: false,
+        reason: `unrecognised transport for ${name} (target: ${target.target}). Supported: stdio+mcp-remote and type:http/sse.`,
       });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
@@ -766,9 +950,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     try {
       const body = await parseBody(req) as { name?: string };
       if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const name = body.name;
       const { listMcpStatus, refreshMcpStatus } = await import("../services/mcp-status");
-      const target = listMcpStatus().find(s => s.name === body.name);
-      if (!target) return json(req, res, { error: `unknown MCP: ${body.name}` }, 404);
+      const target = listMcpStatus().find(s => s.name === name);
+      if (!target) return json(req, res, { error: `unknown MCP: ${name}` }, 404);
       // Use the URL fragment as a needle; for non-URL targets fall back to name.
       const needle = target.target.includes("://") ? target.target : target.name;
       const { execFile } = await import("child_process");
@@ -776,7 +961,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         execFile("pkill", ["-f", needle], { timeout: 5000 }, () => resolve());
       });
       await refreshMcpStatus();
-      json(req, res, { ok: true, name: body.name, killed: needle });
+      json(req, res, { ok: true, name: name, killed: needle });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- ROUTES GET --- (thin matchers referencing agents by name)
