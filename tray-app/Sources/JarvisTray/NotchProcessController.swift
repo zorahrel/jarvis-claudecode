@@ -7,9 +7,15 @@ import AppKit
 /// persisted to UserDefaults) and `isRunning` (live pgrep poll) so the
 /// popover can render a simple on/off toggle.
 ///
+/// The notch app's sources live in a separate repo
+/// (https://github.com/zorahrel/agent-notch, locally ~/agent-notch).
+/// This controller only cares about the installed `.app` bundle and the
+/// process name — packaging/build is handled by ../make-app.sh and
+/// ../redeploy-notch.sh.
+///
 /// Lookup order for the helper binary:
 ///   1. `/Applications/JarvisNotch.app` — installed copy (normal case)
-///   2. `$SRCROOT/.build/debug/JarvisNotch` — dev build without packaging
+///   2. `~/agent-notch/.build/debug/agent-notch` — dev build without packaging
 /// If neither is found the toggle stays off and logs a warning.
 @MainActor
 final class NotchProcessController: ObservableObject {
@@ -85,19 +91,16 @@ final class NotchProcessController: ObservableObject {
         }
     }
 
-    /// Prefer the installed `.app` bundle; fall back to the dev build in
-    /// `.build/debug/` so developers without a real install still get a
-    /// working toggle. We don't ship the raw executable in production.
+    /// Prefer the installed `.app` bundle; fall back to the raw dev build
+    /// of agent-notch so contributors without `make-app.sh --install` still
+    /// get a working toggle. We don't ship the raw executable in production.
     private func helperAppURL() -> URL? {
         let installed = URL(fileURLWithPath: "/Applications/JarvisNotch.app")
         if FileManager.default.fileExists(atPath: installed.path) { return installed }
-        // Dev fallback: walk up from the executable to find the swift build.
-        let here = Bundle.main.bundleURL.deletingLastPathComponent()
-        let candidates = [
-            here.appendingPathComponent(".build/debug/JarvisNotch"),
-            here.deletingLastPathComponent().appendingPathComponent(".build/debug/JarvisNotch"),
-        ]
-        for c in candidates where FileManager.default.fileExists(atPath: c.path) { return c }
+        // Dev fallback: the notch sources live in a sibling repo now.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let devBuild = home.appendingPathComponent("agent-notch/.build/debug/agent-notch")
+        if FileManager.default.fileExists(atPath: devBuild.path) { return devBuild }
         return nil
     }
 
