@@ -225,8 +225,12 @@ async function main() {
       void (async () => {
         try {
           const v8 = await import("v8");
+          const os = await import("node:os");
+          const nodePath = await import("node:path");
           const ts = new Date().toISOString().replace(/[:.]/g, "-");
-          const path = `/Users/zorahrel/.claude/jarvis/logs/heap-${ts}.heapsnapshot`;
+          // Write under ~/.claude/jarvis/logs so the snapshot lives next
+          // to router logs regardless of which user runs the process.
+          const path = nodePath.join(os.homedir(), ".claude/jarvis/logs", `heap-${ts}.heapsnapshot`);
           log.warn({ rssMB: Math.round(m.rss / 1024 / 1024), path }, "Writing heap snapshot for leak forensics — event loop will pause briefly");
           v8.writeHeapSnapshot(path);
           log.warn({ path }, "Heap snapshot written — open in Chrome DevTools (Memory → Load)");

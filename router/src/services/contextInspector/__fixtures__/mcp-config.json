@@ -2,7 +2,7 @@
   "mcpServers": {
     "zenda": {
       "command": "node",
-      "args": ["/Users/zorahrel/projects/zenda/mcp-server/dist/index.js"],
+      "args": ["/Users/example/projects/zenda/mcp-server/dist/index.js"],
       "transport": "stdio"
     },
     "exa": {
@@ -42,7 +42,7 @@
     },
     "whatsapp": {
       "command": "node",
-      "args": ["/Users/zorahrel/.claude/jarvis/router/src/mcp/whatsapp-server.js"],
+      "args": ["/Users/example/.claude/jarvis/router/src/mcp/whatsapp-server.js"],
       "transport": "stdio"
     },
     "flights": {
@@ -52,7 +52,7 @@
     },
     "omega-memory": {
       "command": "node",
-      "args": ["/Users/zorahrel/.claude/jarvis/memory/mcp-server/index.js"],
+      "args": ["/Users/example/.claude/jarvis/memory/mcp-server/index.js"],
       "transport": "stdio"
     },
     "tally": {
