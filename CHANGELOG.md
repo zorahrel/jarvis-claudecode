@@ -5,6 +5,23 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
+### Fixed
+- **Notch orb 404 after #29.** `router/src/dashboard/server.ts`
+  `NOTCH_ORB_DIR` was still pointing at the deleted
+  `tray-app/Sources/JarvisNotch/Orb`. The WKWebView in JarvisNotch.app
+  loads `${backend}/notch/orb/notch.html`, so every notch launch hit a
+  literal `"orb asset not found"` response and rendered blank. Repointed
+  at `~/agent-notch/Sources/AgentNotch/Orb` (env override:
+  `AGENT_NOTCH_SRC`). Commit `762f61c`.
+
+  *Live patch (no router restart, preserves running Claude sessions)*:
+  a `tray-app/Sources/JarvisNotch/Orb` symlink to the agent-notch
+  location was created on the host. Gitignored under
+  `tray-app/Sources/JarvisNotch/` so it doesn't show up in
+  `git status` for contributors who happened to keep stale local
+  files after the #29 extraction. The symlink becomes redundant after
+  the next router restart (when the new `NOTCH_ORB_DIR` takes effect).
+
 ### Added
 - **Per-agent trust tier (`tier`) + whitelist enforcement.** New
   `AgentConfig.tier` field in `agent.yaml` (`owner|team|family|personal|client`,

@@ -99,3 +99,10 @@ mcp-needs-auth-cache*.json
 # Token files of any kind
 *token*.json
 *credential*.json
+
+# Local workaround: symlink created at runtime to bridge the router's
+# in-memory NOTCH_ORB_DIR (compiled before commit 762f61c, points to the
+# old tray-app/Sources/JarvisNotch/Orb path) to the new agent-notch
+# repo location. Goes away on the next router restart. See CHANGELOG
+# entry for 2026-05-12 for the full story.
+tray-app/Sources/JarvisNotch/
