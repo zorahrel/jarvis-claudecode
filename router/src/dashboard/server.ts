@@ -35,11 +35,21 @@ const USE_REACT = existsSync(join(DIST_DIR, "index.html"));
 
 // ---- Notch orb static serving ----
 // The Notch surfaces (native WKWebView in the tray app + dashboard iframe
-// mirror) share the same orb bundle. The canonical copy lives under the
-// tray-app source tree — the Swift WKWebView loads it directly from disk and
-// the HTTP dashboard serves it from the same path here, so there's one source
+// mirror) share the same orb bundle. The canonical copy now lives in the
+// standalone agent-notch repo (https://github.com/zorahrel/agent-notch).
+// The Swift WKWebView fetches `${backend}/notch/orb/notch.html` over HTTP
+// and the dashboard mirror serves it from the same prefix here — one source
 // of truth with no build step or duplication.
-const NOTCH_ORB_DIR = join(HOME, ".claude/jarvis/tray-app/Sources/JarvisNotch/Orb");
+//
+// History: this used to point at tray-app/Sources/JarvisNotch/Orb when the
+// notch sources lived in the monorepo. Removed in jarvis-claudecode#29 when
+// the notch app was extracted to its own repo; this path was missed in that
+// refactor and the orb returned 404 until it was fixed.
+const NOTCH_ORB_DIR = (() => {
+  const override = process.env.AGENT_NOTCH_SRC;
+  const root = override && existsSync(override) ? override : join(HOME, "agent-notch");
+  return join(root, "Sources/AgentNotch/Orb");
+})();
 const NOTCH_ORB_PREFIX = "/notch/orb/";
 
 const MIME_TYPES: Record<string, string> = {
