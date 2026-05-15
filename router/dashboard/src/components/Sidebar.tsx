@@ -12,7 +12,6 @@ const navItems: { id: string; label: string; hint: string }[] = [
   { id: 'agents',    label: 'Agents',    hint: 'Agent definitions, models, capabilities, and workspaces' },
   { id: 'tools',     label: 'Tools',     hint: 'Tools exposed to agents via MCP and built-ins' },
   { id: 'permissions', label: 'Permissions', hint: 'Tier-based tool whitelist, channel scope, audit log' },
-  { id: 'mcp-health', label: 'MCP Health', hint: 'Live MCP server status + one-click OAuth re-authorization (auto-refresh every 4h)' },
   { id: 'skills',    label: 'Skills',    hint: 'Installed Claude Code skills and plugin marketplaces' },
   { id: 'cron',      label: 'Cron',      hint: 'Scheduled jobs that trigger agents on a recurring timer' },
   { id: 'memory',    label: 'Memory',    hint: 'Memory graph — documents and conversation memory' },

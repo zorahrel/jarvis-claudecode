@@ -15,7 +15,7 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Field, Input } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
-import type { Tool, ToolsResponse, FullRoute, FullAgent } from '../api/client'
+import type { Tool, ToolsResponse, FullRoute, FullAgent, McpPendingServer } from '../api/client'
 import { ChannelIcon, ToolIcon } from '../icons'
 
 const MCP_STATUS_HELP: Record<string, string> = {
@@ -93,6 +93,41 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
   }, [])
 
   useEffect(() => { loadMcpStatus() }, [loadMcpStatus])
+
+  // Pending MCPs — servers parked in ~/.claude/mcp-pending.json that need
+  // explicit OAuth approval before being committed back to ~/.claude.json.
+  // Until approved, they don't appear in any Claude session (dashboard, Topics,
+  // a new CLI chat), and the router doesn't attach them to SDK spawns — so
+  // no unsolicited browser popups.
+  const [pendingMcps, setPendingMcps] = useState<McpPendingServer[]>([])
+  const [approving, setApproving] = useState<Set<string>>(new Set())
+
+  const loadPendingMcps = useCallback(async () => {
+    try {
+      setPendingMcps(await api.mcpPending())
+    } catch { /* silent */ }
+  }, [])
+
+  useEffect(() => { loadPendingMcps() }, [loadPendingMcps])
+
+  const approveMcp = useCallback(async (name: string) => {
+    setApproving((s) => new Set(s).add(name))
+    onToast?.(`Opening OAuth for ${name}…`, 'info')
+    try {
+      const r = await api.mcpApprovePending(name)
+      if (r.ok) {
+        onToast?.(`${name}: approved and live ✓`, 'success')
+        await Promise.all([loadPendingMcps(), loadMcpStatus(), refresh()])
+      } else {
+        onToast?.(`${name}: ${r.reason ?? 'approve failed'}`, 'error')
+      }
+    } catch (e) {
+      onToast?.(`${name}: ${e instanceof Error ? e.message : String(e)}`, 'error')
+    } finally {
+      setApproving((s) => { const n = new Set(s); n.delete(name); return n })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadPendingMcps, loadMcpStatus])
 
   // Per-server action state — disable button + show spinner while in flight.
   const [mcpActionInflight, setMcpActionInflight] = useState<Record<string, "auth" | "restart" | "logout" | null>>({})
@@ -225,7 +260,21 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
 
   const tools = (data.tools || []) as ToolDef[]
   const routeMap = data.byRoute || data.routeMap || {}
-  const categories = categorizeTools(tools)
+
+  // Treat parked-but-pending MCPs as ordinary tool cards so the user sees them
+  // alongside the live ones. They carry a `_pending` marker so the card render
+  // can swap the status badge to "pending" and the action button to
+  // "Approve & Authorize" instead of the normal Authenticate/Disconnect set.
+  const pendingPseudoTools: (ToolDef & { _pending: McpPendingServer })[] = pendingMcps.map((p) => ({
+    id: `mcp:${p.name}`,
+    type: 'mcp',
+    label: p.name,
+    mcpConfig: { type: 'stdio', command: 'npx', args: ['-y', 'mcp-remote', p.url] },
+    _pending: p,
+  } as ToolDef & { _pending: McpPendingServer }))
+
+  const augmentedTools: ToolDef[] = [...tools, ...pendingPseudoTools]
+  const categories = categorizeTools(augmentedTools)
 
   const toolRoutesCount = (toolId: string) => (routeMap[toolId] || []).length
 
@@ -298,6 +347,18 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                     </span>
                     {cat === 'MCP' && (() => {
                       const serverName = t.id.replace(/^mcp:/, '')
+                      const pendingMeta = (t as ToolDef & { _pending?: McpPendingServer })._pending
+                      if (pendingMeta) {
+                        return (
+                          <Badge
+                            tone="warn"
+                            size="xs"
+                            title={`Parked in ~/.claude/mcp-pending.json. Click "Approve & Authorize" to OAuth and commit it to ~/.claude.json — then it becomes visible to every Claude session.`}
+                          >
+                            pending
+                          </Badge>
+                        )
+                      }
                       const st = mcpStatus[serverName]
                       if (!st) return null
                       const tone = st.status === 'connected' ? 'ok' : st.status === 'auth' ? 'warn' : 'err'
@@ -335,6 +396,23 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
 
                   {cat === 'MCP' && (() => {
                     const serverName = t.id.replace(/^mcp:/, '')
+                    const pendingMeta = (t as ToolDef & { _pending?: McpPendingServer })._pending
+                    if (pendingMeta) {
+                      const isApproving = approving.has(serverName)
+                      return (
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }} onClick={e => e.stopPropagation()}>
+                          <Button
+                            size="xs"
+                            variant="primary"
+                            disabled={isApproving}
+                            onClick={() => approveMcp(serverName)}
+                            title="Open OAuth, complete in browser, then add this server to ~/.claude.json"
+                          >
+                            {isApproving ? 'Opening OAuth…' : 'Approve & Authorize'}
+                          </Button>
+                        </div>
+                      )
+                    }
                     const st = mcpStatus[serverName]
                     if (!st) return null
                     const inflight = mcpActionInflight[serverName]

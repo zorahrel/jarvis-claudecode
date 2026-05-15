@@ -873,6 +873,23 @@ export const api = {
     })
     return r.json() as Promise<McpAuthResult>
   },
+  // Pending MCPs — servers parked in ~/.claude/mcp-pending.json that need an
+  // explicit user-driven OAuth before being committed back into ~/.claude.json.
+  // See router/src/dashboard/api.ts for the two endpoints.
+  mcpPending: async (): Promise<McpPendingServer[]> => {
+    const r = await fetch('/api/mcp/pending')
+    if (!r.ok) throw new Error(`mcp-pending failed: ${r.status}`)
+    const body = (await r.json()) as { pending?: McpPendingServer[] }
+    return body.pending ?? []
+  },
+  mcpApprovePending: async (name: string): Promise<McpAuthResult> => {
+    const r = await fetch('/api/mcp/approve-pending', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    return r.json() as Promise<McpAuthResult>
+  },
 }
 
 // ── MCP Auth Manager — public types (consumed by MCPHealth tab) ─────────────
@@ -889,4 +906,10 @@ export interface McpAuthResult {
   reason?: string
   name?: string
   url?: string
+}
+
+export interface McpPendingServer {
+  name: string
+  url: string
+  transport: 'stdio+mcp-remote' | 'http' | 'sse'
 }

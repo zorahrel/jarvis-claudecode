@@ -609,6 +609,149 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, servers: listMcpStatus() });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
+  // --- MCP PENDING — list MCP servers parked outside ~/.claude.json ---
+  // `~/.claude/mcp-pending.json` holds server configs we don't want attached to
+  // SDK sessions until the user has explicitly authorized them. Without parking,
+  // mcp-remote spawned for a config-listed server with no cached OAuth token
+  // would pop an unsolicited browser tab at every health-check / session-start.
+  } else if (path === "/api/mcp/pending" && req.method === "GET") {
+    try {
+      const pendingPath = join(HOME, ".claude/mcp-pending.json");
+      let pending: Record<string, unknown> = {};
+      if (existsSync(pendingPath)) {
+        try { pending = JSON.parse(readFileSync(pendingPath, "utf-8")); } catch { /* corrupt — treat as empty */ }
+      }
+      const list = Object.entries(pending).map(([name, cfg]) => {
+        const c = cfg as { type?: string; url?: string; command?: string; args?: string[] };
+        const url = c.url ?? (Array.isArray(c.args) ? (c.args.find(a => /^https?:\/\//.test(a)) ?? "") : "");
+        const transport = c.type === "http" || c.type === "sse" ? c.type : "stdio+mcp-remote";
+        return { name, url, transport };
+      });
+      json(req, res, { pending: list });
+    } catch (e: any) { json(req, res, { error: e.message, pending: [] }, 200); }
+
+  // --- MCP APPROVE-PENDING — authorize a parked server and commit it ---
+  // Body: { name }. Flow:
+  //   1. Resolve the parked config from ~/.claude/mcp-pending.json.
+  //   2. Spawn `npx -y mcp-remote URL` directly (NOT via Claude Code) so the
+  //      OAuth tab only opens once, on user demand. Watch ~/.mcp-auth/ for a
+  //      fresh tokens.json.
+  //   3. On token: kill mcp-remote, move config pending → ~/.claude.json,
+  //      remove from pending, refresh mcp-status cache.
+  //   4. On 3-minute timeout: leave parked, return reason. Caller can retry.
+  } else if (path === "/api/mcp/approve-pending" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { error: "missing name" }, 400);
+      const name = body.name;
+      const pendingPath = join(HOME, ".claude/mcp-pending.json");
+      const configPath = join(HOME, ".claude.json");
+
+      if (!existsSync(pendingPath)) return json(req, res, { error: "no pending file" }, 404);
+      const pending = JSON.parse(readFileSync(pendingPath, "utf-8")) as Record<string, unknown>;
+      const serverCfg = pending[name] as { type?: string; url?: string; command?: string; args?: string[] } | undefined;
+      if (!serverCfg) return json(req, res, { error: `not in pending: ${name}` }, 404);
+
+      const url = serverCfg.url ?? (Array.isArray(serverCfg.args) ? serverCfg.args.find(a => /^https?:\/\//.test(a)) : undefined);
+      if (!url) return json(req, res, { error: `no URL found in pending config for ${name}` }, 400);
+
+      const { spawn } = await import("child_process");
+      const start = Date.now();
+      const authRoot = join(HOME, ".mcp-auth");
+
+      // Snapshot existing tokens.json mtimes so we can detect a fresh write.
+      const baselineMtimes = new Map<string, number>();
+      try {
+        for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+          for (const f of readdirSync(join(authRoot, verDir))) {
+            if (f.endsWith("_tokens.json")) {
+              try { baselineMtimes.set(`${verDir}/${f}`, statSync(join(authRoot, verDir, f)).mtimeMs); } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const child = spawn("npx", ["-y", "mcp-remote", url], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+      });
+      let stderrBuf = "";
+      child.stdout?.on("data", () => { /* drain */ });
+      child.stderr?.on("data", b => { stderrBuf += b.toString("utf8"); });
+
+      const TIMEOUT_MS = 180_000;
+      // Helper: scan ~/.mcp-auth/ for any tokens.json that's newer than baseline.
+      const findFreshToken = (): boolean => {
+        try {
+          for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+            for (const f of readdirSync(join(authRoot, verDir))) {
+              if (!f.endsWith("_tokens.json")) continue;
+              const key = `${verDir}/${f}`;
+              const mtime = statSync(join(authRoot, verDir, f)).mtimeMs;
+              const baseline = baselineMtimes.get(key);
+              if (baseline === undefined || mtime > baseline) return true;
+            }
+          }
+        } catch { /* ignore */ }
+        return false;
+      };
+      const tokenAppeared = await new Promise<boolean>((resolve) => {
+        const deadline = Date.now() + TIMEOUT_MS;
+        const interval = setInterval(() => {
+          if (Date.now() > deadline) { clearInterval(interval); resolve(false); return; }
+          if (findFreshToken()) { clearInterval(interval); resolve(true); }
+        }, 1000);
+        // Race-safe close handler: mcp-remote writes tokens.json THEN exits.
+        // The polling interval may not have ticked in the few ms between the
+        // write and the exit. Re-check the filesystem on close before deciding
+        // "no token" — only resolve false if the check still misses it.
+        child.on("close", () => {
+          clearInterval(interval);
+          // Small delay to let the FS flush after the child terminates.
+          setTimeout(() => resolve(findFreshToken()), 200);
+        });
+      });
+
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      try { child.kill("SIGKILL"); } catch { /* ignore */ }
+
+      if (!tokenAppeared) {
+        audit({
+          event: "mcp.approve-pending", actor: "dashboard", target: name,
+          result: "error",
+          reason: stderrBuf.trim().split("\n").pop() || "timeout",
+          details: { durationMs: Date.now() - start },
+        });
+        return json(req, res, {
+          ok: false,
+          reason: stderrBuf.trim().split("\n").pop() || "OAuth not completed (timeout)",
+          name,
+          durationMs: Date.now() - start,
+        });
+      }
+
+      // Token written — commit pending → ~/.claude.json.
+      const conf = JSON.parse(readFileSync(configPath, "utf-8")) as { mcpServers?: Record<string, unknown> };
+      conf.mcpServers = conf.mcpServers ?? {};
+      conf.mcpServers[name] = serverCfg;
+      writeFileSync(configPath, JSON.stringify(conf, null, 2) + "\n");
+
+      // Remove from pending.
+      delete pending[name];
+      writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+
+      // Refresh router's mcp-status cache so subsequent SDK spawns see it as connected.
+      const { refreshMcpStatus } = await import("../services/mcp-status");
+      await refreshMcpStatus();
+
+      audit({
+        event: "mcp.approve-pending", actor: "dashboard", target: name,
+        result: "ok",
+        details: { durationMs: Date.now() - start, url },
+      });
+      json(req, res, { ok: true, name, url, durationMs: Date.now() - start });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
   // --- MCP AUTHENTICATE — spawn one-shot OAuth flow ---
   // The user clicks "Authenticate" on a needs-auth MCP. We launch the auth
   // flow directly (one popup, not N parallel ones), wait for it to finish,
