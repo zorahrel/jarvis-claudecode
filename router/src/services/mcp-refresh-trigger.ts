@@ -96,10 +96,46 @@ async function pingMcpRemote(url: string, name: string): Promise<void> {
   });
 }
 
+/**
+ * Resolve the `~/.mcp-auth/mcp-remote-<ver>/<hash>_tokens.json` path for a
+ * given upstream URL. Returns the freshest matching file (largest mtime) if
+ * multiple versions exist on disk.
+ */
+function findTokensFile(url: string): { path: string; mtimeMs: number } | null {
+  try {
+    const { createHash } = require("crypto") as typeof import("crypto");
+    const fs = require("fs") as typeof import("fs");
+    const path = require("path") as typeof import("path");
+    const HOME = process.env.HOME ?? "";
+    const authRoot = path.join(HOME, ".mcp-auth");
+    if (!fs.existsSync(authRoot)) return null;
+    const hash = createHash("md5").update(url).digest("hex");
+    let best: { path: string; mtimeMs: number } | null = null;
+    for (const verDir of fs.readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
+      const f = path.join(authRoot, verDir, `${hash}_tokens.json`);
+      if (fs.existsSync(f)) {
+        const mtime = fs.statSync(f).mtimeMs;
+        if (!best || mtime > best.mtimeMs) best = { path: f, mtimeMs: mtime };
+      }
+    }
+    return best;
+  } catch { return null; }
+}
+
+/**
+ * How recently the token must have been written for us to consider it "warm"
+ * and skip the ping. mcp-remote rewrites tokens.json on every refresh, so a
+ * recent mtime means the server has been used or refreshed lately and the
+ * underlying refresh_token is still valid. Conservative: 24h. With a typical
+ * access-token TTL of 1h, mcp-remote refreshes on the next 401 from a real
+ * tool call long before we'd want to nudge it.
+ */
+const FRESH_TOKEN_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
 async function tick(): Promise<void> {
   const servers = listMcpStatus();
-  // Only ping stdio + mcp-remote URL. type:http is Claude Code native — refresh
-  // happens on natural use, we don't want to spawn `claude --print` for ping.
+  // Only consider stdio + mcp-remote URL. type:http is Claude Code native —
+  // refresh happens on natural use, we don't want to spawn `claude --print`.
   const stdioRemote = servers
     .map((s) => {
       const m = s.target.match(/mcp-remote\s+(https?:\/\/\S+)/);
@@ -112,15 +148,40 @@ async function tick(): Promise<void> {
     return;
   }
 
-  log.info({ count: stdioRemote.length }, "[mcp-refresh-trigger] pinging stdio MCP servers for proactive refresh");
+  // Filter out servers whose tokens.json was touched recently. Pinging a server
+  // with a stale access_token can pop an unsolicited OAuth tab — mcp-remote
+  // 0.1.x opens the browser **before** attempting the refresh handshake when
+  // it sees an expired access_token, even if the refresh_token is valid. Real
+  // tool calls go through the refresh path without that race; the proactive
+  // ping was the only code path triggering the popup. So we only ping servers
+  // whose token file is older than 24h (truly idle), which is rare enough that
+  // a popup, if it happens, is justified.
+  const now = Date.now();
+  const stale: { name: string; url: string }[] = [];
+  const fresh: { name: string; url: string; ageMs: number }[] = [];
+  for (const s of stdioRemote) {
+    const tok = findTokensFile(s.url);
+    if (!tok) { stale.push(s); continue; }
+    const ageMs = now - tok.mtimeMs;
+    if (ageMs > FRESH_TOKEN_THRESHOLD_MS) stale.push(s);
+    else fresh.push({ ...s, ageMs });
+  }
+  log.debug({ fresh: fresh.length, stale: stale.length }, "[mcp-refresh-trigger] freshness scan");
+
+  if (stale.length === 0) {
+    log.debug("[mcp-refresh-trigger] all token files fresh — nothing to ping");
+    return;
+  }
+
+  log.info({ count: stale.length, names: stale.map(s => s.name) }, "[mcp-refresh-trigger] pinging stale stdio MCP servers");
 
   // Run serially to avoid spawning N npx processes simultaneously. Each is
   // ≤ 10s. With ≤5 stdio MCPs this is ≤50s per cycle, fine for a 4h cadence.
-  for (const { name, url } of stdioRemote) {
+  for (const { name, url } of stale) {
     await pingMcpRemote(url, name);
   }
 
-  log.info({ count: stdioRemote.length }, "[mcp-refresh-trigger] cycle complete");
+  log.info({ count: stale.length }, "[mcp-refresh-trigger] cycle complete");
 }
 
 export function startMcpRefreshTrigger(): void {
