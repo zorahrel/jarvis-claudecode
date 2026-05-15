@@ -1099,46 +1099,57 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         return json(req, res, { ok: false, reason: `no config found for ${name} in ~/.claude.json`, durationMs: Date.now() - start, name }, 400);
       }
 
-      const sdk = await import("@anthropic-ai/claude-agent-sdk");
-      const queryFn = (sdk as unknown as { query: (opts: unknown) => unknown }).query;
-
-      let releaseInput!: () => void;
-      const inputHeld = new Promise<void>((r) => { releaseInput = r; });
-      async function* keepAlive() { await inputHeld; }
-
-      type SdkQueryHandle = AsyncIterable<unknown> & {
-        mcpClearAuth(name: string): Promise<unknown>;
-        close?: () => void;
-      };
-
-      const q = queryFn({
-        prompt: keepAlive(),
-        options: {
-          cwd: HOME,
-          permissionMode: "bypassPermissions",
-          allowDangerouslySkipPermissions: true,
-          strictMcpConfig: true,
-          settingSources: [],
-          mcpServers: { [name]: serverCfg },
-        },
-      }) as SdkQueryHandle;
-
-      const drain = (async () => { try { for await (const _ of q) { /* drain */ } } catch { /* ignore */ } })();
-      // Brief grace for SDK init.
-      await new Promise(r => setTimeout(r, 1500));
-
+      // SDK's mcpClearAuth only handles type:http / type:sse (auth lives in
+      // the macOS keychain under "Claude Code-credentials"). For stdio servers
+      // — including our stdio+npx-mcp-remote setup — the SDK throws
+      // "Cannot clear auth for server type \"stdio\"". Detect upfront and
+      // skip the SDK roundtrip entirely; the manual cleanup below (the
+      // "Belt & braces" block) already knows how to wipe ~/.mcp-auth/.
+      const isStdio = (serverCfg as { type?: string }).type === "stdio";
       let cleared = false;
       let reason: string | undefined;
-      try {
-        await q.mcpClearAuth(name);
-        cleared = true;
-      } catch (err: any) {
-        reason = `mcpClearAuth failed: ${err?.message ?? err}`;
-      }
+      let filesRemoved = 0;
 
-      releaseInput();
-      q.close?.();
-      await drain.catch(() => undefined);
+      if (!isStdio) {
+        const sdk = await import("@anthropic-ai/claude-agent-sdk");
+        const queryFn = (sdk as unknown as { query: (opts: unknown) => unknown }).query;
+
+        let releaseInput!: () => void;
+        const inputHeld = new Promise<void>((r) => { releaseInput = r; });
+        async function* keepAlive() { await inputHeld; }
+
+        type SdkQueryHandle = AsyncIterable<unknown> & {
+          mcpClearAuth(name: string): Promise<unknown>;
+          close?: () => void;
+        };
+
+        const q = queryFn({
+          prompt: keepAlive(),
+          options: {
+            cwd: HOME,
+            permissionMode: "bypassPermissions",
+            allowDangerouslySkipPermissions: true,
+            strictMcpConfig: true,
+            settingSources: [],
+            mcpServers: { [name]: serverCfg },
+          },
+        }) as SdkQueryHandle;
+
+        const drain = (async () => { try { for await (const _ of q) { /* drain */ } } catch { /* ignore */ } })();
+        // Brief grace for SDK init.
+        await new Promise(r => setTimeout(r, 1500));
+
+        try {
+          await q.mcpClearAuth(name);
+          cleared = true;
+        } catch (err: any) {
+          reason = `mcpClearAuth failed: ${err?.message ?? err}`;
+        }
+
+        releaseInput();
+        q.close?.();
+        await drain.catch(() => undefined);
+      }
 
       // Belt & braces: also wipe ~/.claude/mcp-needs-auth-cache.json entry
       // AND any ~/.mcp-auth/mcp-remote-*/ tokens for stdio+mcp-remote
@@ -1156,7 +1167,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
 
       // For stdio+mcp-remote servers: remove the matching tokens.json by
       // reading client_info.json server_url and matching against the
-      // configured target URL.
+      // configured target URL. We also use md5(url) directly as a fallback
+      // — mcp-remote names every artifact `<md5(url)>_<kind>` so we don't
+      // strictly need the client_info round-trip, but keep it as primary
+      // signal for safety.
       try {
         const cfgUrl = (serverCfg as { url?: string }).url
           ?? (() => {
@@ -1167,25 +1181,50 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         if (cfgUrl) {
           const authRoot = join(HOME, ".mcp-auth");
           if (existsSync(authRoot)) {
+            // Also compute the deterministic hash for this URL so we can wipe
+            // even when client_info.json was already removed in a prior run.
+            const { createHash } = await import("crypto");
+            const targetHash = createHash("md5").update(cfgUrl).digest("hex");
+
             for (const verDir of readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-"))) {
               const dir = join(authRoot, verDir);
+              const hashesToWipe = new Set<string>();
+
+              // (a) Match via client_info.json server_url metadata.
               for (const f of readdirSync(dir)) {
                 if (!f.endsWith("_client_info.json")) continue;
                 try {
                   const ci = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { server_url?: string };
                   if (ci.server_url && (ci.server_url === cfgUrl || cfgUrl.startsWith(ci.server_url) || ci.server_url.startsWith(cfgUrl.split("?")[0]!))) {
-                    const hash = f.replace("_client_info.json", "");
-                    for (const ext of ["client_info.json", "tokens.json", "code_verifier.txt"]) {
-                      const p = join(dir, `${hash}_${ext}`);
-                      if (existsSync(p)) { try { rmSync(p, { force: true }); } catch { /* ignore */ } }
-                    }
+                    hashesToWipe.add(f.replace("_client_info.json", ""));
                   }
                 } catch { /* skip */ }
+              }
+              // (b) Fallback: deterministic md5 of the configured URL.
+              hashesToWipe.add(targetHash);
+
+              for (const hash of hashesToWipe) {
+                for (const ext of ["client_info.json", "tokens.json", "code_verifier.txt", "lock.json"]) {
+                  const p = join(dir, `${hash}_${ext}`);
+                  if (existsSync(p)) {
+                    try { rmSync(p, { force: true }); filesRemoved++; } catch { /* ignore */ }
+                  }
+                }
               }
             }
           }
         }
       } catch { /* best-effort */ }
+
+      // For stdio servers we never called mcpClearAuth — success criterion
+      // is "we wiped at least one credential file" (or nothing was there
+      // to wipe, in which case the user is already disconnected).
+      if (isStdio) {
+        cleared = true;
+        reason = filesRemoved === 0
+          ? "no cached credentials to remove (already disconnected)"
+          : undefined;
+      }
 
       await refreshMcpStatus();
       // Hot-reconnect live sessions so they pick up the now-revoked
@@ -1198,7 +1237,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         event: "mcp.disconnect", actor: "dashboard", target: name,
         result: cleared ? "ok" : "error",
         reason,
-        details: { durationMs: Date.now() - start, reconnect: reLogout },
+        details: { durationMs: Date.now() - start, reconnect: reLogout, transport: isStdio ? "stdio" : "http/sse", filesRemoved },
       });
       return json(req, res, {
         ok: cleared,
@@ -1206,6 +1245,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
         durationMs: Date.now() - start,
         name,
         reconnect: reLogout,
+        filesRemoved,
       });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
