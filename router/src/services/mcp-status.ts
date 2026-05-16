@@ -83,10 +83,79 @@ function parseClaudeMcpList(out: string): McpServerStatus[] {
     .filter((x): x is McpServerStatus => x !== null);
 }
 
+/**
+ * Self-heal: stdio+npx-mcp-remote servers that sit in ~/.claude.json without
+ * a matching tokens.json on disk cause an unsolicited OAuth popup every time
+ * ANY Claude process attaches them — `claude mcp list`, a router-spawned SDK
+ * session, the Claude.app desktop GUI, even a one-shot CLI invocation. The
+ * popup loops because the server is permanently visible to the next attacher.
+ *
+ * We pre-scan the user config: any stdio+mcp-remote entry whose
+ * ~/.mcp-auth/mcp-remote-*/<md5(url)>_tokens.json is missing gets moved to
+ * ~/.claude/mcp-pending.json before we ever shell out `claude mcp list`. The
+ * dashboard /tools Pending panel then surfaces it with an Approve button —
+ * the controlled re-auth flow stays the only path that opens a browser tab.
+ */
+async function rescueTokenlessServers(): Promise<string[]> {
+  try {
+    const { readFileSync, writeFileSync, existsSync, readdirSync } = await import("fs");
+    const { join } = await import("path");
+    const { createHash } = await import("crypto");
+    const HOME = process.env.HOME ?? "";
+    const confPath = join(HOME, ".claude.json");
+    const pendPath = join(HOME, ".claude/mcp-pending.json");
+    const authRoot = join(HOME, ".mcp-auth");
+    if (!existsSync(confPath)) return [];
+
+    const conf = JSON.parse(readFileSync(confPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+    const mcps = conf.mcpServers ?? {};
+    const versionDirs = existsSync(authRoot)
+      ? readdirSync(authRoot).filter(n => n.startsWith("mcp-remote-")).map(n => join(authRoot, n))
+      : [];
+
+    const moved: string[] = [];
+    for (const [name, raw] of Object.entries(mcps)) {
+      const cfg = raw as { type?: string; command?: string; args?: string[]; url?: string };
+      if (cfg.type !== "stdio") continue;
+      const url = Array.isArray(cfg.args) ? cfg.args.find(a => /^https?:\/\//.test(a)) : undefined;
+      if (!url) continue;
+      // Heuristic: only rescue mcp-remote shells, leave other stdio MCPs alone.
+      if (!cfg.args?.some(a => a === "mcp-remote")) continue;
+      const hash = createHash("md5").update(url).digest("hex");
+      const hasTokens = versionDirs.some(d => existsSync(join(d, `${hash}_tokens.json`)));
+      if (hasTokens) continue;
+      // No token on disk for this stdio+mcp-remote — quarantine it.
+      moved.push(name);
+    }
+
+    if (moved.length === 0) return [];
+
+    const pend = existsSync(pendPath) ? JSON.parse(readFileSync(pendPath, "utf8")) as Record<string, unknown> : {};
+    for (const name of moved) {
+      pend[name] = mcps[name];
+      delete mcps[name];
+    }
+    conf.mcpServers = mcps;
+    writeFileSync(confPath, JSON.stringify(conf, null, 2) + "\n");
+    writeFileSync(pendPath, JSON.stringify(pend, null, 2));
+    log.warn({ moved }, "mcp-status: rescued tokenless stdio+mcp-remote servers (~/.claude.json → mcp-pending.json) to prevent popup loops");
+    return moved;
+  } catch (err) {
+    log.warn({ err: String(err) }, "mcp-status: rescueTokenlessServers failed");
+    return [];
+  }
+}
+
 export async function refreshMcpStatus(): Promise<void> {
   if (refreshInflight) return refreshInflight;
   refreshInflight = (async () => {
     try {
+      // Self-heal BEFORE shelling out `claude mcp list`. The CLI itself runs
+      // a connection test against every configured stdio MCP, and mcp-remote
+      // without a cached token pops a browser tab on first run. Moving the
+      // offending entries to pending eliminates the popup source.
+      await rescueTokenlessServers();
+
       const cli = resolveCliPath();
       const stdout = await new Promise<string>((resolve, reject) => {
         execFile(cli, ["mcp", "list"], { timeout: CLI_TIMEOUT_MS }, (err, out, errBuf) => {
