@@ -17,7 +17,7 @@ import { ensureHooksInstalled } from "./services/localSessions";
 import { startMcpStatusWatcher } from "./services/mcp-status";
 import { cleanupOrphanMcpLocks } from "./services/mcp-auth-cleanup";
 import { startMcpHealthMonitor } from "./services/mcp-health-monitor";
-import { startMcpRefreshTrigger } from "./services/mcp-refresh-trigger";
+import { startMcpTokenRefresher } from "./services/mcp-token-refresher";
 
 const log = logger.child({ module: "main" });
 
@@ -270,28 +270,25 @@ async function main() {
   // MCP Auth Manager — two background services that together keep OAuth
   // credentials alive without user intervention:
   //
-  //   1. Refresh trigger: every 4h, send a lightweight `initialize` ping to
-  //      every stdio + npx mcp-remote MCP. mcp-remote handles 401 by hitting
-  //      the OAuth refresh endpoint with the cached refresh_token, so tokens
-  //      whose providers support refresh tokens (Google, Vercel, Cloudflare,
-  //      Supabase, ...) rotate transparently. Standard RFC 6749 §6 flow,
-  //      nothing reinvented — we just trigger the path that mcp-remote
-  //      already implements but only fires on demand.
+  //   1. Token refresher (HTTP-only): every 5 min, scan each stdio+mcp-remote
+  //      server in ~/.claude.json. For any tokens.json within 10 min of
+  //      expiry, discover the OAuth token_endpoint (RFC 8414 / MCP PRM) and
+  //      POST grant_type=refresh_token DIRECTLY via fetch. NEVER spawns
+  //      mcp-remote. Atomically rewrites tokens.json. mcp-remote children
+  //      then always see a fresh access_token and never open a browser tab.
   //
   //   2. Health monitor: every 6h, emit notch alert if any MCP still ends up
-  //      in needs-auth / failed (e.g. providers without refresh tokens like
-  //      Tally/Twenty whose access_token was the only credential). Visibility
-  //      is the cheapest reliability tool — if we know within 6h that
-  //      something needs a click, we can act.
+  //      in needs-auth / failed (e.g. revoked refresh token, provider
+  //      changed). Visibility is the cheapest reliability tool.
   //
-  // NOT included by design:
-  //   - Auth-state backup: REMOVED 2026-05-11 — it was duct-tape for
-  //     "what if mcp-remote bumps version and tokens look lost". The actual
-  //     fix is to pin the mcp-remote version in the MCP server config so the
-  //     auth directory path stays stable. Backup just added another file
-  //     with secrets to worry about.
+  // Superseded:
+  //   - mcp-refresh-trigger.ts (4h `npx mcp-remote` ping). The ping itself
+  //     popped a browser tab whenever the access_token had drifted into
+  //     expiry — mcp-remote 0.1.x opens OAuth BEFORE attempting refresh.
+  //     The HTTP-only refresher above eliminates the spawn entirely.
+  //   - Auth-state backup (removed 2026-05-11) — duct-tape for path drift.
   startMcpHealthMonitor();
-  startMcpRefreshTrigger();
+  startMcpTokenRefresher();
 
   // Start dashboard
   startDashboard(3340);
