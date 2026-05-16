@@ -46,10 +46,17 @@ const CONFIG_PATH = join(HOME, ".claude.json");
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 /** Initial delay after boot — give the router time to settle. */
 const INITIAL_DELAY_MS = 30 * 1000;
-/** Refresh when the token is within this many seconds of expiry. 10 min
- *  buffer means even a 1h TTL gets refreshed 50 min in, well before any
- *  spawn could see it as expired. */
-const REFRESH_BUFFER_SEC = 10 * 60;
+/** Refresh when the token is within this many seconds of expiry. We use
+ *  25 min as the buffer for two reasons:
+ *    1. Even for short-TTL providers (Vercel: 1h), it gives us at least 25
+ *       min of headroom — mcp-remote children attached after the refresh
+ *       always see a token valid for >25 min and never trigger their own
+ *       refresh path (which would race with ours and burn the refresh_token).
+ *    2. Some providers (Tally) rotate refresh_tokens on every use. If our
+ *       refresh and mcp-remote's refresh fire near-simultaneously, the
+ *       second one gets invalid_grant. The wide buffer makes the window
+ *       where mcp-remote would care about the access_token essentially zero. */
+const REFRESH_BUFFER_SEC = 25 * 60;
 /** HTTP request deadline. Token endpoints respond in <1s normally. */
 const HTTP_TIMEOUT_MS = 10_000;
 
@@ -166,7 +173,15 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Re
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
+    // Some providers (Tally → behind Cloudflare WAF) reject requests that
+    // don't include a recognizable User-Agent (Cloudflare error 1010). We
+    // present as the same mcp-remote version that issued the tokens so the
+    // request blends in with traffic the provider already accepts.
+    const headers: Record<string, string> = {
+      "User-Agent": "mcp-remote/0.1.37",
+      ...((init.headers as Record<string, string>) ?? {}),
+    };
+    return await fetch(url, { ...init, headers, signal: ctrl.signal });
   } finally {
     clearTimeout(timer);
   }
