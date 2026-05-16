@@ -159,17 +159,33 @@ async function tick(): Promise<void> {
   const now = Date.now();
   const stale: { name: string; url: string }[] = [];
   const fresh: { name: string; url: string; ageMs: number }[] = [];
+  const noToken: string[] = [];
   for (const s of stdioRemote) {
     const tok = findTokensFile(s.url);
-    if (!tok) { stale.push(s); continue; }
+    if (!tok) {
+      // No tokens.json on disk — server was never authorized, or the token
+      // was wiped (manual Disconnect, mcp-auth-cleanup pass, refresh failure).
+      // Pinging here would spawn mcp-remote with no cached auth → it would
+      // open an unsolicited browser tab as its first-run OAuth onboarding.
+      // SKIP. Let the user re-authorize on demand through the dashboard.
+      noToken.push(s.name);
+      continue;
+    }
     const ageMs = now - tok.mtimeMs;
     if (ageMs > FRESH_TOKEN_THRESHOLD_MS) stale.push(s);
     else fresh.push({ ...s, ageMs });
   }
-  log.debug({ fresh: fresh.length, stale: stale.length }, "[mcp-refresh-trigger] freshness scan");
+  log.debug({ fresh: fresh.length, stale: stale.length, noToken: noToken.length }, "[mcp-refresh-trigger] freshness scan");
+
+  if (noToken.length > 0) {
+    log.warn(
+      { names: noToken },
+      "[mcp-refresh-trigger] servers in config but missing tokens.json — skipping (would trigger popup). Re-authorize from dashboard /tools.",
+    );
+  }
 
   if (stale.length === 0) {
-    log.debug("[mcp-refresh-trigger] all token files fresh — nothing to ping");
+    log.debug("[mcp-refresh-trigger] no stale tokens to ping");
     return;
   }
 
