@@ -90,9 +90,10 @@ function parseClaudeMcpList(out: string): McpServerStatus[] {
  * session, the Claude.app desktop GUI, even a one-shot CLI invocation. The
  * popup loops because the server is permanently visible to the next attacher.
  *
- * We pre-scan the user config: any stdio+mcp-remote entry whose
- * ~/.mcp-auth/mcp-remote-*/<md5(url)>_tokens.json is missing gets moved to
- * ~/.claude/mcp-pending.json before we ever shell out `claude mcp list`. The
+ * We pre-scan the user config: any stdio+mcp-remote entry whose token file
+ * under `~/.mcp-auth/mcp-remote-VER/HASH_tokens.json` (HASH = md5 of URL)
+ * is missing gets moved to `~/.claude/mcp-pending.json` before we ever
+ * shell out `claude mcp list`. The
  * dashboard /tools Pending panel then surfaces it with an Approve button —
  * the controlled re-auth flow stays the only path that opens a browser tab.
  */
