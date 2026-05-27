@@ -1328,6 +1328,19 @@ async function askClaudeInternal(
   let initTimeoutRetries = 0;
   const MAX_INIT_TIMEOUT_RETRIES = 1;
 
+  // Per-model transient-error retry budget. Anthropic occasionally returns
+  // 529/overloaded/SDK_ERROR_unknown — those are recoverable on the same model
+  // with backoff, no need to fall back to a weaker model.
+  const TRANSIENT_BACKOFF_MS = [2000, 5000, 15000];
+  const isTransientSdkError = (m: string): boolean => {
+    if (!m) return false;
+    if (m === "SDK_ERROR_unknown" || m === "SDK_ERROR_api_error") return true;
+    if (/\b(529|500|502|503|504)\b/.test(m)) return true;
+    if (/overloaded|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed/i.test(m)) return true;
+    return false;
+  };
+  const transientRetries = new Map<number, number>();
+
   const inactivityTimeoutMs = (agent.inactivityTimeoutMin ?? 15) * 60 * 1000;
 
   for (let i = 0; i < models.length; i++) {
@@ -1390,12 +1403,28 @@ async function askClaudeInternal(
         sessions.delete(key);
         continue;
       }
+      // Transient upstream errors (Anthropic overload, 5xx, network blips):
+      // retry the SAME model with exponential backoff before falling back.
+      if (isTransientSdkError(errMsg)) {
+        const attempt = transientRetries.get(i) ?? 0;
+        if (attempt < TRANSIENT_BACKOFF_MS.length) {
+          const delay = TRANSIENT_BACKOFF_MS[attempt];
+          transientRetries.set(i, attempt + 1);
+          log.warn({ key, model, attempt: attempt + 1, delay, err: errMsg.slice(0, 200) }, "Transient SDK error — retrying same model after backoff");
+          const s = sessions.get(key);
+          if (s) { killSession(s); sessions.delete(key); }
+          await new Promise(r => setTimeout(r, delay));
+          i--; // retry same model index
+          continue;
+        }
+        log.warn({ key, model }, "Transient retries exhausted on this model — trying fallback");
+      }
       log.error({ err: errMsg.slice(0, 200), key, model }, "Message failed (sdk)");
       if (i < models.length - 1) { sessions.delete(key); continue; }
-      throw new Error("Sorry, all models are currently unavailable. Please try again later.");
+      throw new Error("ALL_MODELS_EXHAUSTED");
     }
   }
-  throw new Error("Sorry, all models are currently unavailable. Please try again later.");
+  throw new Error("ALL_MODELS_EXHAUSTED");
 }
 
 async function doSendWithTimeout(
