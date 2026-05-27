@@ -13,6 +13,11 @@ const HOME_ENV_PATH = `${homedir()}/.nvm/versions/node/v25.5.0/bin:/opt/homebrew
 
 /** 3 services always present (no config required). */
 export function getCoreServices(): ServiceDef[] {
+  // When MOONDREAM_API_KEY is set we route vision-local to Moondream Cloud
+  // (Moondream 3, sub-second). The local Station daemon is then redundant —
+  // and its venv is fragile (depends on python@3.12 which Homebrew rotates).
+  // Skip supervising it in that case so launchd doesn't crash-loop.
+  const useCloudVision = !!process.env.MOONDREAM_API_KEY;
   return [
     {
       name: "Router",
@@ -52,10 +57,10 @@ export function getCoreServices(): ServiceDef[] {
         logName: "omega",
       },
     },
-    {
+    ...(useCloudVision ? [] : [{
       // Local vision (Moondream Station, MLX-native on Apple Silicon).
-      // First boot downloads the Moondream 3 Preview MLX backend (~4-8 GB)
-      // and may take a few minutes; subsequent boots are seconds.
+      // Only supervised when MOONDREAM_API_KEY is NOT set. With the key,
+      // vision-local.ts auto-routes to api.moondream.ai (M3, ~0.7s).
       name: "Moondream",
       port: 2020,
       healthUrl: "http://localhost:2020/health",
@@ -65,7 +70,7 @@ export function getCoreServices(): ServiceDef[] {
         cwd: ROUTER_DIR,
         logName: "moondream",
       },
-    },
+    }]),
   ];
 }
 
