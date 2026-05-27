@@ -147,6 +147,13 @@ export class WhatsAppConnector implements Connector {
   private msgStore = new Map<string, proto.IMessage>();
   /** Track message IDs sent by us to avoid self-loop */
   private sentMsgIds = new Set<string>();
+  /**
+   * Periodic `unavailable` ping that keeps push notifications flowing to the
+   * primary phone. WhatsApp suppresses mobile pushes whenever it thinks a
+   * linked device is "active" — Baileys wiki recommends refreshing every few
+   * minutes. Cleared on disconnect/stop.
+   */
+  private presenceRefreshTimer: NodeJS.Timeout | null = null;
 
   /** Phone number requested for next pairing-code start (E.164 digits, no +) */
   private pendingPairingPhone: string | null = null;
@@ -214,6 +221,7 @@ export class WhatsAppConnector implements Connector {
       printQRInTerminal: false,
       browser: Browsers.ubuntu("Chrome"),
       logger: silentLogger,
+      markOnlineOnConnect: false,
       msgRetryCounterCache,
       userDevicesCache,
       getMessage: async (key) => {
@@ -259,6 +267,7 @@ export class WhatsAppConnector implements Connector {
         }
       }
       if (connection === "close") {
+        if (this.presenceRefreshTimer) { clearInterval(this.presenceRefreshTimer); this.presenceRefreshTimer = null; }
         const code = (lastDisconnect?.error as any)?.output?.statusCode;
         if (code !== DisconnectReason.loggedOut) {
           log.warn({ code }, "WhatsApp disconnected, reconnecting...");
@@ -273,6 +282,14 @@ export class WhatsAppConnector implements Connector {
         this.myLidBase = (this.sock?.user as any)?.lid?.split(":")[0]?.split("@")[0] || "";
         log.info({ selfJid: this.selfJid, myLidBase: this.myLidBase }, "WhatsApp connected");
         this.setStatus({ status: "connected", jid: this.selfJid, qr: undefined, pairingCode: undefined, error: undefined });
+        // Keep mobile push notifications flowing: announce ourselves as
+        // unavailable globally and refresh periodically. Without this, WA
+        // server thinks a linked device is active and suppresses pushes.
+        this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
+        if (this.presenceRefreshTimer) clearInterval(this.presenceRefreshTimer);
+        this.presenceRefreshTimer = setInterval(() => {
+          this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
+        }, 5 * 60 * 1000);
         // Fetch group names for all configured group routes
         this.cacheGroupNames();
       }
@@ -729,7 +746,12 @@ export class WhatsAppConnector implements Connector {
         const iv = setInterval(() => {
           this.sock?.sendPresenceUpdate("composing", replyJid).catch(() => {});
         }, 2500);
-        return () => { clearInterval(iv); this.sock?.sendPresenceUpdate("paused", replyJid).catch(() => {}); };
+        return () => {
+          clearInterval(iv);
+          this.sock?.sendPresenceUpdate("paused", replyJid).catch(() => {});
+          // Restore global "unavailable" so the primary phone gets pushes again.
+          this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
+        };
       },
       react: async (emoji: string) => {
         try {
@@ -745,6 +767,7 @@ export class WhatsAppConnector implements Connector {
   }
 
   async stop(): Promise<void> {
+    if (this.presenceRefreshTimer) { clearInterval(this.presenceRefreshTimer); this.presenceRefreshTimer = null; }
     this.sock?.end(undefined);
     this.sock = null;
     log.info("WhatsApp disconnected");
