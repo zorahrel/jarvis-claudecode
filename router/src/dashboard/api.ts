@@ -2369,6 +2369,86 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { ok: true, accounts: raw.jarvis?.emailAccounts ?? [] });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
+  // --- GOOGLE (gws-mail) ACCOUNTS — OAuth status / login / logout ---
+  // Each account alias maps to a credential store at ~/.config/gws-<alias>.
+  // We shell out to the `gws-mail` wrapper itself so the OAuth client id/secret
+  // stay in one place (the wrapper) and are never duplicated here.
+  } else if (path === "/api/gws/accounts" && req.method === "GET") {
+    try {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const run = promisify(execFile);
+      const accounts = getEmailAccounts(); // email -> alias
+      const results = await Promise.all(
+        Object.entries(accounts).map(async ([email, account]) => {
+          try {
+            const { stdout } = await run("gws-mail", [account, "auth", "status"], { timeout: 15000 });
+            // gws prints a non-JSON keyring line before the JSON object — slice from first '{'.
+            const jsonStart = stdout.indexOf("{");
+            const st = jsonStart >= 0 ? JSON.parse(stdout.slice(jsonStart)) : {};
+            const authed = !!(st.has_refresh_token && st.encryption_valid);
+            return { email, account, authed, scopeCount: st.scope_count ?? 0, scopes: st.scopes ?? [] };
+          } catch {
+            return { email, account, authed: false, scopeCount: 0, scopes: [] };
+          }
+        })
+      );
+      json(req, res, { accounts: results });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  } else if (path === "/api/gws/auth-login" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const account = String(body.account || "").trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(account)) {
+        json(req, res, { error: "account must be a short lowercase alias (a-z, 0-9, dash)" }, 400); return;
+      }
+      // Map requested services -> explicit OAuth scopes so `gws auth login` runs
+      // non-interactively (no TUI scope picker that would block a headless spawn).
+      const serviceScopes: Record<string, string> = {
+        gmail: "https://www.googleapis.com/auth/gmail.modify",
+        calendar: "https://www.googleapis.com/auth/calendar",
+        drive: "https://www.googleapis.com/auth/drive",
+        docs: "https://www.googleapis.com/auth/documents",
+        sheets: "https://www.googleapis.com/auth/spreadsheets",
+      };
+      const requested: string[] = Array.isArray(body.services) && body.services.length
+        ? body.services : ["gmail", "calendar", "drive"];
+      const scopes = [
+        "openid", "email", "https://www.googleapis.com/auth/userinfo.email",
+        ...requested.map((s: string) => serviceScopes[s]).filter(Boolean),
+      ];
+      // The wrapper requires the config dir to exist; create it for new accounts.
+      const cfgDir = join(HOME, ".config", `gws-${account}`);
+      if (!existsSync(cfgDir)) mkdirSync(cfgDir, { recursive: true });
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const run = promisify(execFile);
+      log.info("[dashboard] gws auth login for %s (scopes: %s)", account, requested.join(","));
+      // Opens the browser and waits for the OAuth callback — give the user time.
+      const { stdout, stderr } = await run(
+        "gws-mail", [account, "auth", "login", "--scopes", scopes.join(",")],
+        { timeout: 240000 }
+      );
+      json(req, res, { ok: true, account, output: (stdout || stderr || "").slice(-500) });
+    } catch (e: any) {
+      json(req, res, { error: e.killed ? "login timed out — browser flow not completed" : e.message }, 500);
+    }
+
+  } else if (path === "/api/gws/logout" && req.method === "POST") {
+    if (!requireConfirm(req, res)) return;
+    try {
+      const body = await parseBody(req);
+      const account = String(body.account || "").trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(account)) { json(req, res, { error: "invalid account" }, 400); return; }
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const run = promisify(execFile);
+      await run("gws-mail", [account, "auth", "logout"], { timeout: 15000 });
+      log.info("[dashboard] gws auth logout for %s", account);
+      json(req, res, { ok: true });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
   // --- AGENTS CRUD ---
   } else if (path === "/api/agents" && req.method === "POST") {
     try {

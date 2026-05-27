@@ -189,8 +189,12 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
   const [addAccountOpen, setAddAccountOpen] = useState(false)
   const [newEmailAddr, setNewEmailAddr] = useState('')
   const [newEmailAccount, setNewEmailAccount] = useState('')
+  const [newServices, setNewServices] = useState<string[]>(['gmail', 'calendar', 'drive'])
   const [addingEmail, setAddingEmail] = useState(false)
   const [removingEmail, setRemovingEmail] = useState<string | null>(null)
+  // OAuth status per account (from `gws auth status`), keyed by alias
+  const [gwsStatus, setGwsStatus] = useState<Record<string, { authed: boolean; scopeCount: number }>>({})
+  const [authingAccount, setAuthingAccount] = useState<string | null>(null)
 
   const toast = onToast || (() => {})
 
@@ -201,11 +205,38 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
     } catch { /* silent */ }
   }, [])
 
+  const loadGwsStatus = useCallback(async () => {
+    try {
+      const r = await apiFetch<{ accounts: { account: string; authed: boolean; scopeCount: number }[] }>('/api/gws/accounts')
+      const map: Record<string, { authed: boolean; scopeCount: number }> = {}
+      for (const a of r.accounts || []) map[a.account] = { authed: a.authed, scopeCount: a.scopeCount }
+      setGwsStatus(map)
+    } catch { /* silent */ }
+  }, [])
+
   useEffect(() => {
     api.routesFull().then(setRoutes).catch(() => {})
     api.agentsFull().then(setAgents).catch(() => {})
     loadEmailAccounts()
-  }, [loadEmailAccounts])
+    loadGwsStatus()
+  }, [loadEmailAccounts, loadGwsStatus])
+
+  // Run the OAuth browser flow for an alias, then refresh status.
+  const authenticateAccount = useCallback(async (account: string, services: string[]) => {
+    setAuthingAccount(account)
+    toast(`Opening Google login for ${account} — complete it in the browser…`, 'info')
+    try {
+      await apiFetch('/api/gws/auth-login', {
+        method: 'POST',
+        body: JSON.stringify({ account, services }),
+      })
+      toast(`${account}: authenticated ✓`, 'success')
+      await loadGwsStatus()
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+    }
+    setAuthingAccount(null)
+  }, [loadGwsStatus, toast])
 
   const agentsByTool = useMemo(() => {
     const map: Record<string, string[]> = {}
@@ -225,18 +256,25 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
       toast('Email and account name required', 'error')
       return
     }
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(account)) {
+      toast('Shortname must be lowercase letters, digits or dashes', 'error')
+      return
+    }
     setAddingEmail(true)
     try {
       await apiFetch('/api/config/email-accounts', {
         method: 'POST',
         body: JSON.stringify({ email, account }),
       })
-      setNewEmailAddr('')
-      setNewEmailAccount('')
-      setAddAccountOpen(false)
-      toast('Email account added: ' + email, 'success')
+      toast('Account added — starting Google login…', 'success')
       loadEmailAccounts()
       refresh()
+      setAddAccountOpen(false)
+      // Kick off the OAuth browser flow with the chosen scopes.
+      await authenticateAccount(account, newServices)
+      setNewEmailAddr('')
+      setNewEmailAccount('')
+      setNewServices(['gmail', 'calendar', 'drive'])
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : String(e), 'error')
     }
@@ -303,7 +341,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
           <IconButton
             icon={<RefreshCw size={13} />}
             label="Refresh tools"
-            onClick={() => { refresh(); loadEmailAccounts(); loadMcpStatus() }}
+            onClick={() => { refresh(); loadEmailAccounts(); loadGwsStatus(); loadMcpStatus() }}
             disabled={loading}
           />
         }
@@ -609,16 +647,9 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
       <Panel open={addAccountOpen} title="Add email / calendar account" onClose={() => setAddAccountOpen(false)}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <InfoBox title="How it works">
-            Connect a Gmail account via <code style={codeInlineStyle}>gws-mail</code>. Adding one account creates both{' '}
-            <code style={codeInlineStyle}>email:xxx</code> and <code style={codeInlineStyle}>calendar:xxx</code> tools.
-          </InfoBox>
-
-          <InfoBox tone="accent">
-            Before adding here:<br />
-            1. Install gws CLI: <code style={codeInlineStyle}>brew install gws</code><br />
-            2. Run: <code style={codeInlineStyle}>gws-mail &lt;shortname&gt; auth login</code><br />
-            3. Complete OAuth flow in browser<br />
-            4. Fill the form below with the same shortname
+            Connect a Google account via <code style={codeInlineStyle}>gws-mail</code>. On submit, the
+            Google login opens in your browser — authorize it and the account is live. Adding one creates
+            both <code style={codeInlineStyle}>email:xxx</code> and <code style={codeInlineStyle}>calendar:xxx</code> tools.
           </InfoBox>
 
           <Field label="Email address">
@@ -631,7 +662,7 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
             />
           </Field>
 
-          <Field label="gws-mail shortname" hint="Must match the shortname used in gws-mail auth login">
+          <Field label="gws-mail shortname" hint="Short alias used as gws-mail <shortname> (a-z, 0-9, dash)">
             <Input
               type="text"
               value={newEmailAccount}
@@ -641,28 +672,75 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
             />
           </Field>
 
+          <Field label="Scopes" hint="Which Google services this account can access">
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {[
+                { id: 'gmail', label: 'Gmail' },
+                { id: 'calendar', label: 'Calendar' },
+                { id: 'drive', label: 'Drive' },
+                { id: 'docs', label: 'Docs' },
+                { id: 'sheets', label: 'Sheets' },
+              ].map((s) => {
+                const on = newServices.includes(s.id)
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setNewServices((prev) => on ? prev.filter((x) => x !== s.id) : [...prev, s.id])}
+                    style={{
+                      padding: '5px 12px',
+                      fontSize: 12,
+                      cursor: 'pointer',
+                      borderRadius: 'var(--radius)',
+                      border: '1px solid ' + (on ? 'var(--accent)' : 'var(--border)'),
+                      background: on ? 'var(--accent-dim, var(--bg-2))' : 'var(--bg-0)',
+                      color: on ? 'var(--accent)' : 'var(--text-3)',
+                    }}
+                  >
+                    {on ? '✓ ' : ''}{s.label}
+                  </button>
+                )
+              })}
+            </div>
+          </Field>
+
           {emailAccounts.length > 0 && (
             <div>
               <SectionHeader title="Currently connected" count={emailAccounts.length} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {emailAccounts.map((ea) => (
-                  <div
-                    key={ea.email}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      padding: '8px 12px',
-                      fontSize: 12,
-                      background: 'var(--bg-0)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius)',
-                    }}
-                  >
-                    <span style={{ flex: 1 }}>{ea.email}</span>
-                    <span style={{ fontSize: 10, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>({ea.account})</span>
-                  </div>
-                ))}
+                {emailAccounts.map((ea) => {
+                  const st = gwsStatus[ea.account]
+                  const busy = authingAccount === ea.account
+                  return (
+                    <div
+                      key={ea.email}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '8px 12px',
+                        fontSize: 12,
+                        background: 'var(--bg-0)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius)',
+                      }}
+                    >
+                      <span style={{ flex: 1 }}>{ea.email}</span>
+                      <span style={{ fontSize: 10, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>({ea.account})</span>
+                      <Badge tone={st?.authed ? 'ok' : 'warn'}>
+                        {st === undefined ? '…' : st.authed ? '✓ authed' : '⚠ not authed'}
+                      </Badge>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        loading={busy}
+                        onClick={() => authenticateAccount(ea.account, newServices)}
+                      >
+                        {st?.authed ? 'Re-auth' : 'Authenticate'}
+                      </Button>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
@@ -672,10 +750,10 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
               variant="primary"
               size="md"
               onClick={addEmailAccount}
-              loading={addingEmail}
-              disabled={!newEmailAddr.trim() || !newEmailAccount.trim()}
+              loading={addingEmail || authingAccount !== null}
+              disabled={!newEmailAddr.trim() || !newEmailAccount.trim() || newServices.length === 0}
             >
-              Connect
+              Connect & authenticate
             </Button>
             <Button variant="secondary" size="md" onClick={() => setAddAccountOpen(false)}>Cancel</Button>
           </div>
