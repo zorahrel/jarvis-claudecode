@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# moondream — CLI wrapper around Moondream Cloud (vision-local cloud mode).
+#
+# Usage:
+#   moondream <image>                       # short caption
+#   moondream <image> -l|--long             # long caption
+#   moondream <image> "domanda libera"      # visual query
+#   moondream <image> --detect "oggetto"    # bounding boxes
+#   moondream <image> --point  "oggetto"    # punti
+#
+# <image> = path locale, http(s) URL, o `-` per leggere base64/dataurl da stdin.
+# Output: testo plain su stdout, errori su stderr (exit code != 0).
+#
+# Richiede MOONDREAM_API_KEY (letta da env o da ~/.claude/jarvis/router/.env).
+
+set -euo pipefail
+
+if [[ -z "${MOONDREAM_API_KEY:-}" && -f "$HOME/.claude/jarvis/router/.env" ]]; then
+  MOONDREAM_API_KEY="$(grep -E '^MOONDREAM_API_KEY=' "$HOME/.claude/jarvis/router/.env" | head -1 | cut -d= -f2-)"
+fi
+if [[ -z "${MOONDREAM_API_KEY:-}" ]]; then
+  echo "moondream: MOONDREAM_API_KEY not set (and not in ~/.claude/jarvis/router/.env)" >&2
+  exit 2
+fi
+
+if [[ $# -lt 1 ]]; then
+  sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 64
+fi
+
+IMG="$1"; shift || true
+MODE="caption"
+LENGTH="short"
+QUERY=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -l|--long) LENGTH="long"; shift ;;
+    --detect)  MODE="detect"; QUERY="${2:-}"; shift 2 ;;
+    --point)   MODE="point";  QUERY="${2:-}"; shift 2 ;;
+    *)         MODE="query";  QUERY="$1"; shift ;;
+  esac
+done
+
+# Resolve image → data URL or http(s) URL passthrough
+if [[ "$IMG" == http://* || "$IMG" == https://* ]]; then
+  # Cloud API requires base64; fetch and encode
+  TMP=$(mktemp -t moondream.XXXXXX)
+  trap 'rm -f "$TMP"' EXIT
+  curl -sSL -o "$TMP" "$IMG"
+  IMG="$TMP"
+elif [[ "$IMG" == "-" ]]; then
+  TMP=$(mktemp -t moondream.XXXXXX)
+  trap 'rm -f "$TMP"' EXIT
+  cat > "$TMP"
+  IMG="$TMP"
+elif [[ ! -f "$IMG" ]]; then
+  echo "moondream: file not found: $IMG" >&2
+  exit 66
+fi
+
+EXT="${IMG##*.}"
+case "${EXT,,}" in
+  jpg|jpeg) MIME="image/jpeg" ;;
+  png)      MIME="image/png" ;;
+  gif)      MIME="image/gif" ;;
+  webp)     MIME="image/webp" ;;
+  *)        MIME="image/jpeg" ;;
+esac
+
+B64=$(base64 < "$IMG" | tr -d '\n')
+DATAURL="data:${MIME};base64,${B64}"
+
+case "$MODE" in
+  caption)
+    PAYLOAD=$(printf '{"image_url":"%s","length":"%s","stream":false}' "$DATAURL" "$LENGTH")
+    ENDPOINT="/v1/caption"
+    JQFILTER='.caption // .error // "(empty)"'
+    ;;
+  query)
+    Q_ESC=$(printf '%s' "$QUERY" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')
+    PAYLOAD=$(printf '{"image_url":"%s","question":%s,"stream":false}' "$DATAURL" "$Q_ESC")
+    ENDPOINT="/v1/query"
+    JQFILTER='.answer // .error // "(empty)"'
+    ;;
+  detect)
+    Q_ESC=$(printf '%s' "$QUERY" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')
+    PAYLOAD=$(printf '{"image_url":"%s","object":%s}' "$DATAURL" "$Q_ESC")
+    ENDPOINT="/v1/detect"
+    JQFILTER='.'
+    ;;
+  point)
+    Q_ESC=$(printf '%s' "$QUERY" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')
+    PAYLOAD=$(printf '{"image_url":"%s","object":%s}' "$DATAURL" "$Q_ESC")
+    ENDPOINT="/v1/point"
+    JQFILTER='.'
+    ;;
+esac
+
+RESP=$(curl -sS -X POST "https://api.moondream.ai${ENDPOINT}" \
+  -H "X-Moondream-Auth: ${MOONDREAM_API_KEY}" \
+  -H "Content-Type: application/json" \
+  --data-binary "@-" <<<"$PAYLOAD")
+
+if command -v jq >/dev/null 2>&1; then
+  echo "$RESP" | jq -r "$JQFILTER"
+else
+  echo "$RESP"
+fi
