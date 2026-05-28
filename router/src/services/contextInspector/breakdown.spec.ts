@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { calculateBreakdown, type SpawnConfig } from "./breakdown.js";
+import {
+  calculateBreakdown,
+  MCP_TOOL_SEARCH_META_TOKENS,
+  type SpawnConfig,
+} from "./breakdown.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, "__fixtures__");
@@ -11,7 +15,7 @@ const MCP_CONFIG = join(FIXTURES, "mcp-config.json");
 const NONEXISTENT_WORKSPACE = "/tmp/nonexistent-workspace-context-inspector-spec";
 const NONEXISTENT_USER_CLAUDEMD = "/tmp/nonexistent-userclaudemd-context-inspector-spec";
 
-test("calculateBreakdown: jarvis fullAccess produces 8 categories with MCP 10k-16k", async () => {
+test("calculateBreakdown: jarvis fullAccess produces 8 categories; stdio MCP servers deferred by tool-search", async () => {
   const spawn: SpawnConfig = {
     agent: "jarvis",
     fullAccess: true,
@@ -27,8 +31,15 @@ test("calculateBreakdown: jarvis fullAccess produces 8 categories with MCP 10k-1
   assert.equal(result.categories.length, 8);
   const mcp = result.categories.find((c) => c.category === "mcp_servers");
   assert.ok(mcp);
-  assert.ok(mcp.tokens >= 10000, `MCP tokens ${mcp.tokens} should be >= 10000 for fullAccess`);
-  assert.ok(mcp.tokens <= 16000, `MCP tokens ${mcp.tokens} should be <= 16000`);
+  // ENABLE_TOOL_SEARCH (always set by router) defers stdio servers to ~0 upfront,
+  // replacing them with a single search_tools meta-tool. HTTP servers still load upfront.
+  const details = mcp.details as Array<{ transport: string; tokens: number }>;
+  const stdioCount = details.filter((d) => d.transport === "stdio").length;
+  const httpTokens = details
+    .filter((d) => d.transport !== "stdio")
+    .reduce((s, d) => s + d.tokens, 0);
+  const expected = httpTokens + (stdioCount > 0 ? MCP_TOOL_SEARCH_META_TOKENS : 0);
+  assert.equal(mcp.tokens, expected, "deferred stdio servers collapse to one tool-search meta-tool");
 });
 
 test("calculateBreakdown: cecilia (inheritUserScope=false, no MCP) is light baseline", async () => {
@@ -128,8 +139,14 @@ test("calculateBreakdown: jarvis MCP details list 13 entries with transport + to
   for (const d of details) {
     assert.ok(typeof d.name === "string" && d.name.length > 0);
     assert.ok(["stdio", "http", "unknown"].includes(d.transport));
-    assert.ok(d.tokens > 0);
-    assert.ok(d.toolsEstimate > 0);
+    if (d.transport === "stdio") {
+      // deferred by ENABLE_TOOL_SEARCH — ~0 upfront cost (replaced by meta-tool)
+      assert.equal(d.tokens, 0);
+      assert.equal(d.toolsEstimate, 0);
+    } else {
+      assert.ok(d.tokens > 0);
+      assert.ok(d.toolsEstimate > 0);
+    }
   }
 });
 
@@ -150,5 +167,6 @@ test("calculateBreakdown: scoped agent with explicit mcp:exa + mcp:brave-search 
   assert.equal(details.length, 2);
   assert.ok(details.find((d) => d.name === "exa"));
   assert.ok(details.find((d) => d.name === "brave-search"));
-  assert.equal(mcp.tokens, 2000); // 2 servers × 1000 tokens avg
+  // both stdio in fixture → deferred by tool-search; cost collapses to one meta-tool
+  assert.equal(mcp.tokens, MCP_TOOL_SEARCH_META_TOKENS);
 });

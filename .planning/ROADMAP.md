@@ -10,7 +10,7 @@ Jarvis Router è un orchestrator multi-canale (Telegram/WhatsApp/Discord/tray-ap
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [x] **Phase 1: Context Inspector** — Tab dashboard per audit token/categoria + cruft detection delle sessioni Claude Code attive ✓ 2026-05-01 (code complete, UAT pending user)
+- [x] **Phase 1: Context Inspector** — Tab dashboard per audit token/categoria + cruft detection delle sessioni Claude Code attive ✓ 2026-05-01 (UAT verified 2026-05-29: endpoints live, breakdown 8-cat + @-import chain, cruft, 57/57 test verdi dopo allineamento al modello tool-search deferral)
 
 ## Phase Details
 
@@ -44,4 +44,4 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Context Inspector | 8/8 | Code complete (UAT pending user) | 2026-05-01 |
+| 1. Context Inspector | 8/8 | ✅ Done (UAT verified) | 2026-05-29 |
