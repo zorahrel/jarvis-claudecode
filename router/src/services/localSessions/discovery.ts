@@ -14,6 +14,22 @@ const execFileAsync = promisify(execFile);
 const CACHE_TTL_MS = 2000;
 let cache: { at: number; sessions: LocalSession[] } | null = null;
 
+// Process command lines embed the full spawn env (e.g. the inline --mcp-config
+// JSON carries HETZNER_API_TOKEN and other server credentials). Since
+// parentCommand is surfaced over the unauthenticated /api/local-sessions
+// endpoint, scrub any token/secret value before it leaves discovery.
+const SENSITIVE_KEY = "(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|[A-Z0-9]*KEY)";
+// JSON form:  "HETZNER_API_TOKEN":"abc..."  →  "HETZNER_API_TOKEN":"<redacted>"
+const JSON_SECRET_RE = new RegExp(`("[A-Za-z0-9_]*${SENSITIVE_KEY}[A-Za-z0-9_]*"\\s*:\\s*)"[^"]*"`, "gi");
+// Env-assignment form:  HCLOUD_TOKEN=abc...  →  HCLOUD_TOKEN=<redacted>
+const ENV_SECRET_RE = new RegExp(`\\b([A-Za-z0-9_]*${SENSITIVE_KEY}[A-Za-z0-9_]*=)\\S+`, "gi");
+
+export function redactCommand(cmd: string): string {
+  return cmd
+    .replace(JSON_SECRET_RE, '$1"<redacted>"')
+    .replace(ENV_SECRET_RE, "$1<redacted>");
+}
+
 const EVENT_TO_STATUS: Record<string, LocalSessionStatus> = {
   SessionStart: "idle",
   SessionEnd: "finished",
@@ -301,7 +317,7 @@ export async function discoverLocalSessions(): Promise<LocalSession[]> {
         transcriptPath: hook?.transcriptPath ?? null,
         lastActivity,
         tty,
-        parentCommand: p.command,
+        parentCommand: redactCommand(p.command),
         preview,
         isRouterSpawned:
           sidecar !== null ||
