@@ -68,6 +68,8 @@ export interface ChannelContext {
     chatTitle?: string;
     fromId?: string;
     fromUsername?: string;
+    /** Human display name (first + last, or username) — richer than fromUsername. */
+    fromName?: string;
     messageId?: number;
   };
 }

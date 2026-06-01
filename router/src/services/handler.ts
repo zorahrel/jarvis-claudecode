@@ -20,10 +20,7 @@ import { startJob, endJob, type PendingChannel } from "./pending-jobs";
 import { randomUUID } from "crypto";
 import type { MessageTimings } from "../types/message";
 import { setSessionContext, gcSessionContexts } from "./session-context";
-import {
-  canDiscord, canWhatsapp, canTelegram, canChannels,
-  canDiscordWrite, canWhatsappWrite, canTelegramWrite,
-} from "./capabilities";
+import { buildConversationContext, speakerLabel } from "./conversation-context";
 
 /**
  * Human-readable relative time label for a quoted message timestamp.
@@ -39,53 +36,6 @@ function relativeTime(fromEpoch: number, nowEpoch = Date.now() / 1000): string {
   const days = Math.round(diff / 86400);
   if (days === 1) return "(ieri)";
   return `(${days}g fa)`;
-}
-
-/**
- * Build a short messaging-context nudge prepended to the user prompt when the
- * agent has the corresponding channel MCP enabled. Pays a fixed ~50-100 token
- * tax per turn, only on channels where the tool is present, and only enough to
- * orient the model on (a) where the conversation is and (b) which tools to use
- * before asking for clarification.
- */
-function buildMessagingNudge(msg: IncomingMessage, agent: import("../types").AgentConfig | undefined): string | null {
-  if (!agent) return null;
-  const cc = msg.channelContext;
-  if (!cc) return null;
-  const hasDiscord = canDiscord(agent);
-  const hasWhatsapp = canWhatsapp(agent);
-  const hasTelegram = canTelegram(agent);
-  const writeHint = (chan: "discord" | "whatsapp" | "telegram", canW: boolean) =>
-    canW ? `, ${chan}_send_message to reply` : "";
-
-  if (cc.discord && hasDiscord) {
-    const guildPart = cc.discord.guildName
-      ? `guild=${cc.discord.guildName} channel=${cc.discord.channelName ?? cc.discord.channelId}`
-      : `DM channel=${cc.discord.channelId}`;
-    return `[Messaging context: Discord ${guildPart}, from=@${cc.discord.authorName ?? cc.discord.authorId}. ` +
-      `Use discord_read_channel to load surrounding messages before asking for clarification` +
-      `${writeHint("discord", canDiscordWrite(agent))}.]`;
-  }
-  if (cc.whatsapp && hasWhatsapp) {
-    const where = cc.whatsapp.isGroup
-      ? `group=${cc.whatsapp.groupName ?? cc.whatsapp.jid}`
-      : `DM jid=${cc.whatsapp.jid}`;
-    return `[Messaging context: WhatsApp ${where}, from=${cc.whatsapp.senderName ?? cc.whatsapp.senderJid}. ` +
-      `Use whatsapp_read_chat / whatsapp_search to look up history${writeHint("whatsapp", canWhatsappWrite(agent))}.]`;
-  }
-  if (cc.telegram && hasTelegram) {
-    const where = cc.telegram.chatType === "private"
-      ? `DM chat=${cc.telegram.chatId}`
-      : `${cc.telegram.chatType}=${cc.telegram.chatTitle ?? cc.telegram.chatId}`;
-    return `[Messaging context: Telegram ${where}, from=@${cc.telegram.fromUsername ?? cc.telegram.fromId}. ` +
-      `Use telegram_read_chat / telegram_search to load buffered history` +
-      `${writeHint("telegram", canTelegramWrite(agent))}. Note: only messages received during router uptime are available.]`;
-  }
-  // Channels-registry only (no channel context) — still useful?
-  if (canChannels(agent)) {
-    return `[Use channels_resolve / channels_list_known to map human names → channel IDs.]`;
-  }
-  return null;
 }
 
 /** Compose full message text including quoted messages and media transcriptions */
@@ -124,8 +74,11 @@ function composeFullMessage(msg: IncomingMessage): string {
     }
   }
 
-  // Original text
-  if (msg.text) parts.push(msg.text);
+  // Original text — in group chats, prefix the sender so multi-person
+  // attribution survives in the (shared-per-group) session history. DMs are
+  // single-speaker, so speakerLabel returns null and the text stays bare.
+  const label = speakerLabel(msg);
+  if (msg.text) parts.push(label ? `${label}: ${msg.text}` : msg.text);
 
   return parts.join("\n\n") || "[Media without text]";
 }
@@ -304,11 +257,12 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
       messageForClaude += `\n\n[${imagePaths.length} image${imagePaths.length > 1 ? "s" : ""} attached — view with Read tool]\n${pathList}`;
     }
 
-    // Messaging-MCP nudge: when the agent has channel tools and the user's
-    // request likely needs surrounding context (group chat, mention with no
-    // explicit reply), tell the model where it is and which tools to reach for.
-    const ctxNudge = buildMessagingNudge(msg, route.agent);
-    if (ctxNudge) messageForClaude = `${ctxNudge}\n\n${messageForClaude}`;
+    // Conversation context: ALWAYS tell the model where it is and who wrote
+    // (role-aware, resolved against config `users:`). The tool hint is appended
+    // only when the agent has the matching channel MCP. Skipped only when there
+    // is no channel context at all (e.g. notch — a single local surface).
+    const convCtx = buildConversationContext(msg, route.agent);
+    if (convCtx) messageForClaude = `${convCtx}\n\n${messageForClaude}`;
 
     // Local vision pre-pass (Moondream Station, on-device).
     // If `vision-local` is enabled AND there's at least one image, run a

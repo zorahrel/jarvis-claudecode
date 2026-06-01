@@ -216,16 +216,13 @@ export class DiscordConnector implements Connector {
         } catch { /* ignore */ }
       }
 
-      // In guild contexts, prefix the speaker identity so multi-user threads are unambiguous.
-      // DMs are single-speaker; no prefix needed there.
       // If cleanText came out empty (e.g. message was only the bot mention),
       // fall back to the ORIGINAL content with mentions resolved — never leak
       // raw `<@ID>` / `<@&ID>` snowflakes into the prompt by using the unresolved
-      // discordMsg.content directly.
-      const baseText = cleanText || resolveDiscordMentions(discordMsg.content, discordMsg);
-      const finalText = discordMsg.guildId
-        ? `[@${discordMsg.author.username}]: ${baseText}`
-        : baseText;
+      // discordMsg.content directly. The speaker identity is prefixed centrally
+      // in handler.composeFullMessage (uniform across all channels) using
+      // channelContext.authorName — no per-connector baking here anymore.
+      const finalText = cleanText || resolveDiscordMentions(discordMsg.content, discordMsg);
 
       const channelName = "name" in discordMsg.channel
         ? (discordMsg.channel as { name: string }).name

@@ -7,7 +7,7 @@ import type { MessageTimings } from "../types/message";
 import { handleMessage, splitMessage } from "../services/handler";
 import { findRoute, getFullAgent } from "../services/router";
 import { canVoice, canVision } from "../services/capabilities";
-import { setContactName } from "../services/contact-names";
+import { setContactName, getContactName } from "../services/contact-names";
 import { getConfig } from "../services/config-loader";
 import { logger } from "../services/logger";
 import { processMedia, saveMedia, cleanupMedia } from "../services/media";
@@ -630,7 +630,22 @@ export class WhatsAppConnector implements Connector {
     const replyJid = this.getReplyJid(jid);
     const msgKey = waMsg.key;
 
-    const groupName = isGroup ? (waMsg.pushName || waMsg.key?.participant || undefined) : undefined;
+    // Real group subject (NOT the sender's pushName, which is a different person
+    // per message). Cached at startup for routed groups; lazily fetched + cached
+    // here for any other group so the agent always sees where it actually is.
+    let groupName: string | undefined;
+    if (isGroup) {
+      groupName = getContactName(jid);
+      if (!groupName) {
+        try {
+          const meta = await this.sock?.groupMetadata(jid);
+          if (meta?.subject) {
+            groupName = meta.subject;
+            setContactName(jid, meta.subject);
+          }
+        } catch { /* group not accessible — fall back to jid downstream */ }
+      }
+    }
     const msg: IncomingMessage = {
       channel: "whatsapp",
       from: isFromSelf ? "self" : "+" + senderJid.split(":")[0].split("@")[0],

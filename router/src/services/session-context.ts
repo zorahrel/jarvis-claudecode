@@ -35,6 +35,7 @@ export interface TelegramSessionContext {
   chatTitle?: string;
   fromId?: string;
   fromUsername?: string;
+  fromName?: string;
   lastMessageId?: number;
   lastMessageTs?: number;
 }

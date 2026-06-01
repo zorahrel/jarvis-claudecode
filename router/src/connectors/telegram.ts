@@ -244,6 +244,9 @@ export class TelegramConnector implements Connector {
       const chatTitle = ctx.chat.type !== "private" && (ctx.chat as { title?: string }).title
         ? (ctx.chat as { title: string }).title
         : undefined;
+      const fromName = ctx.from
+        ? [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") || ctx.from.username
+        : undefined;
       const msg: IncomingMessage = {
         channel: "telegram",
         from: String(ctx.from?.id),
@@ -264,6 +267,7 @@ export class TelegramConnector implements Connector {
             chatTitle,
             fromId: ctx.from ? String(ctx.from.id) : undefined,
             fromUsername: ctx.from?.username,
+            fromName,
             messageId,
           },
         },
