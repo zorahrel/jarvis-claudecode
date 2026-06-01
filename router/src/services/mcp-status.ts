@@ -17,6 +17,7 @@
 
 import { execFile } from "child_process";
 import { existsSync } from "fs";
+import { join } from "path";
 import { logger } from "./logger";
 
 const log = logger.child({ module: "mcp-status" });
@@ -158,8 +159,12 @@ export async function refreshMcpStatus(): Promise<void> {
       await rescueTokenlessServers();
 
       const cli = resolveCliPath();
+      // Run from the jarvis project root so project-scoped MCP servers (e.g.
+      // `beeper`, registered under ~/.claude/jarvis) appear alongside the
+      // user-scoped ones — `claude mcp list` resolves project scope from cwd.
+      const projectCwd = join(process.env.HOME ?? "", ".claude/jarvis");
       const stdout = await new Promise<string>((resolve, reject) => {
-        execFile(cli, ["mcp", "list"], { timeout: CLI_TIMEOUT_MS }, (err, out, errBuf) => {
+        execFile(cli, ["mcp", "list"], { timeout: CLI_TIMEOUT_MS, cwd: existsSync(projectCwd) ? projectCwd : undefined }, (err, out, errBuf) => {
           if (err && !out) reject(new Error((errBuf as string | Buffer)?.toString() || err.message));
           else resolve(out as string);
         });

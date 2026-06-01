@@ -339,7 +339,11 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
   } else if (path === "/api/config" && req.method === "GET") {
     try {
       const raw = readRawConfig();
-      json(req, res, raw);
+      // The Settings page's YAML editor reads `yaml` (raw file text). Include
+      // it alongside the parsed object so the editor isn't blank.
+      let yamlText = "";
+      try { yamlText = readFileSync(join(HOME, ".claude/jarvis/router/config.yaml"), "utf-8"); } catch { /* ignore */ }
+      json(req, res, { ...raw, yaml: yamlText });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- TOOLS REGISTRY ---
@@ -607,6 +611,23 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       const { refreshMcpStatus, listMcpStatus } = await import("../services/mcp-status");
       await refreshMcpStatus();
       json(req, res, { ok: true, servers: listMcpStatus() });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
+
+  // --- MCP TOOLS — per-server tool list (connects to each CONNECTED server) ---
+  } else if (path === "/api/mcp/tools" && req.method === "GET") {
+    try {
+      const { getMcpTools } = await import("../services/mcp-tools");
+      const { tools, refreshedAt } = await getMcpTools();
+      json(req, res, { tools, refreshedAt });
+    } catch (e: any) { json(req, res, { error: e.message, tools: {} }, 200); }
+
+  // --- MCP TOOLS REFRESH — force re-introspection ---
+  } else if (path === "/api/mcp/tools/refresh" && req.method === "POST") {
+    try {
+      const { refreshMcpTools, getMcpTools } = await import("../services/mcp-tools");
+      await refreshMcpTools();
+      const { tools, refreshedAt } = await getMcpTools();
+      json(req, res, { ok: true, tools, refreshedAt });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- MCP PENDING — list MCP servers parked outside ~/.claude.json ---

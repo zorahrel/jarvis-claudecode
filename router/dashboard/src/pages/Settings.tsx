@@ -53,6 +53,7 @@ export function Settings({ onToast }: { onToast: (msg: string, type: 'success' |
     try {
       await apiFetch('/api/config/yaml', {
         method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Confirm': 'true' },
         body: JSON.stringify({ content: yamlEdit }),
       })
       setYaml(yamlEdit)

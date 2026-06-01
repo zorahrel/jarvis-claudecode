@@ -15,7 +15,7 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Field, Input } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
-import type { Tool, ToolsResponse, FullRoute, FullAgent, McpPendingServer } from '../api/client'
+import type { Tool, ToolsResponse, FullRoute, FullAgent, McpPendingServer, McpServerTools } from '../api/client'
 import { ChannelIcon, ToolIcon } from '../icons'
 
 const MCP_STATUS_HELP: Record<string, string> = {
@@ -93,6 +93,11 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
   }, [])
 
   useEffect(() => { loadMcpStatus() }, [loadMcpStatus])
+
+  // Per-server tool lists — the router connects to each CONNECTED MCP and
+  // enumerates tools/list (cached 5min backend-side).
+  const [mcpTools, setMcpTools] = useState<Record<string, McpServerTools>>({})
+  useEffect(() => { api.mcpTools().then(setMcpTools).catch(() => {}) }, [])
 
   // Pending MCPs — servers parked in ~/.claude/mcp-pending.json that need
   // explicit OAuth approval before being committed back to ~/.claude.json.
@@ -492,6 +497,11 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                   })()}
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                     <Badge tone="accent" size="xs">{toolRoutesCount(t.id)} routes</Badge>
+                    {cat === 'MCP' && (() => {
+                      const st = mcpTools[t.id.replace(/^mcp:/, '')]
+                      if (!st || st.error || !st.tools.length) return null
+                      return <Badge tone="neutral" size="xs" title={st.tools.map(x => x.name).join(', ')}>{st.tools.length} tools</Badge>
+                    })()}
                     {(agentsByTool[t.id] || []).length > 0 && (
                       <BadgeLink
                         href={`/agents?filter=tool:${encodeURIComponent(t.id)}`}
@@ -561,6 +571,35 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                 )}
               </dl>
             </div>
+
+            {/* Tools exposed by this MCP server */}
+            {selectedTool.type === 'mcp' && (() => {
+              const st = mcpTools[selectedTool.id.replace(/^mcp:/, '')]
+              if (!st) return null
+              return (
+                <div>
+                  <SectionHeader title="Tools exposed" count={st.tools.length} />
+                  {st.error ? (
+                    <div style={{ fontSize: 12, color: 'var(--err)' }}>{st.error}</div>
+                  ) : !st.tools.length ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-4)' }}>No tools</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {st.tools.map((tl) => (
+                        <div key={tl.name} style={{ fontSize: 12, lineHeight: 1.4 }}>
+                          <code style={{ color: 'var(--accent-bright)', fontWeight: 600 }}>{tl.name}</code>
+                          {tl.description && (
+                            <div style={{ color: 'var(--text-3)', marginTop: 2 }}>
+                              {tl.description.length > 160 ? tl.description.slice(0, 160) + '…' : tl.description}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
 
             {/* Remove account action for email:/calendar: tools */}
             {(selectedTool.id.startsWith('email:') || selectedTool.id.startsWith('calendar:')) && (() => {

@@ -1,0 +1,11 @@
+{
+  "name": "mcp-gateway",
+  "version": "1.0.0",
+  "description": "Dynamic MCP gateway — mounts/unmounts child MCP servers at runtime, proxies tools, emits list_changed",
+  "main": "index.js",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}

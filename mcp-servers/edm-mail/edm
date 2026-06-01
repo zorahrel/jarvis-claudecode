@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Thin CLI over the edm-mail MCP stdio server — lets you call any tool without
+# the MCP client (usable mid-session via Bash). Drives one tools/call and prints
+# the tool's text result.
+#
+# Usage:
+#   ./edm <tool> ['{"json":"args"}']
+#   ./edm list                                  # tools/list
+#   ./edm mail_list_folders
+#   ./edm mail_list '{"folder":"INBOX","limit":5}'
+#   ./edm mail_read '{"uid":72,"markSeen":false}'
+#   ./edm mail_send '{"to":"x@y.it","subject":"hi","text":"ciao"}'        # dry-run
+#   ./edm mail_send '{"to":"x@y.it","subject":"hi","text":"ciao","confirm":true}'
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="$1"
+ARGS="$2"
+[ -z "$ARGS" ] && ARGS='{}'
+
+if [ "$TOOL" = "list" ]; then
+  REQ='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  WANT=2
+else
+  REQ="{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$TOOL\",\"arguments\":$ARGS}}"
+  WANT=3
+fi
+
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"edm-cli","version":"1"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' "$REQ"
+  sleep 4
+} | "$DIR/start.sh" 2>/dev/null | WANT=$WANT python3 -c '
+import sys, json, os
+want = int(os.environ["WANT"])
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try: o = json.loads(line)
+    except: continue
+    if o.get("id") == want:
+        if "error" in o:
+            print("ERROR:", json.dumps(o["error"])); break
+        r = o["result"]
+        if "tools" in r:
+            print("\n".join(t["name"] for t in r["tools"]))
+        else:
+            for c in r.get("content", []):
+                if c.get("type") == "text": print(c["text"])
+        break
+'

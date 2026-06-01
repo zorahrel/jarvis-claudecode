@@ -890,6 +890,17 @@ export const api = {
     })
     return r.json() as Promise<McpAuthResult>
   },
+  // Per-server tool lists — the router connects to each CONNECTED MCP and
+  // enumerates its tools/list. Cached (5min TTL) on the backend.
+  mcpTools: async (): Promise<Record<string, McpServerTools>> => {
+    const r = await fetch('/api/mcp/tools')
+    if (!r.ok) throw new Error(`mcp-tools failed: ${r.status}`)
+    const body = (await r.json()) as { tools?: Record<string, McpServerTools> }
+    return body.tools ?? {}
+  },
+  mcpToolsRefresh: () =>
+    request<{ ok: boolean; tools: Record<string, McpServerTools>; refreshedAt: number }>(
+      '/api/mcp/tools/refresh', { method: 'POST' }),
 }
 
 // ── MCP Auth Manager — public types (consumed by MCPHealth tab) ─────────────
@@ -912,4 +923,14 @@ export interface McpPendingServer {
   name: string
   url: string
   transport: 'stdio+mcp-remote' | 'http' | 'sse'
+}
+
+export interface McpToolInfo {
+  name: string
+  description: string
+}
+
+export interface McpServerTools {
+  tools: McpToolInfo[]
+  error: string | null
 }

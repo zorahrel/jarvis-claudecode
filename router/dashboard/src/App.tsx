@@ -8,7 +8,6 @@ import { Routes } from './pages/Routes'
 import { Agents } from './pages/Agents'
 import { Tools } from './pages/Tools'
 import { Permissions } from './pages/Permissions'
-import { MCPHealth } from './pages/MCPHealth'
 import { Skills } from './pages/Skills'
 import { Memory } from './pages/Memory'
 import { Sessions } from './pages/Sessions'
@@ -89,8 +88,6 @@ function App() {
         return <Tools onToast={addToast} />
       case 'permissions':
         return <Permissions onToast={addToast} />
-      case 'mcp-health':
-        return <MCPHealth onToast={addToast} />
       case 'skills':
         return <Skills onToast={addToast} />
       case 'memory':
