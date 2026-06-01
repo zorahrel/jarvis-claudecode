@@ -5,22 +5,16 @@ Dates are ISO (YYYY-MM-DD).
 
 ## [Unreleased]
 
-### Fixed
-- **Notch orb 404 after #29.** `router/src/dashboard/server.ts`
-  `NOTCH_ORB_DIR` was still pointing at the deleted
-  `tray-app/Sources/JarvisNotch/Orb`. The WKWebView in JarvisNotch.app
-  loads `${backend}/notch/orb/notch.html`, so every notch launch hit a
-  literal `"orb asset not found"` response and rendered blank. Repointed
-  at `~/agent-notch/Sources/AgentNotch/Orb` (env override:
-  `AGENT_NOTCH_SRC`). Commit `762f61c`.
-
-  *Live patch (no router restart, preserves running Claude sessions)*:
-  a `tray-app/Sources/JarvisNotch/Orb` symlink to the agent-notch
-  location was created on the host. Gitignored under
-  `tray-app/Sources/JarvisNotch/` so it doesn't show up in
-  `git status` for contributors who happened to keep stale local
-  files after the #29 extraction. The symlink becomes redundant after
-  the next router restart (when the new `NOTCH_ORB_DIR` takes effect).
+### Removed
+- **Notch / tray app fully removed from this repo.** The macOS notch voice UI
+  and its menu-bar tray are a separate product living in their own personal
+  repos (`agent-notch`, tray app). Deleted from here: the `notch` channel +
+  connector, `router/src/notch/` (events/history/prefs), the dashboard
+  `NotchMirror` + `/notch/orb/*` static serving + all `/api/notch/*` routes,
+  the voice-output TTS stack (`services/tts.ts`, `cartesia-ws.ts`,
+  `spoken-extractor.ts`, `scripts/tts-*.py`, `scripts/kokoro-server.py`), the
+  `tray-app/` dir, and the `notch` agent. The other channels (Telegram,
+  WhatsApp, Discord) and voice *input* transcription are untouched.
 
 ### Added
 - **Per-agent trust tier (`tier`) + whitelist enforcement.** New

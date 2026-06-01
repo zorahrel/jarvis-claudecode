@@ -36,8 +36,8 @@ test("detectCruft: 3 skills loaded, zero invocations → 3 unused", () => {
   assert.equal(skillFindings.length, 3);
 });
 
-test("SUGGESTIONS list: at least 4 entries with required structure", () => {
-  assert.ok(SUGGESTIONS.length >= 4);
+test("SUGGESTIONS list: at least 3 entries with required structure", () => {
+  assert.ok(SUGGESTIONS.length >= 3);
   for (const s of SUGGESTIONS) {
     assert.ok(typeof s.id === "string" && s.id.length > 0);
     assert.ok(typeof s.when === "string" && s.when.length > 0);
@@ -46,7 +46,6 @@ test("SUGGESTIONS list: at least 4 entries with required structure", () => {
   }
   const ids = SUGGESTIONS.map((s) => s.id);
   assert.ok(ids.includes("split-jarvis-chat"));
-  assert.ok(ids.includes("notch-collapse-userscope"));
   assert.ok(ids.includes("gsd-namespace-gating"));
   assert.ok(ids.includes("scope-mcp-explicit"));
 });

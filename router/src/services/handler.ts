@@ -180,14 +180,14 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
   const route = { agent } as { agent: typeof agent; action?: undefined };
 
   const agentName = basename(route.agent.workspace);
-  // Include modelOverride in the session key so swapping models from the
-  // notch toolbar spawns a fresh SDK session with the new model. Without
-  // this, the cached session on the previous model is reused and the
-  // footer keeps reporting the old model id.
+  // Include modelOverride in the session key so a per-message model swap
+  // spawns a fresh SDK session with the new model. Without this, the cached
+  // session on the previous model is reused and the footer keeps reporting
+  // the old model id.
   const baseKey = sessionKey(msg.channel, msg.from, msg.group, agentName);
   const key = msg.modelOverride ? `${baseKey}:m=${msg.modelOverride}` : baseKey;
 
-  // When the notch toolbar selects a non-default model, clone the agent
+  // When a message carries a non-default modelOverride, clone the agent
   // with the override so `askClaude` actually spawns the SDK on that
   // model (the session key alone wasn't enough — without the cloned agent,
   // the footer kept reporting whatever model the agent's YAML defaulted
@@ -260,7 +260,7 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     // Conversation context: ALWAYS tell the model where it is and who wrote
     // (role-aware, resolved against config `users:`). The tool hint is appended
     // only when the agent has the matching channel MCP. Skipped only when there
-    // is no channel context at all (e.g. notch — a single local surface).
+    // is no channel context at all (e.g. cron or a local-only surface).
     const convCtx = buildConversationContext(msg, route.agent);
     if (convCtx) messageForClaude = `${convCtx}\n\n${messageForClaude}`;
 

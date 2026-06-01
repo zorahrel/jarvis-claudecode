@@ -13,7 +13,6 @@ no extra processes, no extra bot tokens, no new ports.
 | Discord  | Deep (REST API)          | Linear scan  | ✓    | ✓     | discord.js Client (existing)                       |
 | WhatsApp | ~14d on pair + live + backfill | Substring | ✓    | ✓     | live Baileys events + JSONL store + fetchMessageHistory |
 | Telegram | Router-uptime ring       | Substring    | ✓    | —     | grammy bot + persisted ring buffer                 |
-| Notch    | n/a (agent IS the conversation)                                                                            |
 
 Discord history is fetched on-demand via the Discord REST API (paginated,
 unlimited depth). **WhatsApp** uses the same Baileys session paired via the

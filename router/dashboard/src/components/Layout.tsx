@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react'
 import { Sidebar } from './Sidebar'
-import { NotchMirror } from './NotchMirror'
 
 interface LayoutProps {
   activePage: string
@@ -26,7 +25,6 @@ export function Layout({ activePage, onPageChange, children }: LayoutProps) {
       >
         {children}
       </main>
-      <NotchMirror />
     </div>
   )
 }

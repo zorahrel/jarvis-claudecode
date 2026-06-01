@@ -302,7 +302,6 @@ Use Jarvis Claude Code if you want a personal, Claude-Code-native, config-driven
 │   ├── scripts/          # ChromaDB + OMEGA Python servers
 │   └── config.example.yaml
 ├── agents.example/       # Agent template — copy to agents/<name>/
-├── tray-app/             # macOS SwiftUI menu bar app
 ├── ARCHITECTURE.md       # System design
 ├── SETUP.md              # Operations and troubleshooting
 ├── TODO.md               # Roadmap

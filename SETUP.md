@@ -12,16 +12,6 @@
 launchctl load ~/Library/LaunchAgents/com.jarvis.router.plist
 launchctl load ~/Library/LaunchAgents/com.jarvis.chroma.plist
 launchctl load ~/Library/LaunchAgents/com.jarvis.omega.plist
-
-# Tray app (manages start/stop/restart of services)
-~/.claude/jarvis/tray-app/.build/release/JarvisTray &
-```
-
-## Build Tray App
-```bash
-cd ~/.claude/jarvis/tray-app
-swift build -c release
-cp .build/release/JarvisTray ~/bin/jarvis-tray
 ```
 
 ## Services
@@ -35,7 +25,7 @@ Core (always present, hardcoded):
 | OMEGA | 3343 | com.jarvis.omega | `curl localhost:3343/health` |
 
 Extra services: add a `services:` section in `router/config.yaml` (see `config.example.yaml`).
-They appear in the dashboard and are managed by the tray if they provide `launchd:`.
+They appear in the dashboard.
 
 All launchd services use `KeepAlive: true` (auto-restart on crash).
 
@@ -75,13 +65,6 @@ launchctl start com.jarvis.omega
 
 ### WhatsApp disconnected (Bad MAC)
 Normal during reconnection. If persistent, delete `wa-auth/` and re-run pairing.
-
-### Tray app crash
-Usually `shell()` called on the main thread. All shell ops must run in the background.
-```bash
-pkill JarvisTray
-~/.claude/jarvis/tray-app/.build/debug/JarvisTray &
-```
 
 ### Router PID lock stuck
 If the router won't start ("Another instance is already running"):

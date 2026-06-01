@@ -6,7 +6,7 @@ loadDotEnv({ path: join(import.meta.dirname ?? __dirname, "..", ".env") });
 
 import { loadConfig, watchConfig, onConfigChange, expandHome } from "./services/config-loader";
 import { startDashboard } from "./dashboard/server";
-import { WhatsAppConnector, TelegramConnector, DiscordConnector, NotchConnector } from "./connectors";
+import { WhatsAppConnector, TelegramConnector, DiscordConnector } from "./connectors";
 import type { Connector } from "./connectors";
 import { initCrons, stopCrons, setDeliveryFn } from "./services/cron";
 import { acquirePid, releasePid } from "./services/pid";
@@ -103,18 +103,6 @@ async function main() {
     startWithRetry(dc).catch((err) =>
       log.error({ err, channel: "discord" }, "startWithRetry unexpectedly threw"),
     );
-  }
-
-  // Notch (Noce) is always-on unless explicitly disabled. No external client
-  // to fail, so it's cheap to keep running even when the Notch UI isn't open.
-  if (config.channels.notch?.enabled !== false) {
-    const n = new NotchConnector(config);
-    connectors.push(n);
-    try {
-      await n.start();
-    } catch (err) {
-      log.error({ err }, "Failed to start Notch connector");
-    }
   }
 
   // Set up cron delivery function
@@ -277,7 +265,7 @@ async function main() {
   //      mcp-remote. Atomically rewrites tokens.json. mcp-remote children
   //      then always see a fresh access_token and never open a browser tab.
   //
-  //   2. Health monitor: every 6h, emit notch alert if any MCP still ends up
+  //   2. Health monitor: every 6h, log an alert if any MCP still ends up
   //      in needs-auth / failed (e.g. revoked refresh token, provider
   //      changed). Visibility is the cheapest reliability tool.
   //

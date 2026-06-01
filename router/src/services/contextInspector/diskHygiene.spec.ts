@@ -135,7 +135,7 @@ test("recentSessions: limit=5 caps results even if more exist", async () => {
 });
 
 test("recentSessions: routeHint extracted from /jarvis/agents/<NAME> slug", async () => {
-  const slug = join(tmpRoot, "-Users-zorahrel--claude-jarvis-agents-notch");
+  const slug = join(tmpRoot, "-Users-zorahrel--claude-jarvis-agents-jarvis");
   await fs.mkdir(slug, { recursive: true });
   await writeAssistantJsonl(join(slug, "s1.jsonl"), 1, {
     input: 1,
@@ -146,5 +146,5 @@ test("recentSessions: routeHint extracted from /jarvis/agents/<NAME> slug", asyn
 
   const sessions = await recentSessions(tmpRoot, 10);
   assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].routeHint, "notch");
+  assert.equal(sessions[0].routeHint, "jarvis");
 });

@@ -317,9 +317,8 @@ interface SdkSession {
   pendingReject: ((e: Error) => void) | null;
   /**
    * Optional per-turn callback fired for every assistant text DELTA as it
-   * arrives from the SDK. Used by streaming-TTS callers (notch connector
-   * with `JARVIS_TTS_LLM_STREAM=1`) to feed the Cartesia WS pipeline before
-   * the full reply is ready. Cleared when the turn resolves/rejects so it
+   * arrives from the SDK. Used by streaming consumers that need partial
+   * output before the full reply is ready. Cleared when the turn resolves/rejects so it
    * never leaks across turns. NOT invoked for tool_use, only `block.text`.
    */
   pendingOnChunk?: ((delta: string) => void) | null;
@@ -666,10 +665,9 @@ function buildSdkOptions(opts: {
     strictMcpConfig: true,
     // Enable token-level delta streaming. Without this, the SDK delivers
     // each turn's reply as one or two `assistant` events with the whole
-    // text already concatenated → notch chat fills "tutto in un pezzo".
-    // With it, we receive `stream_event` messages carrying
-    // `content_block_delta` (BetaTextDelta) chunks and can pipe them to
-    // the notch SSE display + Cartesia WS streaming session token-by-token.
+    // text already concatenated. With it, we receive `stream_event` messages
+    // carrying `content_block_delta` (BetaTextDelta) chunks and can stream
+    // partial output to consumers token-by-token via the onAssistantDelta callback.
     includePartialMessages: true,
     env: buildSafeEnv(opts.agentEnv, { isSubagent: opts.isSubagent, notify: opts.notify }),
     ...(opts.effort ? { effort: opts.effort } : {}),
@@ -918,8 +916,8 @@ function spawnSession(
         // Assistant message: collect text + track tool_use (Write/Edit + bg starts).
         // We do NOT fire pendingOnChunk here when partial-message streaming is
         // active — the deltas have already been delivered above. Falling back
-        // to firing on the full block.text would emit duplicate text into
-        // Cartesia / the chat display.
+        // to firing on the full block.text would emit duplicate text to the
+        // streaming consumer.
         if (e.type === "assistant" && Array.isArray(e.message?.content)) {
           for (const block of e.message.content) {
             if (!block || typeof block !== "object") continue;
@@ -1289,8 +1287,7 @@ export async function askClaude(
     /**
      * Per-turn assistant text DELTA callback. Fires for every text block as it
      * arrives from the SDK, before the full reply is ready. Used by streaming
-     * TTS callers (notch connector with `JARVIS_TTS_LLM_STREAM=1`) to feed the
-     * Cartesia WS pipeline incrementally. Errors thrown by the callback are
+     * consumers that need incremental output. Errors thrown by the callback are
      * caught and logged — they never break turn handling.
      */
     onChunk?: (delta: string) => void;

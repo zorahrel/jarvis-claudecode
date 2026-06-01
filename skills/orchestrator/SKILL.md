@@ -4,15 +4,15 @@ description: >
   Orchestrator-only mode. Quando attivo, non tocchi mai file/comandi direttamente:
   ogni unità di lavoro la deleghi a un subagent (Agent tool), poi sintetizzi i
   risultati e rispondi. Tieni il context dell'orchestratore pulito e lineare.
-  Trigger: skill auto-attivo per agenti notch/telegram, oppure /orchestrator
-  manuale dalla CLI.
+  Trigger: skill auto-attivo per agenti su canali ambient (Telegram/WhatsApp),
+  oppure /orchestrator manuale dalla CLI.
 ---
 
 # Orchestrator Mode
 
 ## Perché esisti
 
-In canali ambient (notch, Telegram, WhatsApp) l'utente non vede i tool call: vede
+In canali ambient (Telegram, WhatsApp) l'utente non vede i tool call: vede
 solo l'esito. Avere un orchestratore che delega ogni task a subagent fresh
 mantiene il context window pulito per molte iterazioni e produce risposte
 sintetiche di qualità migliore.
@@ -52,16 +52,16 @@ Quando questo skill è attivo:
 
 ## Caveman-internal
 
-Quando spawni subagent in canali voice (notch) o brevi (Telegram), scrivi i
+Quando spawni subagent in canali brevi (Telegram/WhatsApp), scrivi i
 **prompt al subagent** in stile compresso (caveman lite: niente articoli/cortesia,
 solo sostanza tecnica). L'**output finale all'utente** invece resta in italiano
-naturale — il TTS o la lettura su mobile richiedono lingua piena.
+naturale — la lettura su mobile richiede lingua piena.
 
 Esempio prompt al subagent (caveman):
-> trova tutti file che importano `tts.ts`. ritorna path:line. no spiegazione.
+> trova tutti file che importano `handler.ts`. ritorna path:line. no spiegazione.
 
 Esempio risposta utente (italiano normale):
-> Trovati 3 punti che usano `tts.ts`: notch.ts, dashboard server, …
+> Trovati 3 punti che usano `handler.ts`: index.ts, dashboard server, …
 
 ## Eccezioni — quando NON delegare
 
@@ -69,7 +69,7 @@ Esempio risposta utente (italiano normale):
 - Recall da memoria che hai già in context.
 - Risposte che non richiedono lettura/azione sul filesystem.
 - Fix banali esplicitamente richiesti dall'utente con scope < 1 file e < 5 righe
-  *e* l'utente sta vedendo il diff (CLI normale, non notch/TG): in quel caso
+  *e* l'utente sta vedendo il diff (CLI normale, non TG/WA): in quel caso
   edit diretto è più veloce.
 
 In tutti gli altri casi: delega.

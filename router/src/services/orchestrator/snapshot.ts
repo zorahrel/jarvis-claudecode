@@ -2,7 +2,7 @@
  * Stub re-export for tsx ESM resolution.
  *
  * Some import chain (likely a transitive dynamic import inside
- * `agent-conductor` or `notch/orchestrator-events.ts`) resolves to
+ * `agent-conductor`) resolves to
  * `services/orchestrator/snapshot.js`. The actual snapshot builder
  * lives in the `agent-conductor` package — this file only exists so
  * tsx's ESM resolver finds *something* and doesn't spam ERR_MODULE_NOT_FOUND

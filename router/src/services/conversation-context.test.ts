@@ -127,8 +127,8 @@ test("Telegram supergroup: chatTitle + fromName fallback", () => {
   assert.equal(speakerLabel(m, deps), "Giulia");
 });
 
-test("no channelContext (e.g. notch) → null", () => {
-  const m = msg({ channel: "notch", from: "notch", channelContext: undefined });
+test("no channelContext (e.g. cron / local surface) → null", () => {
+  const m = msg({ channel: "telegram", from: "local", channelContext: undefined });
   assert.equal(buildConversationContext(m, noTools(), deps), null);
   assert.equal(speakerLabel(m, deps), null);
   assert.equal(isGroupChat(m), false);

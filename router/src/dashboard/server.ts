@@ -33,25 +33,6 @@ const HOME = process.env.HOME!;
 const DIST_DIR = join(HOME, ".claude/jarvis/router/dashboard/dist");
 const USE_REACT = existsSync(join(DIST_DIR, "index.html"));
 
-// ---- Notch orb static serving ----
-// The Notch surfaces (native WKWebView in the tray app + dashboard iframe
-// mirror) share the same orb bundle. The canonical copy now lives in the
-// standalone agent-notch repo (https://github.com/zorahrel/agent-notch).
-// The Swift WKWebView fetches `${backend}/notch/orb/notch.html` over HTTP
-// and the dashboard mirror serves it from the same prefix here — one source
-// of truth with no build step or duplication.
-//
-// History: this used to point at tray-app/Sources/JarvisNotch/Orb when the
-// notch sources lived in the monorepo. Removed in jarvis-claudecode#29 when
-// the notch app was extracted to its own repo; this path was missed in that
-// refactor and the orb returned 404 until it was fixed.
-const NOTCH_ORB_DIR = (() => {
-  const override = process.env.AGENT_NOTCH_SRC;
-  const root = override && existsSync(override) ? override : join(HOME, "agent-notch");
-  return join(root, "Sources/AgentNotch/Orb");
-})();
-const NOTCH_ORB_PREFIX = "/notch/orb/";
-
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js":   "text/javascript; charset=utf-8",
@@ -76,33 +57,13 @@ function serveStatic(res: ServerResponse, filePath: string): boolean {
     if (filePath.includes("/assets/")) {
       headers["Cache-Control"] = "public, max-age=31536000, immutable";
     } else if (ext === ".html") {
-      // HTML shells (index.html, notch.html) must never be cached — they
-      // embed hashed asset URLs that change on every build. A stale HTML
-      // would point browsers at a bundle that no longer exists, or serve
-      // an old `NotchMirror` with outdated styles.
+      // HTML shells (index.html) must never be cached — they embed hashed
+      // asset URLs that change on every build. A stale HTML would point
+      // browsers at a bundle that no longer exists.
       headers["Cache-Control"] = "no-cache, must-revalidate";
     }
     res.writeHead(200, headers);
     res.end(content);
-    return true;
-  } catch { return false; }
-}
-
-const EMBED_STYLE_INJECTION =
-  '<style>html,body{background:#08090a !important;}</style>';
-
-function serveEmbeddedNotch(res: ServerResponse, filePath: string): boolean {
-  if (!existsSync(filePath)) return false;
-  try {
-    const html = readFileSync(filePath, "utf-8").replace(
-      "</head>",
-      `  ${EMBED_STYLE_INJECTION}\n</head>`,
-    );
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-cache, must-revalidate",
-    });
-    res.end(html);
     return true;
   } catch { return false; }
 }
@@ -144,32 +105,6 @@ export function startDashboard(port: number): void {
     // API routes — pass full url so query params are preserved
     if (pathname.startsWith("/api/")) {
       handleApi(req, res, url);
-      return;
-    }
-
-    // Notch orb bundle — served from the tray-app source so the HTTP dashboard
-    // and the native WKWebView stay byte-identical. 404 on miss (do NOT fall
-    // through to the React index, or the iframe would render the dashboard
-    // inside itself).
-    if (pathname.startsWith(NOTCH_ORB_PREFIX)) {
-      const rel = pathname.slice(NOTCH_ORB_PREFIX.length).replace(/\/+$/, "");
-      if (!rel || rel.includes("..")) {
-        res.writeHead(404, { "Content-Type": "text/plain" });
-        res.end("not found");
-        return;
-      }
-      const orbPath = join(NOTCH_ORB_DIR, rel);
-      // `notch.html?embed=dashboard` — inject a dark background override for
-      // the dashboard iframe. The WKWebView loads the same URL without the
-      // query param, so the native notch stays transparent (over-window
-      // compositing requires it); the browser iframe gets an opaque backdrop
-      // and no longer flashes the default white canvas.
-      if (rel === "notch.html" && /[?&]embed=dashboard\b/.test(url)) {
-        if (serveEmbeddedNotch(res, orbPath)) return;
-      }
-      if (orbPath.startsWith(NOTCH_ORB_DIR) && serveStatic(res, orbPath)) return;
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      res.end("orb asset not found");
       return;
     }
 

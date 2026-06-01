@@ -114,7 +114,7 @@ export function telegramChatAllowed(
  * pattern via a clear error.
  *
  * Returns `allowed: false` only when both targets are non-null and equal.
- * Falsy currentTarget (e.g. notch sessions, cron, no-channel) are passthrough.
+ * Falsy currentTarget (e.g. cron, no-channel) are passthrough.
  */
 export function selfChatGuard(
   currentTarget: string | null,

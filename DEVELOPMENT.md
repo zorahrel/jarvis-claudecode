@@ -8,7 +8,6 @@
 - TypeScript: check with `npx tsc --noEmit` before restart
 - Restart: `launchctl kickstart -k gui/$(id -u)/com.jarvis.router`
 - Dashboard changes require router restart
-- Tray app: `cd tray-app && swift build && pkill JarvisTray && .build/debug/JarvisTray &`
 
 ## Key files
 - `ARCHITECTURE.md` — full system architecture, ports, directory structure
@@ -17,7 +16,6 @@
 - `router/config.yaml` — route configuration (source of truth)
 - `router/src/` — TypeScript source
 - `agents/*/CLAUDE.md` — per-agent system prompts
-- `tray-app/` — macOS menu bar app (Swift)
 
 ## Spawn discipline (`services/claude.ts` `buildSpawnArgs()`)
 - `--strict-mcp-config` always (nothing leaks from user scope)
@@ -37,7 +35,7 @@ Update `CHANGELOG.md` → `[Unreleased]` on user-facing changes. Skip internal r
 
 ## Contributing back upstream
 Upstream-worthy (ask user first, then open PR to `zorahrel/jarvis-claudecode:main`):
-- Bugs in `router/src/`, `router/dashboard/`, `tray-app/`, `router/scripts/*.py`
+- Bugs in `router/src/`, `router/dashboard/`, `router/scripts/*.py`
 - New channels, capabilities, tools, dashboard features
 - Setup / CI / docs fixes, new agent templates under `agents.example/`
 

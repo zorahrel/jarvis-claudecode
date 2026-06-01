@@ -98,19 +98,7 @@ function deriveCruftHints(name: string, spawn: SpawnConfig, breakdown: Breakdown
   const skillsCat = breakdown.categories.find((c) => c.category === "skills_index");
   const subagentsCat = breakdown.categories.find((c) => c.category === "subagents");
 
-  // Hint 1: notch inherits user scope but is documented as ambient/chat
-  if (name === "notch" && spawn.inheritUserScope === true) {
-    const savings = (skillsCat?.tokens ?? 0) + (subagentsCat?.tokens ?? 0);
-    hints.push({
-      id: "notch-user-scope",
-      severity: "warn",
-      message:
-        "notch is an ambient/chat agent but inherits user-scope (skills + subagents). Set inheritUserScope: false to drop the GSD index and other user-scope artifacts.",
-      potentialSavingsTokens: savings > 0 ? savings : undefined,
-    });
-  }
-
-  // Hint 2: jarvis fullAccess — propose chat/code split
+  // Hint: jarvis fullAccess — propose chat/code split
   if (name === "jarvis" && spawn.fullAccess === true && (mcpCat?.tokens ?? 0) >= 10000) {
     hints.push({
       id: "split-jarvis-chat",

@@ -58,14 +58,6 @@ export const SUGGESTIONS: ConfigSuggestion[] = [
       "fullAccess on jarvis loads all 13 MCP servers (~10-15k tokens) on every turn — cruft for chat-only interactions per RESEARCH.md per-route table.",
   },
   {
-    id: "notch-collapse-userscope",
-    when: "agent === 'notch' AND inheritUserScope === true AND mcp_unused.length >= 8",
-    action:
-      "Set inheritUserScope: false on notch agent.yaml — notch is the ambient cruscotto, doesn't need 18 GSD subagents + 13 MCP.",
-    rationale:
-      "notch agent.yaml comment 'cruscotto ambient' contradicts the ~/.claude/ inheritance per CONTEXT.md decisions section.",
-  },
-  {
     id: "gsd-namespace-gating",
     when: "skill_unused contains gsd:* entries AND agent !== 'jarvis-code'",
     action: "Gate the gsd:* plugin per-agent — only enable in coding workspaces.",
@@ -158,8 +150,7 @@ export function detectCruft(opts: DetectCruftOpts): CruftFinding[] {
 
 /**
  * Match findings against SUGGESTIONS conditions.
- * Optional `ctx` enriches matching with agent name + inheritUserScope flag
- * (needed for the notch-collapse-userscope rule).
+ * Optional `ctx` enriches matching with agent name + inheritUserScope flag.
  */
 export function getSuggestionsForCruft(
   findings: CruftFinding[],
@@ -172,15 +163,6 @@ export function getSuggestionsForCruft(
   // split-jarvis-chat
   if (mcpUnused.length >= 5 && ctx?.agentName === "jarvis") {
     matched.push(SUGGESTIONS.find((s) => s.id === "split-jarvis-chat")!);
-  }
-
-  // notch-collapse-userscope
-  if (
-    ctx?.agentName === "notch" &&
-    ctx?.inheritUserScope === true &&
-    mcpUnused.length >= 8
-  ) {
-    matched.push(SUGGESTIONS.find((s) => s.id === "notch-collapse-userscope")!);
   }
 
   // gsd-namespace-gating

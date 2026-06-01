@@ -87,8 +87,8 @@ function whoStr(info: SenderInfo): string {
 
 /**
  * Build the always-on conversation header prepended to the user prompt.
- * Returns null only when there is no channel context (e.g. notch — a single
- * local surface with no where/who concept).
+ * Returns null only when there is no channel context (e.g. a cron or
+ * local-only surface with no where/who concept).
  */
 export function buildConversationContext(
   msg: IncomingMessage,

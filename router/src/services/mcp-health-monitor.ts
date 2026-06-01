@@ -2,8 +2,8 @@
  * MCP Health Monitor — periodic check + alert when servers need re-auth.
  *
  * Polls `claude mcp list` every 6h (configurable) via `refreshMcpStatus`,
- * scans for `auth` / `failed` statuses, emits a notch alert + structured
- * log so the user knows BEFORE the next attempt fails.
+ * scans for `auth` / `failed` statuses, and logs a structured alert so the
+ * user knows BEFORE the next attempt fails.
  *
  * Pairs with:
  *   - `mcp-auth-backup.ts`  (daily snapshot of token store)
@@ -15,7 +15,6 @@
 
 import { logger } from "./logger";
 import { listMcpStatus, refreshMcpStatus } from "./mcp-status";
-import { emitNotch } from "../notch/events";
 
 const log = logger.child({ module: "mcp-health-monitor" });
 
@@ -62,20 +61,10 @@ async function tick(): Promise<void> {
 
     const names = problems.map((s) => `${s.name} (${s.status})`).join(", ");
     const summary = `${problems.length} MCP server(s) need attention: ${names}`;
-    log.warn({ problems: problems.map((p) => ({ name: p.name, status: p.status })) }, summary);
-
-    // Surface via notch HUD as a state.change with a banner-style payload.
-    try {
-      emitNotch({
-        type: "message.out",
-        data: {
-          text: `🔐 MCP Health: ${summary}. Re-auth at http://localhost:3340/mcp-health`,
-          from: "mcp-health-monitor",
-        },
-      });
-    } catch (err) {
-      log.warn({ err }, "[mcp-health] notch emit failed (non-fatal)");
-    }
+    log.warn(
+      { problems: problems.map((p) => ({ name: p.name, status: p.status })) },
+      `🔐 ${summary}. Re-auth in the dashboard Tools tab.`,
+    );
 
     for (const p of problems) lastAlerted.set(p.name, now);
   } catch (err) {

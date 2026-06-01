@@ -18,7 +18,6 @@ Each channel has routes with per-agent capabilities and scoping.
 | Router | 3340/3341 | com.jarvis.router (launchd) | `~/.claude/jarvis/router/` |
 | ChromaDB | 3342 | com.jarvis.chroma (launchd) | `scripts/chroma-server.py` |
 | OMEGA | 3343 | com.jarvis.omega (launchd) | `scripts/omega-server.py` |
-| Tray App | — | JarvisTray | `~/.claude/jarvis/tray-app/` |
 
 Extra services can be added via a `services:` section in `router/config.yaml`
 (see `router/config.example.yaml`). They show up in the dashboard and can be
@@ -64,7 +63,6 @@ managed by the tray app if they provide a `launchd:` config.
 │   └── wa-auth/              # WhatsApp session
 ├── agents/                   # Per-agent workspaces (gitignored)
 ├── memory/                   # Markdown memory (gitignored)
-├── tray-app/                 # macOS menu bar app (Swift/SwiftUI)
 ├── media/                    # Temp media files (gitignored)
 ├── logs/                     # Service logs (gitignored)
 ├── chroma-data/              # ChromaDB persistence (gitignored)
