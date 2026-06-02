@@ -42,6 +42,17 @@ Write tools (require `discord:write`):
 - `discord_edit_own` — edit a message previously sent by the bot.
 - `discord_delete_own` — delete a message previously sent by the bot.
 
+**Server administration is intentionally NOT in the MCP.** The `discord_*` tools
+cover messaging only (read/send/react). Guild administration — creating/editing/
+moving channels & categories, roles, and permission overwrites — lives in the
+`discord` CLI (`router/scripts/discord`, ADMIN bot token), so destructive ops
+(`delete-channel`/`delete-role`) are gated behind a manual run + `--yes` instead
+of being callable as an agent tool. Reuses `DISCORD_BOT_TOKEN`/`DISCORD_GUILD_ID`
+from `router/.env`; no second token, no extra process. Commands: `channels` ·
+`roles` · `members` · `read` (read), `create-channel` · `edit-channel` · `move` ·
+`create-category` · `create-role` · `edit-role` · `assign-role` · `perm` · `api`
+(write).
+
 ### WhatsApp (`whatsapp` / `whatsapp:write`)
 
 Read tools:
