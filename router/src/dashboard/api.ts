@@ -6,7 +6,7 @@ import { getProcesses, killProcessByKey, killSessionsByAgent, killSessionsUsingM
 import { loadSessionThread, isValidKey } from "../services/session-cache";
 import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
-import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns, getDeliveryFn } from "../services/cron";
+import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns, getDeliveryFn, setCronEnabled } from "../services/cron";
 import { resolveToken } from "../services/notify-tokens";
 import {
   hasNotifyBudget,
@@ -360,6 +360,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       prompt: s.job.prompt,
       timeout: s.job.timeout ?? 300,
       delivery: s.job.delivery ?? null,
+      enabled: s.job.enabled !== false,
       lastRun: s.lastRun,
       lastStatus: s.lastStatus,
       lastDurationMs: s.lastDurationMs,
@@ -379,6 +380,28 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     const name = decodeURIComponent(path.split("/")[3]);
     const result = await triggerCronJob(name);
     json(req, res, result, result.ok ? 200 : 400);
+
+  } else if (path.match(/^\/api\/crons\/[^/]+\/toggle$/) && req.method === "POST") {
+    // Pause/resume a cron without deleting it. Persists to config.yaml; the
+    // file-watcher re-runs initCrons so the change takes effect live.
+    try {
+      const name = decodeURIComponent(path.split("/")[3]);
+      const body = await parseBody(req);
+      const raw = readRawConfig();
+      if (!raw.crons || !Array.isArray(raw.crons)) { json(req, res, { error: "no crons configured" }, 404); return; }
+      const idx = raw.crons.findIndex((c: any) => c.name === name);
+      if (idx < 0) { json(req, res, { error: "cron not found" }, 404); return; }
+      const enabled = body.enabled !== undefined
+        ? !!body.enabled
+        : raw.crons[idx].enabled === false; // no body → flip current state
+      if (enabled) delete raw.crons[idx].enabled; // omit when enabled (default)
+      else raw.crons[idx].enabled = false;
+      await writeRawConfig(raw);
+      setCronEnabled(name, enabled); // reflect immediately; watcher will re-confirm
+      invalidateHtmlCache();
+      log.info("[dashboard] %s cron job: %s", enabled ? "Enabled" : "Paused", name);
+      json(req, res, { ok: true, enabled });
+    } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // --- SKILLS & PLUGINS ---
   } else if (path === "/api/skills" && req.method === "GET") {
@@ -2561,6 +2584,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       if (body.workspace !== undefined) raw.crons[idx].workspace = body.workspace;
       if (body.prompt !== undefined) raw.crons[idx].prompt = body.prompt;
       if (body.timeout !== undefined) raw.crons[idx].timeout = body.timeout;
+      if (body.enabled !== undefined) {
+        if (body.enabled) delete raw.crons[idx].enabled;
+        else raw.crons[idx].enabled = false;
+      }
       await writeRawConfig(raw);
       invalidateHtmlCache();
       log.info("[dashboard] Updated cron job: %s", name);

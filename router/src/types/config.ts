@@ -212,6 +212,12 @@ export interface CronJob {
    * exchange before composing its message. Set false to keep cron context-free.
    */
   includeContext?: boolean;
+  /**
+   * When false, the job is paused: the scheduler skips it on tick(), but it
+   * stays in config and can still be triggered manually. Defaults to true
+   * (omitted in YAML means enabled).
+   */
+  enabled?: boolean;
 }
 
 /** Rate limit config */

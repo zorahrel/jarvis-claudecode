@@ -183,6 +183,17 @@ export function getCronStates(): CronState[] {
   return cronStates;
 }
 
+/** Pause/resume a job in-memory immediately, so dashboard reads reflect the
+ *  change without waiting for the config file-watcher to re-run initCrons.
+ *  The config write is still the source of truth (survives restart); this just
+ *  removes the propagation race. Returns false if the job isn't loaded. */
+export function setCronEnabled(name: string, enabled: boolean): boolean {
+  const state = cronStates.find(s => s.job.name === name);
+  if (!state) return false;
+  state.job.enabled = enabled;
+  return true;
+}
+
 export async function triggerCronJob(name: string): Promise<{ ok: boolean; error?: string }> {
   const state = cronStates.find(s => s.job.name === name);
   if (!state) return { ok: false, error: "Job not found: " + name };
@@ -209,6 +220,7 @@ function tick(): void {
   const now = new Date();
   for (const state of cronStates) {
     if (state.lastStatus === "running") continue;
+    if (state.job.enabled === false) continue; // paused — skip scheduled fires (manual trigger still works)
     try {
       const expr = parseExpression(state.job.schedule, {
         tz: state.job.timezone ?? "UTC",

@@ -92,6 +92,7 @@ interface CronState {
   model?: string
   prompt?: string
   delivery?: { channel: string; target: string } | null
+  enabled?: boolean
   lastRun?: number
   lastStatus?: string
   lastDurationMs?: number
@@ -223,6 +224,20 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
     [onToast, refreshCrons, loadRuns, runs],
   )
 
+  const toggleCron = useCallback(
+    async (name: string, enabled: boolean) => {
+      try {
+        await api.toggleCron(name, enabled)
+        onToast(enabled ? 'Cron riattivato: ' + name : 'Cron in pausa: ' + name, 'success')
+        setCronPanelData((prev) => (prev && prev.name === name ? { ...prev, enabled } : prev))
+        refreshCrons()
+      } catch (e: unknown) {
+        onToast(e instanceof Error ? e.message : String(e), 'error')
+      }
+    },
+    [onToast, refreshCrons],
+  )
+
   const confirmDeleteCron = useCallback(async () => {
     if (!deleteTarget) return
     try {
@@ -348,10 +363,11 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {(cronJobs || []).map((cj) => {
             const cs = cj as unknown as CronState
+            const paused = cs.enabled === false
             const nextRun = nextCronRun(cs.schedule || '')
-            const nextLabel = nextRun ? `in ${fmtInterval(nextRun.getTime() - Date.now())}` : '?'
+            const nextLabel = paused ? 'paused' : nextRun ? `in ${fmtInterval(nextRun.getTime() - Date.now())}` : '?'
             return (
-              <Card key={cs.name} padding="12px 16px">
+              <Card key={cs.name} padding="12px 16px" style={paused ? { opacity: 0.6 } : undefined}>
                 <div
                   style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
                   onClick={() => openCronDetail(cs)}
@@ -360,9 +376,13 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                     <CronStatusIcon status={cs.lastStatus} />
                   </span>
                   <span style={{ fontWeight: 600, color: 'var(--text-1)', fontSize: 13 }}>{cs.name}</span>
-                  <Badge tone={statusTone(cs.lastStatus)} size="xs">
-                    {cs.lastStatus || 'idle'}
-                  </Badge>
+                  {paused ? (
+                    <Badge tone="muted" size="xs">paused</Badge>
+                  ) : (
+                    <Badge tone={statusTone(cs.lastStatus)} size="xs">
+                      {cs.lastStatus || 'idle'}
+                    </Badge>
+                  )}
                   {cs.delivery && (
                     <Tooltip content={`Target: ${cs.delivery.channel} → ${cs.delivery.target}`} placement="top">
                       <a
@@ -396,6 +416,9 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
                       : 'Last: ' + ago(cs.lastRun || 0) + ' · ' + (cs.runCount || 0) + ' runs'}
                   </span>
                   <span>Next run: <span style={{ color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{nextLabel}</span></span>
+                  <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center' }}>
+                    <Switch checked={!paused} onChange={(next) => toggleCron(cs.name, next)} />
+                  </span>
                 </div>
               </Card>
             )
@@ -411,7 +434,7 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
       >
         {cronPanel === 'cron-detail' && cronPanelData && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               <Button
                 size="sm"
                 variant="ghost"
@@ -430,6 +453,17 @@ export function Cron({ onToast }: { onToast: (msg: string, type: 'success' | 'er
               >
                 {editingCron ? 'Cancel edit' : 'Edit'}
               </Button>
+              {!editingCron && (
+                <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                    {cronPanelData.enabled === false ? 'In pausa' : 'Attivo'}
+                  </span>
+                  <Switch
+                    checked={cronPanelData.enabled !== false}
+                    onChange={(next) => toggleCron(cronPanelData.name, next)}
+                  />
+                </span>
+              )}
             </div>
 
             {!editingCron ? (
@@ -845,6 +879,53 @@ function RunHistoryList({
         )
       })}
     </div>
+  )
+}
+
+function Switch({
+  checked,
+  onChange,
+  title,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  title?: string
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      title={title ?? (checked ? 'Attivo — clicca per mettere in pausa' : 'In pausa — clicca per riattivare')}
+      onClick={(e) => {
+        e.stopPropagation()
+        onChange(!checked)
+      }}
+      style={{
+        width: 34,
+        height: 18,
+        borderRadius: 9,
+        border: '1px solid var(--border)',
+        background: checked ? 'var(--ok)' : 'var(--surface-subtle)',
+        position: 'relative',
+        cursor: 'pointer',
+        padding: 0,
+        flexShrink: 0,
+        transition: 'background 0.15s',
+      }}
+    >
+      <span
+        style={{
+          position: 'absolute',
+          top: 1,
+          left: checked ? 17 : 1,
+          width: 14,
+          height: 14,
+          borderRadius: '50%',
+          background: '#fff',
+          transition: 'left 0.15s',
+        }}
+      />
+    </button>
   )
 }
 

@@ -445,6 +445,7 @@ export interface ToolsResponse {
 export interface CronJob {
   name: string
   schedule?: string
+  enabled?: boolean
   lastRun?: string
   nextRun?: string
   [key: string]: unknown
@@ -805,6 +806,11 @@ export const api = {
     }),
   runCron: (name: string) =>
     request<void>(`/api/crons/${encodeURIComponent(name)}/run`, { method: 'POST' }),
+  toggleCron: (name: string, enabled: boolean) =>
+    request<{ ok: boolean; enabled: boolean }>(`/api/crons/${encodeURIComponent(name)}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
   cronRuns: (name: string, limit = 50) =>
     request<{ runs: CronRun[] }>(`/api/crons/${encodeURIComponent(name)}/runs?limit=${limit}`),
 
