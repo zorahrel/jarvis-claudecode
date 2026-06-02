@@ -42,16 +42,23 @@ Write tools (require `discord:write`):
 - `discord_edit_own` — edit a message previously sent by the bot.
 - `discord_delete_own` — delete a message previously sent by the bot.
 
-**Server administration is intentionally NOT in the MCP.** The `discord_*` tools
-cover messaging only (read/send/react). Guild administration — creating/editing/
-moving channels & categories, roles, and permission overwrites — lives in the
-`discord` CLI (`router/scripts/discord`, ADMIN bot token), so destructive ops
-(`delete-channel`/`delete-role`) are gated behind a manual run + `--yes` instead
-of being callable as an agent tool. Reuses `DISCORD_BOT_TOKEN`/`DISCORD_GUILD_ID`
-from `router/.env`; no second token, no extra process. Commands: `channels` ·
-`roles` · `members` · `read` (read), `create-channel` · `edit-channel` · `move` ·
-`create-category` · `create-role` · `edit-role` · `assign-role` · `perm` · `api`
-(write).
+Admin tools (require `discord:admin` — **owner-tier only**):
+- `discord_list_roles` — roles in a guild (id/name/color/position).
+- `discord_create_channel` / `discord_create_category` / `discord_edit_channel` — channels & categories (edit covers move/reorder).
+- `discord_create_role` / `discord_edit_role` / `discord_assign_role` — roles (assign takes `remove:true` to unassign).
+- `discord_set_permission` — channel permission overwrite for a role/member.
+- `discord_delete_channel` / `discord_delete_role` — **destructive, require `confirm:true`**.
+
+Guild administration is now agent-callable but tightly gated: `discord:admin` is
+owner-only by construction (the `TIER_TOOL_WHITELIST` regexes match `:write` but
+not `:admin`, so non-owner tiers can't be assigned it), destructive ops demand
+`confirm:true`, and every op is restricted to the agent's guild scope
+(`allowedGuilds`, else the current guild) and audit-logged. Implemented via
+`client.rest` (the connector's bot token — no second token, no extra process).
+
+The standalone `discord` CLI (`router/scripts/discord`) remains for shell/manual
+use of the same surface (handy outside an agent, or for the raw `api` escape
+hatch which is deliberately NOT exposed as a tool).
 
 ### WhatsApp (`whatsapp` / `whatsapp:write`)
 
