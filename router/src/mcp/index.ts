@@ -18,7 +18,7 @@
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentConfig } from "../types";
 import {
-  canDiscord, canDiscordWrite,
+  canDiscord, canDiscordWrite, canDiscordAdmin,
   canWhatsapp, canWhatsappWrite,
   canTelegram, canTelegramWrite,
   canChannels,
@@ -38,8 +38,8 @@ export type MessagingMcps = Record<string, McpSdkServerConfigWithInstance>;
 export function buildMessagingMcps(opts: BuildMcpsOpts): MessagingMcps {
   const out: MessagingMcps = {};
 
-  if (canDiscord(opts.agent)) {
-    out.discord = createDiscordMcp({ ...opts, canWrite: canDiscordWrite(opts.agent) });
+  if (canDiscord(opts.agent) || canDiscordAdmin(opts.agent)) {
+    out.discord = createDiscordMcp({ ...opts, canWrite: canDiscordWrite(opts.agent), canAdmin: canDiscordAdmin(opts.agent) });
   }
   if (canWhatsapp(opts.agent)) {
     out.whatsapp = createWhatsappMcp({ ...opts, canWrite: canWhatsappWrite(opts.agent) });

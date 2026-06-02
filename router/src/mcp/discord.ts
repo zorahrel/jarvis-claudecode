@@ -12,6 +12,7 @@
 
 import { z } from "zod";
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance, type SdkMcpToolDefinition } from "@anthropic-ai/claude-agent-sdk";
+import { Routes } from "discord.js";
 import type { TextChannel, NewsChannel, ThreadChannel, Message } from "discord.js";
 import type { AgentConfig } from "../types";
 import { discordClient } from "../services/connectors";
@@ -24,6 +25,7 @@ interface CreateOpts {
   agent: AgentConfig;
   sessionKey: string;
   canWrite: boolean;
+  canAdmin: boolean;
 }
 
 const SERVER = "discord";
@@ -61,7 +63,7 @@ function summarizeMessage(m: Message): {
 }
 
 export function createDiscordMcp(opts: CreateOpts): McpSdkServerConfigWithInstance {
-  const { agent, sessionKey, canWrite } = opts;
+  const { agent, sessionKey, canWrite, canAdmin } = opts;
   const scope = agent.discord;
 
   function getCurrent(): { guildId: string | null; channelId: string } | null {
@@ -425,8 +427,220 @@ export function createDiscordMcp(opts: CreateOpts): McpSdkServerConfigWithInstan
     },
   );
 
+  // ---------- ADMIN TOOLS (guild administration) ----------
+  // Gated by `discord:admin` (owner-tier only — see TIER_TOOL_WHITELIST). Uses
+  // the connector's bot token via client.rest — the same raw Discord v10 REST
+  // endpoints as the `discord` CLI. Destructive ops require `confirm: true`.
+  // Every op is restricted to the agent's guild scope and audit-logged.
+
+  function guildScopeOrThrow(targetGuildId: string | null): string {
+    const g = targetGuildId || getCurrent()?.guildId || null;
+    if (!g) throw new Error("guild_id required (no current guild in this session)");
+    if (scope?.allowedGuilds && scope.allowedGuilds.length > 0) {
+      if (!scope.allowedGuilds.includes(g)) throw new Error(`guild ${g} is not in allowedGuilds`);
+    } else {
+      const cur = getCurrent()?.guildId ?? null;
+      if (cur && g !== cur) throw new Error("cross-guild admin requires allowedGuilds in agent.yaml");
+    }
+    return g;
+  }
+  const toColor = (c?: string): number | undefined => {
+    if (!c) return undefined;
+    const n = parseInt(String(c).replace(/^#/, ""), 16);
+    return Number.isNaN(n) ? undefined : n;
+  };
+  const CH_TYPE: Record<string, number> = { text: 0, voice: 2, category: 4, announcement: 5, stage: 13, forum: 15 };
+
+  function adminTool(
+    name: string,
+    description: string,
+    schema: z.ZodRawShape,
+    run: (client: any, args: any) => Promise<unknown>,
+    o: { destructive?: boolean } = {},
+  ): SdkMcpToolDefinition<any> {
+    return tool(name, description, schema, async (args: any) => {
+      const start = Date.now();
+      const auditFail = (reason: string) => {
+        auditTool({ server: SERVER, tool: name, sessionKey, args, ok: false, durationMs: Date.now() - start, isWrite: true, errorReason: reason });
+        return fail(reason);
+      };
+      if (!canAdmin) return auditFail("requires `discord:admin` in agent.yaml (owner-tier only)");
+      const client = discordClient();
+      if (!client) return auditFail("Discord client unavailable");
+      if (o.destructive && args.confirm !== true) return fail(`${name} is destructive — pass confirm:true to proceed`);
+      try {
+        const result = await run(client, args);
+        auditTool({ server: SERVER, tool: name, sessionKey, args, ok: true, durationMs: Date.now() - start, isWrite: true, resultSummary: typeof result === "string" ? result : JSON.stringify(result).slice(0, 200) });
+        return okJson(result);
+      } catch (err) {
+        return auditFail(err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+
+  const listRoles = adminTool("discord_list_roles",
+    "List all roles in a guild (id, name, color, position). Use to get role IDs for assign/edit/delete.",
+    { guild_id: z.string().optional().describe("Guild ID; defaults to the current guild.") },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      const roles = (await client.rest.get(Routes.guildRoles(g))) as any[];
+      return roles.map((r) => ({ id: r.id, name: r.name, color: r.color, position: r.position, managed: r.managed }));
+    });
+
+  const createChannel = adminTool("discord_create_channel",
+    "Create a channel in a guild. type: text|voice|forum|announcement|stage (default text).",
+    {
+      name: z.string().min(1).max(100),
+      type: z.enum(["text", "voice", "forum", "announcement", "stage"]).optional(),
+      guild_id: z.string().optional(),
+      category_id: z.string().optional().describe("Parent category ID."),
+      topic: z.string().max(1024).optional(),
+    },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      const body: Record<string, unknown> = { name: args.name, type: CH_TYPE[args.type ?? "text"] ?? 0 };
+      if (args.category_id) body.parent_id = args.category_id;
+      if (args.topic) body.topic = args.topic;
+      const ch = (await client.rest.post(Routes.guildChannels(g), { body })) as any;
+      return { created: ch.id, name: ch.name, type: ch.type };
+    });
+
+  const createCategory = adminTool("discord_create_category",
+    "Create a category (channel group) in a guild.",
+    { name: z.string().min(1).max(100), guild_id: z.string().optional() },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      const ch = (await client.rest.post(Routes.guildChannels(g), { body: { name: args.name, type: 4 } })) as any;
+      return { created: ch.id, name: ch.name, category: true };
+    });
+
+  const editChannel = adminTool("discord_edit_channel",
+    'Edit a channel: rename, change topic, move into a category (category_id, or "none" to detach), or reorder (position). Covers the CLI\'s move.',
+    {
+      channel_id: z.string(),
+      name: z.string().max(100).optional(),
+      topic: z.string().max(1024).optional(),
+      category_id: z.string().optional().describe('Parent category ID, or "none" to remove from category.'),
+      position: z.number().int().optional(),
+    },
+    async (client, args) => {
+      const ch0 = (await client.channels.fetch(args.channel_id)) as any;
+      if (!ch0) throw new Error(`channel ${args.channel_id} not found`);
+      guildScopeOrThrow(ch0.guildId ?? null);
+      const body: Record<string, unknown> = {};
+      if (args.name != null) body.name = args.name;
+      if (args.topic != null) body.topic = args.topic;
+      if (args.category_id != null) body.parent_id = args.category_id === "none" ? null : args.category_id;
+      if (args.position != null) body.position = args.position;
+      const ch = (await client.rest.patch(Routes.channel(args.channel_id), { body })) as any;
+      return { edited: ch.id, name: ch.name, parent_id: ch.parent_id ?? null };
+    });
+
+  const deleteChannel = adminTool("discord_delete_channel",
+    "Delete a channel. DESTRUCTIVE — requires confirm:true.",
+    { channel_id: z.string(), confirm: z.boolean().optional().describe("Must be true to actually delete.") },
+    async (client, args) => {
+      const ch0 = (await client.channels.fetch(args.channel_id)) as any;
+      if (!ch0) throw new Error(`channel ${args.channel_id} not found`);
+      guildScopeOrThrow(ch0.guildId ?? null);
+      const ch = (await client.rest.delete(Routes.channel(args.channel_id))) as any;
+      return { deleted: ch?.id ?? args.channel_id, name: ch?.name };
+    }, { destructive: true });
+
+  const createRole = adminTool("discord_create_role",
+    'Create a role. color = hex (e.g. "#5865F2"). permissions = a Discord permission bitfield string (e.g. "8" for Administrator).',
+    {
+      name: z.string().min(1).max(100),
+      guild_id: z.string().optional(),
+      color: z.string().optional(),
+      permissions: z.string().optional(),
+      hoist: z.boolean().optional(),
+      mentionable: z.boolean().optional(),
+    },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      const body: Record<string, unknown> = { name: args.name };
+      const col = toColor(args.color); if (col != null) body.color = col;
+      if (args.permissions != null) body.permissions = args.permissions;
+      if (args.hoist != null) body.hoist = args.hoist;
+      if (args.mentionable != null) body.mentionable = args.mentionable;
+      const r = (await client.rest.post(Routes.guildRoles(g), { body })) as any;
+      return { created: r.id, name: r.name };
+    });
+
+  const editRole = adminTool("discord_edit_role",
+    "Edit a role (name/color/permissions/hoist/mentionable).",
+    {
+      role_id: z.string(),
+      guild_id: z.string().optional(),
+      name: z.string().max(100).optional(),
+      color: z.string().optional(),
+      permissions: z.string().optional(),
+      hoist: z.boolean().optional(),
+      mentionable: z.boolean().optional(),
+    },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      const body: Record<string, unknown> = {};
+      if (args.name != null) body.name = args.name;
+      const col = toColor(args.color); if (col != null) body.color = col;
+      if (args.permissions != null) body.permissions = args.permissions;
+      if (args.hoist != null) body.hoist = args.hoist;
+      if (args.mentionable != null) body.mentionable = args.mentionable;
+      const r = (await client.rest.patch(Routes.guildRole(g, args.role_id), { body })) as any;
+      return { edited: r.id, name: r.name };
+    });
+
+  const deleteRole = adminTool("discord_delete_role",
+    "Delete a role. DESTRUCTIVE — requires confirm:true.",
+    { role_id: z.string(), guild_id: z.string().optional(), confirm: z.boolean().optional() },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      await client.rest.delete(Routes.guildRole(g, args.role_id));
+      return { deleted: args.role_id };
+    }, { destructive: true });
+
+  const assignRole = adminTool("discord_assign_role",
+    "Add or remove a role on a member. Set remove:true to unassign.",
+    {
+      user_id: z.string(),
+      role_id: z.string(),
+      guild_id: z.string().optional(),
+      remove: z.boolean().optional().describe("true = unassign instead of assign."),
+    },
+    async (client, args) => {
+      const g = guildScopeOrThrow(args.guild_id ?? null);
+      const route = Routes.guildMemberRole(g, args.user_id, args.role_id);
+      if (args.remove) { await client.rest.delete(route); return { unassigned: args.role_id, from: args.user_id }; }
+      await client.rest.put(route);
+      return { assigned: args.role_id, to: args.user_id };
+    });
+
+  const setPermission = adminTool("discord_set_permission",
+    'Set a permission overwrite on a channel for a role or member. allow/deny = Discord permission bitfield strings (e.g. "1024" = VIEW_CHANNEL).',
+    {
+      channel_id: z.string(),
+      target_id: z.string().describe("Role ID or member (user) ID."),
+      target_type: z.enum(["role", "member"]),
+      allow: z.string().optional(),
+      deny: z.string().optional(),
+    },
+    async (client, args) => {
+      const ch0 = (await client.channels.fetch(args.channel_id)) as any;
+      if (!ch0) throw new Error(`channel ${args.channel_id} not found`);
+      guildScopeOrThrow(ch0.guildId ?? null);
+      const body: Record<string, unknown> = { type: args.target_type === "member" ? 1 : 0 };
+      if (args.allow != null) body.allow = args.allow;
+      if (args.deny != null) body.deny = args.deny;
+      await client.rest.put(Routes.channelPermission(args.channel_id, args.target_id), { body });
+      return { channel: args.channel_id, target: args.target_id, type: args.target_type, allow: args.allow ?? null, deny: args.deny ?? null };
+    });
+
+  const adminTools = [listRoles, createChannel, createCategory, editChannel, deleteChannel, createRole, editRole, deleteRole, assignRole, setPermission];
+
   const tools: Array<SdkMcpToolDefinition<any>> = [readChannel, searchChannel, getMessage, listChannels, listMembers];
   if (canWrite) tools.push(sendMessage, react, editOwn, deleteOwn);
+  if (canAdmin) tools.push(...adminTools);
 
   return createSdkMcpServer({
     name: SERVER,

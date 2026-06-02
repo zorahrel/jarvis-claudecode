@@ -31,6 +31,12 @@ export function canDiscord(agent: AgentConfig | undefined): boolean {
 export function canDiscordWrite(agent: AgentConfig | undefined): boolean {
   return hasTool(agent, "discord:write");
 }
+/** Guild administration (channels/roles/permissions). Owner-tier only — the
+ *  TIER_TOOL_WHITELIST regexes match `discord:write` but NOT `discord:admin`,
+ *  so only `owner` tier / `fullAccess` agents can be assigned it. */
+export function canDiscordAdmin(agent: AgentConfig | undefined): boolean {
+  return hasTool(agent, "discord:admin");
+}
 
 export function canWhatsapp(agent: AgentConfig | undefined): boolean {
   return hasTool(agent, "whatsapp") || hasTool(agent, "whatsapp:write");
