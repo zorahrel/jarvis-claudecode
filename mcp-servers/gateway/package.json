@@ -1,10 +1,49 @@
 {
-  "name": "mcp-gateway",
+  "name": "mcp-hot-gateway",
   "version": "1.0.0",
-  "description": "Dynamic MCP gateway — mounts/unmounts child MCP servers at runtime, proxies tools, emits list_changed",
-  "main": "index.js",
+  "description": "An MCP server that mounts and unmounts other MCP servers at runtime — the agent calls mount/unmount itself, child tools appear instantly via tools/list_changed, no session restart, no config edit.",
   "type": "module",
-  "private": true,
+  "bin": {
+    "mcp-hot-gateway": "index.mjs"
+  },
+  "main": "index.mjs",
+  "files": [
+    "index.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "mcp-gateway",
+    "mcp-proxy",
+    "mcp-aggregator",
+    "dynamic",
+    "hot-reload",
+    "list-changed",
+    "claude",
+    "anthropic",
+    "llm",
+    "agent",
+    "tools"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zorahrel/mcp-hot-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zorahrel/mcp-hot-gateway/issues"
+  },
+  "homepage": "https://github.com/zorahrel/mcp-hot-gateway#readme",
+  "license": "MIT",
+  "author": "Attilio Cianci",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
   }

@@ -35,8 +35,11 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = join(__dirname, "gateway-config.json");
-const REGISTRY_PATH = join(__dirname, "..", "..", "state", "mcp-gateway-tools.json");
+// Where the persistent child registry lives. Override with MCP_GATEWAY_CONFIG.
+const CONFIG_PATH = process.env.MCP_GATEWAY_CONFIG || join(__dirname, "gateway-config.json");
+// Optional: a flat server→tools snapshot for external dashboards to read.
+// Disabled unless MCP_GATEWAY_REGISTRY is set to a writable path.
+const REGISTRY_PATH = process.env.MCP_GATEWAY_REGISTRY || null;
 const SEP = "__"; // namespace separator: <child>__<tool>
 
 const log = (...a) => console.error("[mcp-gateway]", ...a);
@@ -53,6 +56,7 @@ function saveConfig(children) {
   writeFileSync(CONFIG_PATH, JSON.stringify({ children: serializable }, null, 2) + "\n");
 }
 function writeRegistry(state) {
+  if (!REGISTRY_PATH) return;
   try {
     mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
     const out = {};
