@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# discord — thin CLI wrapper around the Discord REST API (v10) for server
+# management. Reuses the Jarvis bot token, so it can read/reorganize the
+# Armonia guild (channels, categories, roles, permissions) from any shell.
+#
+# Auth:  DISCORD_BOT_TOKEN  (falls back to router/.env)
+# Guild: DISCORD_GUILD_ID   default guild for commands that need one
+#
+# READ
+#   discord whoami                         bot identity
+#   discord guilds                         guilds the bot is in (+ key perms)
+#   discord channels [--guild ID]          full channel tree (categories+channels)
+#   discord roles    [--guild ID]          roles with permission flags
+#   discord members  [--guild ID] [--limit N]
+#   discord read <channelId> [--limit N]   recent messages
+#   discord perms-help                     common permission bit values
+#
+# WRITE — channels / categories
+#   discord create-channel <name> [--type text|voice|forum|category]
+#                                  [--category PARENT_ID] [--topic T] [--guild ID]
+#   discord create-category <name> [--guild ID]
+#   discord edit-channel <channelId> [--name N] [--topic T]
+#                                    [--category PARENT_ID|none] [--position N]
+#   discord move <channelId> <categoryId|none> [--position N]
+#   discord delete-channel <channelId> --yes        (destructive)
+#
+# WRITE — roles / members
+#   discord create-role <name> [--color HEX] [--perms BITS] [--guild ID]
+#   discord edit-role   <roleId> [--name N] [--color HEX] [--perms BITS] [--guild ID]
+#   discord assign-role   <userId> <roleId> [--guild ID]
+#   discord unassign-role <userId> <roleId> [--guild ID]
+#   discord delete-role <roleId> --yes [--guild ID]   (destructive)
+#
+# WRITE — per-channel permission overwrite
+#   discord perm <channelId> <roleOrUserId> [--allow BITS] [--deny BITS] [--type role|member]
+#
+# ESCAPE HATCH
+#   discord api <GET|POST|PATCH|PUT|DELETE> <path> [jsonBody]
+#
+# Destructive ops (delete-channel, delete-role) require --yes.
+
+set -euo pipefail
+
+# Resolve the real path even when invoked through a symlink (scripts/discord ->
+# router/scripts/discord), so the relative .env lookup lands on router/.env.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  [[ "$SELF" != /* ]] && SELF="$DIR/$SELF"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# router/.env sits one level up from router/scripts/. Keep a couple of fallbacks.
+for cand in "$SCRIPT_DIR/../.env" "$HOME/.claude/jarvis/router/.env"; do
+  [[ -f "$cand" ]] && ENV_FILE="$cand" && break
+done
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/../.env}"
+
+# --- load token + default guild from router/.env (without leaking other vars) ---
+# `grep` returns 1 when a key is absent; under `set -e` that would abort the
+# script, so each lookup is guarded with `|| true`.
+_envval() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' \r' || true; }
+if [[ -f "$ENV_FILE" ]]; then
+  [[ -z "${DISCORD_BOT_TOKEN:-}" ]] && DISCORD_BOT_TOKEN="$(_envval DISCORD_BOT_TOKEN)"
+  [[ -z "${DISCORD_GUILD_ID:-}" ]] && DISCORD_GUILD_ID="$(_envval DISCORD_GUILD_ID)"
+fi
+# Default guild: Armonia (the only guild the bot is in).
+DISCORD_GUILD_ID="${DISCORD_GUILD_ID:-935506093076017192}"
+
+if [[ -z "${DISCORD_BOT_TOKEN:-}" ]]; then
+  echo "discord: no bot token (set DISCORD_BOT_TOKEN in router/.env)" >&2
+  exit 1
+fi
+
+API="https://discord.com/api/v10"
+
+die() { echo "discord: $*" >&2; exit 1; }
+
+# _call METHOD PATH [JSON_BODY] -> prints response body; exits non-zero on HTTP >=400
+# Honors Discord 429 rate limits: on a 429 it sleeps for `retry_after` (from the
+# JSON body) and retries, up to 5 times. This makes batch loops (move 10 channels)
+# safe — Discord caps bursts and returns 429 otherwise.
+_call() {
+  local method="$1" path="$2" body="${3:-}"
+  local tmp http attempt=0 wait
+  tmp="$(mktemp)"
+  while : ; do
+    if [[ -n "$body" ]]; then
+      http="$(curl -sS -X "$method" "$API$path" \
+        -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$body" -o "$tmp" -w '%{http_code}')"
+    else
+      http="$(curl -sS -X "$method" "$API$path" \
+        -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
+        -o "$tmp" -w '%{http_code}')"
+    fi
+    if [[ "$http" == "429" && "$attempt" -lt 5 ]]; then
+      wait="$(python3 -c 'import json,sys
+try: print(max(0.5, float(json.load(open(sys.argv[1])).get("retry_after",1))))
+except: print(1)' "$tmp" 2>/dev/null || echo 1)"
+      echo "discord: 429 rate-limited, waiting ${wait}s (retry $((attempt+1))/5)" >&2
+      sleep "$wait"
+      attempt=$((attempt+1))
+      continue
+    fi
+    break
+  done
+  if [[ "$http" -ge 400 ]]; then
+    echo "discord: HTTP $http on $method $path" >&2
+    cat "$tmp" >&2; echo >&2
+    rm -f "$tmp"; exit 1
+  fi
+  cat "$tmp"; rm -f "$tmp"
+}
+
+# JSON builder from key=value pairs (string) — uses python for safe escaping.
+# Usage: _json k1 v1 k2 v2 ...  (values starting with @int: are emitted as numbers)
+_json() {
+  python3 - "$@" <<'PY'
+import json, sys
+args = sys.argv[1:]
+obj = {}
+for i in range(0, len(args), 2):
+    k, v = args[i], args[i+1]
+    if v.startswith("@int:"):
+        obj[k] = int(v[5:])
+    elif v == "@null":
+        obj[k] = None
+    else:
+        obj[k] = v
+print(json.dumps(obj))
+PY
+}
+
+guild_or_default() {
+  local g="${1:-}"
+  g="${g:-$DISCORD_GUILD_ID}"
+  [[ -n "$g" ]] || die "no guild id (pass --guild ID or set DISCORD_GUILD_ID in .env)"
+  echo "$g"
+}
+
+# --- parse a --flag value out of remaining args; echoes value, leaves caller to track ---
+# We use simple manual parsing per-command below.
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+
+  whoami)
+    _call GET /users/@me | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("username"),d.get("id"))'
+    ;;
+
+  guilds)
+    _call GET /users/@me/guilds | python3 -c '
+import sys,json
+A=0x8;MC=0x10;MG=0x20;MR=0x10000000
+for g in json.load(sys.stdin):
+    p=int(g.get("permissions","0"))
+    fl=[n for b,n in [(A,"ADMIN"),(MC,"manage_channels"),(MG,"manage_guild"),(MR,"manage_roles")] if p&b]
+    print(g["id"], g["name"], "OWNER" if g.get("owner") else "", "| "+", ".join(fl) if fl else "")
+'
+    ;;
+
+  channels)
+    G=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    _call GET "/guilds/$G/channels" | python3 -c '
+import sys,json
+T={0:"text",2:"voice",4:"CATEGORY",5:"news",13:"stage",15:"forum"}
+chs=json.load(sys.stdin)
+cats={c["id"]:c["name"] for c in chs if c["type"]==4}
+print("--- categories ---")
+for c in sorted([c for c in chs if c["type"]==4], key=lambda x:x.get("position",0)):
+    print("  [%s] id=%s" % (c["name"], c["id"]))
+print("--- channels ---")
+for c in sorted([c for c in chs if c["type"]!=4], key=lambda x:((x.get("parent_id") or ""), x.get("position",0))):
+    print("  %-8s %-28s parent=%s id=%s" % (T.get(c["type"],c["type"]), c["name"], cats.get(c.get("parent_id"),"—"), c["id"]))
+'
+    ;;
+
+  roles)
+    G=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    _call GET "/guilds/$G/roles" | python3 -c '
+import sys,json
+A=0x8;MC=0x10;MR=0x10000000
+for r in sorted(json.load(sys.stdin), key=lambda x:-x.get("position",0)):
+    p=int(r["permissions"]);fl=[n for b,n in [(A,"ADMIN"),(MC,"manage_channels"),(MR,"manage_roles")] if p&b]
+    print(r["id"], repr(r["name"]), "managed" if r.get("managed") else "", "|".join(fl))
+'
+    ;;
+
+  members)
+    G=""; LIM="200"; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; --limit) LIM="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    _call GET "/guilds/$G/members?limit=$LIM" | python3 -c '
+import sys,json
+for m in json.load(sys.stdin):
+    u=m["user"];print(u["id"], u.get("username"), "(bot)" if u.get("bot") else "", "roles:"+str(len(m.get("roles",[]))))
+'
+    ;;
+
+  read)
+    CH="${1:-}"; [[ -n "$CH" ]] || die "usage: discord read <channelId> [--limit N]"; shift || true
+    LIM="20"; while [[ $# -gt 0 ]]; do case "$1" in --limit) LIM="$2"; shift 2;; *) shift;; esac; done
+    _call GET "/channels/$CH/messages?limit=$LIM" | python3 -c '
+import sys,json
+for m in reversed(json.load(sys.stdin)):
+    a=m["author"]
+    print("[%s] %s: %s" % (m["timestamp"][:19], a.get("username"), m.get("content")))
+'
+    ;;
+
+  send)
+    CH="${1:-}"; TXT="${2:-}"; [[ -n "$CH" && -n "$TXT" ]] || die "usage: discord send <channelId> <text>"
+    _call POST "/channels/$CH/messages" "$(_json content "$TXT")" | python3 -c 'import sys,json;print("sent",json.load(sys.stdin)["id"])'
+    ;;
+
+  create-channel)
+    NAME="${1:-}"; [[ -n "$NAME" ]] || die "usage: discord create-channel <name> [--type text|voice|forum|category] [--category ID] [--topic T] [--guild ID]"; shift || true
+    G=""; TYPE="text"; PARENT=""; TOPIC=""
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --guild) G="$2"; shift 2;; --type) TYPE="$2"; shift 2;;
+      --category) PARENT="$2"; shift 2;; --topic) TOPIC="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    case "$TYPE" in text) TC=0;; voice) TC=2;; category) TC=4;; forum) TC=15;; news) TC=5;; *) die "bad --type $TYPE";; esac
+    ARGS=(name "$NAME" type "@int:$TC")
+    [[ -n "$PARENT" ]] && ARGS+=(parent_id "$PARENT")
+    [[ -n "$TOPIC" ]] && ARGS+=(topic "$TOPIC")
+    _call POST "/guilds/$G/channels" "$(_json "${ARGS[@]}")" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("created",d["name"],"id="+d["id"])'
+    ;;
+
+  create-category)
+    NAME="${1:-}"; [[ -n "$NAME" ]] || die "usage: discord create-category <name> [--guild ID]"; shift || true
+    G=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    _call POST "/guilds/$G/channels" "$(_json name "$NAME" type "@int:4")" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("created category",d["name"],"id="+d["id"])'
+    ;;
+
+  edit-channel)
+    CH="${1:-}"; [[ -n "$CH" ]] || die "usage: discord edit-channel <channelId> [--name N] [--topic T] [--category ID|none] [--position N]"; shift || true
+    ARGS=()
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --name) ARGS+=(name "$2"); shift 2;;
+      --topic) ARGS+=(topic "$2"); shift 2;;
+      --category) if [[ "$2" == "none" ]]; then ARGS+=(parent_id "@null"); else ARGS+=(parent_id "$2"); fi; shift 2;;
+      --position) ARGS+=(position "@int:$2"); shift 2;;
+      *) shift;; esac; done
+    [[ ${#ARGS[@]} -gt 0 ]] || die "nothing to edit"
+    _call PATCH "/channels/$CH" "$(_json "${ARGS[@]}")" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("edited",d["name"],"id="+d["id"])'
+    ;;
+
+  move)
+    CH="${1:-}"; CAT="${2:-}"; [[ -n "$CH" && -n "$CAT" ]] || die "usage: discord move <channelId> <categoryId|none> [--position N]"; shift 2 || true
+    POS=""; while [[ $# -gt 0 ]]; do case "$1" in --position) POS="$2"; shift 2;; *) shift;; esac; done
+    if [[ "$CAT" == "none" ]]; then ARGS=(parent_id "@null"); else ARGS=(parent_id "$CAT"); fi
+    [[ -n "$POS" ]] && ARGS+=(position "@int:$POS")
+    _call PATCH "/channels/$CH" "$(_json "${ARGS[@]}")" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("moved",d["name"],"-> parent",d.get("parent_id"))'
+    ;;
+
+  delete-channel)
+    CH="${1:-}"; [[ -n "$CH" ]] || die "usage: discord delete-channel <channelId> --yes"; shift || true
+    YES=""; while [[ $# -gt 0 ]]; do case "$1" in --yes) YES=1; shift;; *) shift;; esac; done
+    [[ -n "$YES" ]] || die "refusing to delete channel $CH without --yes"
+    _call DELETE "/channels/$CH" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("deleted",d.get("name"),d.get("id"))'
+    ;;
+
+  create-role)
+    NAME="${1:-}"; [[ -n "$NAME" ]] || die "usage: discord create-role <name> [--color HEX] [--perms BITS] [--guild ID]"; shift || true
+    G=""; COLOR=""; PERMS=""
+    while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; --color) COLOR="$2"; shift 2;; --perms) PERMS="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    ARGS=(name "$NAME")
+    [[ -n "$COLOR" ]] && ARGS+=(color "@int:$((16#${COLOR#\#}))")
+    [[ -n "$PERMS" ]] && ARGS+=(permissions "$PERMS")
+    _call POST "/guilds/$G/roles" "$(_json "${ARGS[@]}")" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("created role",d["name"],"id="+d["id"])'
+    ;;
+
+  edit-role)
+    RID="${1:-}"; [[ -n "$RID" ]] || die "usage: discord edit-role <roleId> [--name N] [--color HEX] [--perms BITS] [--guild ID]"; shift || true
+    G=""; ARGS=()
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --guild) G="$2"; shift 2;;
+      --name) ARGS+=(name "$2"); shift 2;;
+      --color) ARGS+=(color "@int:$((16#${2#\#}))"); shift 2;;
+      --perms) ARGS+=(permissions "$2"); shift 2;;
+      *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    [[ ${#ARGS[@]} -gt 0 ]] || die "nothing to edit"
+    _call PATCH "/guilds/$G/roles/$RID" "$(_json "${ARGS[@]}")" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("edited role",d["name"])'
+    ;;
+
+  assign-role)
+    USERID="${1:-}"; RID="${2:-}"; [[ -n "$USERID" && -n "$RID" ]] || die "usage: discord assign-role <userId> <roleId> [--guild ID]"; shift 2 || true
+    G=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    _call PUT "/guilds/$G/members/$USERID/roles/$RID" >/dev/null && echo "assigned role $RID to $USERID"
+    ;;
+
+  unassign-role)
+    USERID="${1:-}"; RID="${2:-}"; [[ -n "$USERID" && -n "$RID" ]] || die "usage: discord unassign-role <userId> <roleId> [--guild ID]"; shift 2 || true
+    G=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    _call DELETE "/guilds/$G/members/$USERID/roles/$RID" >/dev/null && echo "removed role $RID from $USERID"
+    ;;
+
+  delete-role)
+    RID="${1:-}"; [[ -n "$RID" ]] || die "usage: discord delete-role <roleId> --yes [--guild ID]"; shift || true
+    G=""; YES=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; --yes) YES=1; shift;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    [[ -n "$YES" ]] || die "refusing to delete role $RID without --yes"
+    _call DELETE "/guilds/$G/roles/$RID" >/dev/null && echo "deleted role $RID"
+    ;;
+
+  kick)
+    USERID="${1:-}"; [[ -n "$USERID" ]] || die "usage: discord kick <userId> --yes [--guild ID]"; shift || true
+    G=""; YES=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; --yes) YES=1; shift;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    [[ -n "$YES" ]] || die "refusing to kick $USERID without --yes"
+    _call DELETE "/guilds/$G/members/$USERID" >/dev/null && echo "kicked $USERID from $G"
+    ;;
+
+  ban)
+    USERID="${1:-}"; [[ -n "$USERID" ]] || die "usage: discord ban <userId> --yes [--guild ID]"; shift || true
+    G=""; YES=""; while [[ $# -gt 0 ]]; do case "$1" in --guild) G="$2"; shift 2;; --yes) YES=1; shift;; *) shift;; esac; done
+    G="$(guild_or_default "$G")"
+    [[ -n "$YES" ]] || die "refusing to ban $USERID without --yes"
+    _call PUT "/guilds/$G/bans/$USERID" >/dev/null && echo "banned $USERID from $G"
+    ;;
+
+  perm)
+    CH="${1:-}"; OID="${2:-}"; [[ -n "$CH" && -n "$OID" ]] || die "usage: discord perm <channelId> <roleOrUserId> [--allow BITS] [--deny BITS] [--type role|member]"; shift 2 || true
+    ALLOW="0"; DENY="0"; OTYPE="0"  # 0=role,1=member
+    while [[ $# -gt 0 ]]; do case "$1" in
+      --allow) ALLOW="$2"; shift 2;; --deny) DENY="$2"; shift 2;;
+      --type) [[ "$2" == "member" ]] && OTYPE="1" || OTYPE="0"; shift 2;;
+      *) shift;; esac; done
+    _call PUT "/channels/$CH/permissions/$OID" "$(_json type "@int:$OTYPE" allow "$ALLOW" deny "$DENY")" >/dev/null && echo "set overwrite on $CH for $OID (allow=$ALLOW deny=$DENY)"
+    ;;
+
+  perms-help)
+    cat <<'EOF'
+Common Discord permission bits (decimal):
+  VIEW_CHANNEL          1024
+  SEND_MESSAGES         2048
+  MANAGE_MESSAGES       8192
+  READ_MESSAGE_HISTORY  65536
+  CONNECT (voice)       1048576
+  SPEAK (voice)         2097152
+  MANAGE_CHANNELS       16
+  MANAGE_ROLES          268435456
+  KICK_MEMBERS          2
+  BAN_MEMBERS           4
+  ADMINISTRATOR         8
+Combine by summing. Full list: https://discord.com/developers/docs/topics/permissions
+EOF
+    ;;
+
+  api)
+    M="${1:-}"; P="${2:-}"; B="${3:-}"; [[ -n "$M" && -n "$P" ]] || die "usage: discord api <METHOD> <path> [jsonBody]"
+    _call "$M" "$P" "$B" | python3 -c 'import sys,json
+try: print(json.dumps(json.load(sys.stdin),indent=2))
+except: pass'
+    ;;
+
+  ""|-h|--help|help)
+    sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+
+  *)
+    die "unknown command: $cmd (run 'discord help')"
+    ;;
+esac
