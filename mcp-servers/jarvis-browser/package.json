@@ -1,0 +1,14 @@
+{
+  "name": "jarvis-browser",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local parallel browser session pool for Jarvis — N isolated, persistent, token-careful Chromium sessions behind a single daemon. Raw Playwright, no Docker, no cloud.",
+  "bin": {
+    "jbrowser": "./cli.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "playwright": "1.59.1"
+  }
+}

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent for the jarvis-browser session-pool daemon.
+
+  Install:
+    sed "s|/Users/zorahrel|$HOME|g" mcp-servers/jarvis-browser/com.jarvis.browser.plist \
+      > ~/Library/LaunchAgents/com.jarvis.browser.plist
+    launchctl load ~/Library/LaunchAgents/com.jarvis.browser.plist
+
+  The daemon also auto-starts on first use, so launchd is optional hardening
+  (survives logout/reboot, restarts on crash). It holds NO browser while idle —
+  Chromium launches on demand and is reaped when sessions go idle.
+
+  Restart: launchctl kickstart -k gui/$(id -u)/com.jarvis.browser
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.browser</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/zorahrel/.claude/jarvis/mcp-servers/jarvis-browser/daemon.mjs</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zorahrel/.claude/jarvis/logs/jarvis-browser.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zorahrel/.claude/jarvis/logs/jarvis-browser.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zorahrel/.claude/jarvis/mcp-servers/jarvis-browser</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

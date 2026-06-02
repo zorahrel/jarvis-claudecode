@@ -17,6 +17,27 @@ Dates are ISO (YYYY-MM-DD).
   WhatsApp, Discord) and voice *input* transcription are untouched.
 
 ### Added
+- **`jarvis-browser` — parallel, isolated, token-careful browser sessions.** New
+  in-process tool (`mcp-servers/jarvis-browser/`): a single local daemon
+  (`daemon.mjs`, http://127.0.0.1:3344) owns the Chromium fleet and hands out
+  isolated sessions to N concurrent callers. Different session names never share
+  state and run in parallel (persistent = own `launchPersistentContext` profile
+  with durable login; ephemeral = `newContext()` in a shared hub). Output is a
+  compact ref-based a11y snapshot (`[3] button "..."`, incremental by default —
+  a full Hacker News snapshot is ~5.6KB, the incremental delta ~18 bytes);
+  screenshots are saved to disk and returned as a path, never inlined. To SEE
+  rendered content (charts, captcha, canvas) it reads a screenshot with a
+  **lightweight local vision model** (`moondream`, swappable via
+  `JARVIS_VISION_CMD`) and returns **text** — the image never enters the agent
+  context (`browser_read_screen` / `jbrowser read`). Surfaced as the
+  `jarvis-browser` MCP (15 deferred `browser_*` tools, registered user-scope,
+  visible in the dashboard MCP tab) and the `jbrowser` CLI. Reliability: keyed
+  per-session locks, idle reaper, concurrency cap, `disconnected` pruning,
+  single-instance port guard, launchd crash-restart with persistent-profile
+  survival; always-on via launchd `com.jarvis.browser`. Raw
+  Playwright 1.59.1 (reuses the cached Chromium), no Docker, no cloud, no API
+  key. Chosen over browser-use / browser-harness / dev-browser after a
+  multi-agent SOTA eval (see `memory/reference_jarvis_browser.md`).
 - **Per-agent trust tier (`tier`) + whitelist enforcement.** New
   `AgentConfig.tier` field in `agent.yaml` (`owner|team|family|personal|client`,
   default `personal`). The dashboard PATCH endpoints (`/api/agents/:name/config`
