@@ -50,7 +50,8 @@ async function introspect(cfg) {
   } catch (e) {
     return { tools: [], error: e.message };
   } finally {
-    try { await client.close(); } catch { /* ignore */ }
+    // Bound close too — a hung transport's close() must not block the batch.
+    try { await withTimeout(client.close(), 3000, "close"); } catch { /* ignore */ }
   }
 }
 
@@ -58,10 +59,25 @@ const file = process.argv[2];
 if (!file) { console.error("usage: introspect.mjs <jobs.json>"); process.exit(1); }
 const jobs = JSON.parse(readFileSync(file, "utf8"));
 
+// Pre-seed so a server that never returns still appears (as an error) instead of
+// vanishing — and so a partial flush is always a complete map.
 const results = {};
+for (const cfg of jobs) results[cfg.name] = { tools: [], error: "introspection did not complete" };
+
+let flushed = false;
+const flush = (code = 0) => {
+  if (flushed) return;
+  flushed = true;
+  try { process.stdout.write(JSON.stringify(results)); } catch { /* ignore */ }
+  process.exit(code);
+};
+
+// Hard safety deadline: one hung transport must never starve the whole batch.
+// We flush whatever completed and exit 0 so the caller always gets usable data.
+const OVERALL_MS = Number(process.env.INTROSPECT_OVERALL_MS || 22000);
+setTimeout(() => flush(0), OVERALL_MS).unref?.();
+
 await Promise.all(jobs.map(async (cfg) => {
   results[cfg.name] = await introspect(cfg);
 }));
-
-process.stdout.write(JSON.stringify(results));
-process.exit(0);
+flush(0);
