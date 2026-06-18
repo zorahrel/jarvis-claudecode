@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent for the mcp-gateway shared HTTP daemon.
+
+  ONE daemon, shared by every Claude Code session over Streamable HTTP
+  (http://127.0.0.1:23371/mcp). Replaces the old stdio-per-session model, so the
+  child MCP servers (edm, beeper, qlik, cf) are spawned ONCE instead of once per
+  session. start.sh sources the gitignored .env (OAuth/bearer secrets).
+
+  Install:
+    cp mcp-servers/gateway/com.jarvis.gateway.plist ~/Library/LaunchAgents/com.jarvis.gateway.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jarvis.gateway.plist
+
+  Restart: launchctl kickstart -k gui/$(id -u)/com.jarvis.gateway
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.gateway</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/zorahrel/.claude/jarvis/mcp-servers/gateway/start.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/zorahrel/.claude/jarvis/logs/gateway.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zorahrel/.claude/jarvis/logs/gateway.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/zorahrel/.claude/jarvis/mcp-servers/gateway</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>GATEWAY_HTTP_PORT</key>
+    <string>23371</string>
+  </dict>
+</dict>
+</plist>

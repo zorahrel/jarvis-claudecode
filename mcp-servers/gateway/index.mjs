@@ -21,7 +21,7 @@
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -29,7 +29,10 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createServer } from "http";
+import { randomUUID } from "crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -45,6 +48,22 @@ const SEP = "__"; // namespace separator: <child>__<tool>
 const log = (...a) => console.error("[mcp-gateway]", ...a);
 
 // ---- persistence ----
+// Expand ${VAR} references against process.env so secrets (OAuth client info,
+// bearer tokens) live in the gitignored .env, not in the tracked config file.
+// Unset vars expand to "" with a warning.
+function expandEnv(v) {
+  if (typeof v === "string") {
+    return v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, name) => {
+      if (process.env[name] === undefined) log(`config: env var ${name} is not set`);
+      return process.env[name] ?? "";
+    });
+  }
+  if (Array.isArray(v)) return v.map(expandEnv);
+  if (v && typeof v === "object") {
+    return Object.fromEntries(Object.entries(v).map(([k, val]) => [k, expandEnv(val)]));
+  }
+  return v;
+}
 function loadConfig() {
   if (!existsSync(CONFIG_PATH)) return { children: [] };
   try { return JSON.parse(readFileSync(CONFIG_PATH, "utf8")); }
@@ -82,7 +101,10 @@ function rebuildToolIndex() {
   }
 }
 
-function makeTransport(cfg) {
+function makeTransport(rawCfg) {
+  // Expand ${VAR} at spawn time only, so the persisted cfg keeps placeholders
+  // and saveConfig never writes resolved secrets back to disk.
+  const cfg = expandEnv(rawCfg);
   if (cfg.transport === "stdio") {
     return new StdioClientTransport({
       command: cfg.command,
@@ -133,11 +155,16 @@ async function unmountChild(name) {
   return true;
 }
 
-// ---- build the gateway server ----
-const server = new Server(
-  { name: "gateway", version: "1.0.0" },
-  { capabilities: { tools: { listChanged: true } } },
-);
+// ---- build the gateway server(s) ----
+// One lightweight Server facade per connected client, all sharing the singleton
+// child pool (state.children). N Claude sessions => ONE set of child subprocesses.
+const facades = new Set();
+
+async function broadcastToolListChanged() {
+  for (const s of facades) {
+    try { await s.sendToolListChanged(); } catch { /* client gone */ }
+  }
+}
 
 const META_TOOLS = [
   {
@@ -190,9 +217,9 @@ function allTools() {
   return out;
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools() }));
+const handleListTools = async () => ({ tools: allTools() });
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
+const handleCallTool = async (req) => {
   const { name, arguments: args = {} } = req.params;
 
   // ---- meta tools ----
@@ -216,7 +243,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const c = await mountChild(cfg);
       saveConfig([...state.children.values()].map((x) => x.cfg));
       writeRegistry(state);
-      await server.sendToolListChanged();
+      await broadcastToolListChanged();
       return { content: [{ type: "text", text: JSON.stringify({ mounted: cfg.name, tools: c.tools.map((t) => `${cfg.name}${SEP}${t.name}`) }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error mounting: ${e.message}` }], isError: true };
@@ -228,7 +255,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const ok = await unmountChild(args.name);
       saveConfig([...state.children.values()].map((x) => x.cfg));
       writeRegistry(state);
-      await server.sendToolListChanged();
+      await broadcastToolListChanged();
       return { content: [{ type: "text", text: JSON.stringify({ unmounted: ok ? args.name : null, found: ok }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error unmounting: ${e.message}` }], isError: true };
@@ -250,7 +277,83 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   } catch (e) {
     return { content: [{ type: "text", text: `Proxy error (${entry.child}.${entry.original}): ${e.message}` }], isError: true };
   }
-});
+};
+
+// A fresh facade per connected client; all facades share the singleton state.
+function buildFacade() {
+  const server = new Server(
+    { name: "gateway", version: "1.0.0" },
+    { capabilities: { tools: { listChanged: true } } },
+  );
+  server.setRequestHandler(ListToolsRequestSchema, handleListTools);
+  server.setRequestHandler(CallToolRequestSchema, handleCallTool);
+  facades.add(server);
+  return server;
+}
+
+// ---- HTTP daemon (Streamable HTTP, stateful per-session) ----
+function readBody(req) {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (c) => { data += c; });
+    req.on("end", () => { try { resolve(data ? JSON.parse(data) : undefined); } catch { resolve(undefined); } });
+    req.on("error", () => resolve(undefined));
+  });
+}
+
+function startHttpDaemon(port) {
+  const TOKEN = process.env.GATEWAY_HTTP_TOKEN || null; // optional bearer; 127.0.0.1 bind is the primary boundary
+  const sessions = new Map(); // sessionId -> { transport, server }
+
+  const httpServer = createServer(async (req, res) => {
+    const path = (req.url || "").split("?")[0];
+    if (path !== "/mcp") { res.writeHead(404).end(); return; }
+    if (TOKEN && req.headers["authorization"] !== `Bearer ${TOKEN}`) { res.writeHead(401).end(); return; }
+    try {
+      if (req.method === "POST") {
+        const body = await readBody(req);
+        const sid = req.headers["mcp-session-id"];
+        const entry = sid ? sessions.get(sid) : null;
+        if (!entry && isInitializeRequest(body)) {
+          const server = buildFacade();
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (id) => { sessions.set(id, { transport, server }); },
+          });
+          transport.onclose = () => {
+            if (transport.sessionId) sessions.delete(transport.sessionId);
+            facades.delete(server);
+          };
+          await server.connect(transport);
+          await transport.handleRequest(req, res, body);
+          return;
+        }
+        if (!entry) {
+          res.writeHead(400, { "content-type": "application/json" })
+             .end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "No valid session" }, id: null }));
+          return;
+        }
+        await entry.transport.handleRequest(req, res, body);
+        return;
+      }
+      if (req.method === "GET" || req.method === "DELETE") {
+        const sid = req.headers["mcp-session-id"];
+        const entry = sid ? sessions.get(sid) : null;
+        if (!entry) { res.writeHead(400).end("No valid session"); return; }
+        await entry.transport.handleRequest(req, res);
+        return;
+      }
+      res.writeHead(405).end();
+    } catch (e) {
+      log("http handler error:", e.message);
+      if (!res.headersSent) res.writeHead(500).end();
+    }
+  });
+
+  httpServer.listen(port, "127.0.0.1", () => {
+    log(`ready (http) — 127.0.0.1:${port}/mcp — ${state.children.size} children, ${state.toolIndex.size} proxied tools + 3 meta`);
+  });
+}
 
 // ---- boot ----
 const cfg = loadConfig();
@@ -266,5 +369,5 @@ for (const childCfg of cfg.children || []) {
 rebuildToolIndex();
 writeRegistry(state);
 
-await server.connect(new StdioServerTransport());
-log(`ready — ${state.children.size} children, ${state.toolIndex.size} proxied tools + 3 meta`);
+const HTTP_PORT = Number(process.env.GATEWAY_HTTP_PORT) || 23371;
+startHttpDaemon(HTTP_PORT);
