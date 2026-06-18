@@ -1,3 +1,40 @@
 {
-  "children": []
+  "children": [
+    {
+      "name": "edm",
+      "transport": "stdio",
+      "command": "/Users/zorahrel/.claude/jarvis/mcp-servers/edm-mail/start.sh"
+    },
+    {
+      "name": "beeper",
+      "transport": "http",
+      "url": "http://127.0.0.1:23373/v0/mcp",
+      "headers": {
+        "Authorization": "Bearer ${BEEPER_TOKEN}"
+      }
+    },
+    {
+      "name": "qlik",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://edminformatica.eu.qlikcloud.com/api/ai/mcp",
+        "8099",
+        "--static-oauth-client-info",
+        "${QLIK_OAUTH_CLIENT_INFO}"
+      ]
+    },
+    {
+      "name": "cf",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.cloudflare.com/mcp"
+      ]
+    }
+  ]
 }
