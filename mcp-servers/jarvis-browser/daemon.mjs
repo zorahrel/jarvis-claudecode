@@ -20,7 +20,7 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { chromium } from "playwright";
-import { mkdirSync, writeFileSync, rmSync, existsSync, statSync, readdirSync, readFileSync, renameSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, statSync, readdirSync, readFileSync, renameSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,8 @@ const SHOTS = join(STATE, "browser-shots");
 const STATES = join(STATE, "browser-states"); // exported storageState JSONs (portable authed sessions)
 const PIDFILE = join(STATE, "jarvis-browser.pid");
 for (const d of [PROFILES, SHOTS, STATES]) mkdirSync(d, { recursive: true });
+// State files hold decrypted session cookies — keep the dir owner-only.
+try { chmodSync(STATES, 0o700); } catch {}
 
 // Lightweight vision backend for READING screenshots without inlining pixels
 // into the agent's context. Default = the local `moondream` wrapper (Moondream
@@ -539,6 +541,7 @@ const methods = {
       }
       mkdirSync(dirname(path), { recursive: true });
       const st = await session.context.storageState({ path });
+      try { chmodSync(path, 0o600); } catch {} // contains cookie values — owner-only
       const cookies = st.cookies?.length || 0;
       const origins = st.origins?.length || 0;
       const res = { ok: true, path, cookies, origins };

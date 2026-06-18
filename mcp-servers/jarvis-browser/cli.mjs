@@ -46,6 +46,9 @@ const HELP = `jbrowser — local parallel isolated browser sessions (Jarvis)
                                        (--path <file.json> for an arbitrary file needs JARVIS_BROWSER_ALLOW_STATE_PATH=1)
   jbrowser profiles                    list on-disk persistent profiles (durable login caches)
   jbrowser rm-profile <name>           delete a profile (to Trash; must not be live)
+  jbrowser import-chrome <name> [--domains a.com,b.com] [--profile Default] [--dry-run]
+                                       seed a session from your REAL Chrome cookies (macOS); reuses
+                                       existing logins (never reads passwords). --dry-run = list scope.
 
   jbrowser close <name> | jbrowser close-all
 
@@ -117,6 +120,18 @@ try {
     }
     case "profiles": out(await rpc("profiles")); break;
     case "rm-profile": out(await rpc("removeProfile", { name })); break;
+    case "import-chrome": {
+      const { importChrome } = await import("./import-chrome.mjs");
+      const domainsRaw = opt("--domains");
+      const profile = opt("--profile") || "Default";
+      const dryRun = has("--dry-run");
+      out(await importChrome({
+        session: name,
+        domains: domainsRaw ? domainsRaw.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        profile, dryRun, headed: flags.headed,
+      }));
+      break;
+    }
     case "close": out(await rpc("close", { name })); break;
     case "close-all": out(await rpc("closeAll")); break;
     case "help": case "--help": case "-h": case undefined: console.log(HELP); break;

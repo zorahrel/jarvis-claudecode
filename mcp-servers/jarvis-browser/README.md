@@ -88,6 +88,25 @@ jbrowser rm-profile old                         # delete a profile (to Trash; mu
 > token-in-localStorage SPAs (Firebase/Supabase/Auth0) need the origin captured.
 > If `origins:0` comes back with cookies, `save-state` warns you.
 
+#### Import logins from your real Chrome (macOS)
+
+Skip per-site sign-in entirely: reuse the sessions you already have in Chrome.
+
+```bash
+jbrowser import-chrome work --dry-run                 # list importable domains (no Keychain, no values)
+jbrowser import-chrome work --domains youtube.com,google.com   # decrypt + inject into session "work"
+jbrowser import-chrome work --profile "Profile 1"     # a non-default Chrome profile
+```
+
+`import-chrome` reads Chrome's **cookie** store (never `Login Data`/saved
+passwords), decrypts the macOS `v10` scheme, and injects the cookies into a
+jarvis-browser session — so it's instantly logged into whatever Chrome is. The
+one-time **macOS Keychain prompt** ("Chrome Safe Storage") is the consent gate.
+Expired cookies are dropped by Chromium (a lapsed Chrome session can't be
+revived), and a few sites that device-bind their session may still require a
+fresh `login`. It is **CLI-only** — never exposed as an agent tool, since it
+reads the user's whole cookie jar.
+
 **The login handoff never types your credentials.** `login` opens a real,
 visible browser window; the human completes the password / 2FA / CAPTCHA. The
 session is then cached in the persistent profile and reused automatically. `login`
