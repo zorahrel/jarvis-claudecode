@@ -57,6 +57,16 @@ const TOOLS = [
     schema: { type: "object", properties: { session: SESSION, question: { type: "string", description: "what to ask about the screen; omit for a general caption" }, ref: { type: "number", description: "read just one element instead of the page" }, fullPage: { type: "boolean" }, long: { type: "boolean", description: "longer caption (ignored if question set)" } } } },
   { name: "browser_eval", description: "Run JavaScript in the page and return the result (escape hatch for what the other tools can't do). Runs in the page sandbox only.",
     schema: { type: "object", required: ["expression"], properties: { session: SESSION, expression: { type: "string", description: "JS body; use `return ...` to return a value" } } } },
+  { name: "browser_login", description: "Open a VISIBLE (headed) browser window at a sign-in OR sign-up URL and HAND OFF to the human to complete it — you never type the password, 2FA code, or solve the CAPTCHA. The session is persistent, so once the person signs in the login is CACHED in the profile and reused on later (even headless) visits with the same session name. Returns once the window is open (handoff:true). Optionally pass waitSelector/waitUrl to block until a post-login element/URL appears (bounded ~110s); for slower sign-ins, just call browser_whoami afterwards to confirm. Promotes an existing headless session of the same name to headed automatically.",
+    schema: { type: "object", required: ["url"], properties: { session: SESSION, url: { type: "string", description: "login or signup page URL" }, waitSelector: { type: "string", description: "optional CSS selector that appears once signed in — blocks until visible (or timeout)" }, waitUrl: { type: "string", description: "optional URL substring the page navigates to once signed in" }, timeoutMs: { type: "number", description: "max wait for waitSelector/waitUrl (capped ~110000)" }, max: { type: "number" } } } },
+  { name: "browser_whoami", description: "Inventory which sites this session's profile is logged into: cookie HOSTS with a likely-logged-in heuristic (presence of auth/session cookies). Returns cookie NAMES + counts only — never secret values. Use to verify a login handoff succeeded or to answer 'are we still signed into X?'.",
+    schema: { type: "object", properties: { session: SESSION } } },
+  { name: "browser_save_state", description: "Export this session's authenticated state into the managed state store under a handle — a PORTABLE login cache. Cookies are always captured; localStorage is captured ONLY for origins this session has visited in-process (so save right after browser_login while still on the site, or pass origins). Token-in-localStorage logins (Firebase/Supabase/Auth0 SPAs) NEED the origin captured; cookie-only logins don't. Returns the stored path and a warning if localStorage wasn't captured.",
+    schema: { type: "object", properties: { session: SESSION, state: { type: "string", description: "handle to store under (defaults to the session name)" }, origins: { type: "array", items: { type: "string" }, description: "origins to visit before snapshot so their localStorage is captured, e.g. [\"https://app.example.com\"]" } } } },
+  { name: "browser_load_state", description: "Seed a session from a state previously saved with browser_save_state (injects its cookies + localStorage). The safe way to reuse an existing local login cache without re-authenticating. Pass headed:true to then drive the now-logged-in window.",
+    schema: { type: "object", required: ["state"], properties: { session: SESSION, state: { type: "string", description: "handle previously saved with browser_save_state" }, headed: { type: "boolean" } } } },
+  { name: "browser_profiles", description: "List the on-disk persistent profiles (durable login caches), flagging which are currently live and when each was last used.",
+    schema: { type: "object", properties: {} } },
   { name: "browser_close", description: "Close a session (frees its browser). Omit session to close ALL sessions.",
     schema: { type: "object", properties: { session: { type: "string" } } } },
   { name: "browser_status", description: "List live browser sessions and daemon info (names, URLs, idle time, capacity).",
@@ -101,6 +111,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "browser_screenshot": return text(await rpc("screenshot", { name: s, fullPage: !!a.fullPage, ref: a.ref }));
       case "browser_read_screen": return text(await rpc("readScreen", { name: s, question: a.question, ref: a.ref, fullPage: !!a.fullPage, long: !!a.long }));
       case "browser_eval": return text(await rpc("eval", { name: s, expression: a.expression }));
+      case "browser_login": {
+        const r = await rpc("login", { name: s, url: a.url, waitUrl: a.waitUrl, waitSelector: a.waitSelector, timeoutMs: a.timeoutMs, max: a.max });
+        const lead = r.handoff
+          ? "HANDOFF: a visible window is open. The HUMAN must complete sign-in/sign-up there (password, 2FA, CAPTCHA) — do NOT type credentials yourself. Then call browser_whoami to confirm."
+          : (r.signedIn ? "sign-in detected (waitUrl/waitSelector matched)." : "wait timed out — sign-in not detected yet; call browser_whoami to check.");
+        const summary = { handoff: r.handoff, signedIn: r.signedIn, totalCookies: r.totalCookies, loggedInDomains: (r.domains || []).filter((d) => d.likelyLoggedIn).map((d) => d.domain) };
+        return text(`${lead}\n${JSON.stringify(summary)}\n\n${r.text || ""}`);
+      }
+      case "browser_whoami": return text(await rpc("whoami", { name: s }));
+      case "browser_save_state": return text(await rpc("saveState", { name: s, state: a.state, origins: a.origins }));
+      case "browser_load_state": return text(await rpc("loadState", { name: s, state: a.state, headed: !!a.headed }));
+      case "browser_profiles": return text(await rpc("profiles"));
       case "browser_close": return text(a.session === undefined ? await rpc("closeAll") : await rpc("close", { name: s }));
       case "browser_status": return text(await rpc("status"));
       default: throw new Error(`unknown tool: ${name}`);

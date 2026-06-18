@@ -67,6 +67,39 @@ jbrowser close  work               # or: jbrowser close-all
 ```
 `--ephemeral` = throwaway context (no persistent login). `--headed` = visible window.
 
+### Auth & local cache (sign in / sign up, then reuse the session)
+
+The persistent profile is the local login cache: sign in once and every later
+visit with the same session name is already authenticated — even headless.
+
+```bash
+jbrowser login work https://github.com/login   # opens a VISIBLE window — YOU sign in
+jbrowser whoami work                            # which sites this profile is logged into
+jbrowser save-state work gh                     # export the login cache under handle "gh"
+jbrowser load-state other gh                    # seed another session from that login cache
+jbrowser profiles                               # list on-disk profiles (durable caches)
+jbrowser rm-profile old                         # delete a profile (to Trash; must not be live)
+```
+
+> **Cookies vs localStorage.** `save-state` always captures cookies, but
+> localStorage is captured **only for origins the session has visited in-process**
+> — so run `save-state` right after `login` (still on the site), or pass
+> `--origins https://app.example.com`. Cookie-based logins port fine either way;
+> token-in-localStorage SPAs (Firebase/Supabase/Auth0) need the origin captured.
+> If `origins:0` comes back with cookies, `save-state` warns you.
+
+**The login handoff never types your credentials.** `login` opens a real,
+visible browser window; the human completes the password / 2FA / CAPTCHA. The
+session is then cached in the persistent profile and reused automatically. `login`
+also promotes an existing headless session of the same name to headed. After
+signing in, confirm with `whoami` (it reports cookie *hosts* + a logged-in
+heuristic — cookie names and counts only, never values).
+
+> **Headed needs the full Chromium build.** Headless uses the cached
+> `chromium_headless_shell`; a visible window needs the full build. If `login`/
+> `--headed` errors with "Executable doesn't exist", run once:
+> `cd mcp-servers/jarvis-browser && npx playwright install chromium`.
+
 ## MCP tools
 
 Registered as `jarvis-browser` in `~/.claude.json` (CLI + every router spawn).
@@ -74,7 +107,17 @@ Tools are deferred via tool-search, so they cost ~0 baseline context until used:
 `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_fill`,
 `browser_type`, `browser_press`, `browser_select`, `browser_scroll`,
 `browser_get_text`, `browser_extract`, `browser_screenshot`,
-`browser_read_screen`, `browser_eval`, `browser_close`, `browser_status`.
+`browser_read_screen`, `browser_eval`, `browser_login`, `browser_whoami`,
+`browser_save_state`, `browser_load_state`, `browser_profiles`,
+`browser_close`, `browser_status`.
+
+`browser_login` is the agent-facing sign-in/sign-up handoff: it opens a visible
+window and returns `handoff:true` — the agent must hand off to the human and
+never type credentials, then call `browser_whoami` to confirm. `browser_save_state`/
+`browser_load_state` address a portable login cache by **handle** (never an
+arbitrary host path — that is the only host-filesystem primitive and stays gated
+behind the daemon-side env `JARVIS_BROWSER_ALLOW_STATE_PATH`, so a prompt-injected
+agent cannot read/overwrite host files through it).
 
 **Seeing the screen** (`browser_read_screen` / `jbrowser read`): a screenshot is
 captured and read by a **lightweight local vision model** (`moondream` →
@@ -93,6 +136,8 @@ agents never collide by accident.
 | `JARVIS_BROWSER_MAX` | 6 | max concurrent live sessions |
 | `JARVIS_BROWSER_IDLE_MS` | 600000 | idle session reaping (10 min) |
 | `JARVIS_BROWSER_ACTION_TIMEOUT` | 15000 | per-action timeout |
+| `JARVIS_BROWSER_ALLOW_STATE_PATH` | unset | allow save/load-state to an arbitrary host path (else handle-only, sandboxed to the state dir). Read daemon-side. |
+| `JARVIS_BROWSER_ALLOW_ALL_SCHEMES` | unset | allow non-web URL schemes in navigate/login/loadState (else http/https/about/data only) |
 
 ## Ops
 

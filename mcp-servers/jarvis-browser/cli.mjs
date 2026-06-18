@@ -33,13 +33,37 @@ const HELP = `jbrowser — local parallel isolated browser sessions (Jarvis)
   jbrowser shot  <name> [--full] [--ref N]   screenshot -> file path
   jbrowser read  <name> ["question"]         SEE the screen via moondream -> text (no image in context)
   jbrowser eval  <name> '<js>'         run JS in the page (returns value)
+
+  Auth / local-cache:
+  jbrowser login <name> <url> [--wait-selector CSS|--wait-url SUB] [--timeout MS]
+                                       open a VISIBLE window for sign-in/sign-up; YOU complete it,
+                                       the login is then cached in the profile (reused headless later)
+  jbrowser whoami <name>               which sites this profile is logged into (cookie hosts; names only)
+  jbrowser save-state <name> [handle] [--origins https://a,https://b]
+                                       export the login cache (cookies always; localStorage only for
+                                       visited origins — save right after login, or pass --origins)
+  jbrowser load-state <name> <handle> [--headed]   seed a session from a saved state handle
+                                       (--path <file.json> for an arbitrary file needs JARVIS_BROWSER_ALLOW_STATE_PATH=1)
+  jbrowser profiles                    list on-disk persistent profiles (durable login caches)
+  jbrowser rm-profile <name>           delete a profile (to Trash; must not be live)
+
   jbrowser close <name> | jbrowser close-all
 
 Options: --headed (visible window), --ephemeral (no persistent profile/login), --full (full snapshot)
-Session names are isolated: different names never share cookies/tabs and run in parallel.`;
+Session names are isolated: different names never share cookies/tabs and run in parallel.
+Login flow: "jbrowser login <name> <signin-url>" opens a real window → you type your own password/2FA
+→ "jbrowser whoami <name>" confirms. Never enter credentials through automation; the human signs in.`;
 
-const name = rest[0];
+// Strip global flags FIRST, then read the session name — otherwise a leading
+// flag (e.g. `jbrowser nav --headed work url`) would be captured as the name and
+// spawn a junk profile dir named after the flag.
 const flags = { persist: !has("--ephemeral"), headed: has("--headed") };
+const name = rest[0];
+const NO_NAME = ["status", "close-all", "profiles", "help", "--help", "-h", undefined];
+if (!NO_NAME.includes(cmd) && (name === undefined || /^-/.test(name))) {
+  console.error(`error: '${cmd}' needs a session name as its first argument (got ${name === undefined ? "none" : `'${name}'`}).`);
+  process.exit(2);
+}
 
 try {
   switch (cmd) {
@@ -66,6 +90,33 @@ try {
     case "shot": out(await rpc("screenshot", { name, fullPage: has("--full"), ref: opt("--ref") !== undefined ? Number(opt("--ref")) : undefined, ...flags })); break;
     case "read": { const long = has("--long"); const q = rest.slice(1).join(" ") || undefined; out(await rpc("readScreen", { name, question: q, long, ...flags })); break; }
     case "eval": out(await rpc("eval", { name, expression: rest.slice(1).join(" "), ...flags })); break;
+    case "login": {
+      const waitUrl = opt("--wait-url");
+      const waitSelector = opt("--wait-selector");
+      const timeout = opt("--timeout");
+      const url = rest[1];
+      const r = await rpc("login", { name, url, waitUrl, waitSelector, timeoutMs: timeout !== undefined ? Number(timeout) : undefined });
+      obs(r);
+      if (r.handoff) console.log(`\n→ A visible window is open. Sign in / sign up there yourself (password, 2FA, CAPTCHA).\n→ When done: jbrowser whoami ${name}`);
+      else console.log(`\n→ signedIn=${r.signedIn}. Verify with: jbrowser whoami ${name}`);
+      break;
+    }
+    case "whoami": out(await rpc("whoami", { name })); break;
+    case "save-state": {
+      const path = opt("--path"); // arbitrary file (needs JARVIS_BROWSER_ALLOW_STATE_PATH=1)
+      const origins = opt("--origins"); // comma-separated origins to visit so their localStorage is captured
+      out(await rpc("saveState", { name, state: rest[1], path, origins: origins ? origins.split(",").map((s) => s.trim()).filter(Boolean) : undefined }));
+      break;
+    }
+    case "load-state": {
+      const path = opt("--path");
+      const handle = rest[1];
+      if (!handle && !path) throw new Error("usage: jbrowser load-state <name> <handle> | jbrowser load-state <name> --path <file.json>");
+      out(await rpc("loadState", { name, state: handle, path, headed: flags.headed }));
+      break;
+    }
+    case "profiles": out(await rpc("profiles")); break;
+    case "rm-profile": out(await rpc("removeProfile", { name })); break;
     case "close": out(await rpc("close", { name })); break;
     case "close-all": out(await rpc("closeAll")); break;
     case "help": case "--help": case "-h": case undefined: console.log(HELP); break;
