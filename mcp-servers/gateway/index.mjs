@@ -32,7 +32,7 @@ import {
   isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "http";
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -302,13 +302,37 @@ function readBody(req) {
 }
 
 function startHttpDaemon(port) {
-  const TOKEN = process.env.GATEWAY_HTTP_TOKEN || null; // optional bearer; 127.0.0.1 bind is the primary boundary
+  const TOKEN = process.env.GATEWAY_HTTP_TOKEN || null; // optional bearer; the 127.0.0.1 bind + Host/Origin guard are the primary boundary
+  const expectedAuth = TOKEN ? `Bearer ${TOKEN}` : null;
+  const bearerOk = (got) => {
+    if (!expectedAuth) return true;
+    const a = Buffer.from(String(got || "")), b = Buffer.from(expectedAuth);
+    return a.length === b.length && timingSafeEqual(a, b); // constant-time, length-safe
+  };
   const sessions = new Map(); // sessionId -> { transport, server }
+
+  const hostOk = new RegExp(`^(127\\.0\\.0\\.1|localhost|\\[::1\\]):${port}$`);
 
   const httpServer = createServer(async (req, res) => {
     const path = (req.url || "").split("?")[0];
     if (path !== "/mcp") { res.writeHead(404).end(); return; }
-    if (TOKEN && req.headers["authorization"] !== `Bearer ${TOKEN}`) { res.writeHead(401).end(); return; }
+    // DNS-rebinding / CSRF guard. We bind to 127.0.0.1, but a browser on this
+    // machine can still reach us — so a visited page must not be able to POST MCP
+    // commands here (CSRF) or read them back via a rebound DNS name. Pin Host to
+    // localhost and reject any browser-originated request: browsers always attach
+    // Origin/Referer/Sec-Fetch-Site on a cross-origin request, while node MCP
+    // clients (the only legitimate callers) attach none of them.
+    if (!hostOk.test(String(req.headers.host || ""))) {
+      res.writeHead(421, { "content-type": "application/json" })
+         .end(JSON.stringify({ error: "bad host (DNS-rebinding guard)" }));
+      return;
+    }
+    if (req.headers.origin || req.headers.referer || req.headers["sec-fetch-site"]) {
+      res.writeHead(403, { "content-type": "application/json" })
+         .end(JSON.stringify({ error: "forbidden: browser-originated request" }));
+      return;
+    }
+    if (TOKEN && !bearerOk(req.headers["authorization"])) { res.writeHead(401).end(); return; }
     try {
       if (req.method === "POST") {
         const body = await readBody(req);
