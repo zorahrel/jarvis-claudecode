@@ -234,6 +234,23 @@ class Session {
     this.context.setDefaultTimeout(ACTION_TIMEOUT);
     this.context.setDefaultNavigationTimeout(Math.max(ACTION_TIMEOUT, 30000));
     this.page = this.context.pages()[0] || (await this.context.newPage());
+    // Follow popups / new tabs: a "Continue with Google" / target=_blank / OAuth
+    // window opens a NEW page. Make the newest page active so the agent keeps
+    // driving the flow (e.g. the Google account picker) instead of being stranded
+    // on the opener. On close, fall back to the most recent still-open page. This
+    // is what lets multi-window auth flows be driven up to the real wall.
+    this.context.on("page", (p) => {
+      this.page = p;
+      this.lastSnap = null; // new surface — next observe is a full snapshot
+      if (this.headed) { p.bringToFront().catch(() => {}); }
+      p.on("close", () => {
+        if (this.page === p) {
+          const open = this.context.pages();
+          this.page = open[open.length - 1] || null;
+          this.lastSnap = null;
+        }
+      });
+    });
     return this;
   }
 
