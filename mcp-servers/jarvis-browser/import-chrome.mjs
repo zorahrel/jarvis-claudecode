@@ -107,31 +107,39 @@ function groupByHost(rows) {
   return [...m.entries()].map(([domain, cookies]) => ({ domain, cookies })).sort((a, b) => b.cookies - a.cookies);
 }
 
-export async function importChrome({ session, domains = [], profile = "Default", dryRun = false, headed = false }) {
+// Sanitize inputs + read matching cookie rows from a private DB snapshot, with one
+// retry on a torn (WAL) live copy. Shared by the dry-run and the real decrypt paths.
+function readChromeRows({ domains = [], profile = "Default" } = {}) {
   // Defense in depth: strip anything that isn't a hostname char (drops quotes, %,
   // _, spaces) so a domain can't perturb the SQL literal or act as a LIKE wildcard.
-  domains = (domains || []).map((d) => String(d).replace(/[^a-zA-Z0-9.\-]/g, "")).filter(Boolean);
-  profile = String(profile).replace(/[^a-zA-Z0-9 _-]/g, ""); // profile dir name only
-  const src = cookiesDbPath(profile);
-  if (!existsSync(src)) throw new Error(`no Chrome Cookies DB for profile '${profile}' at ${src}`);
-
-  // Snapshot + read with one retry: copying a live (WAL) Chrome DB can race a
-  // write and yield a 'malformed'/'locked' copy — re-snapshotting usually clears it.
-  const readRows = () => {
+  const cleanDomains = (domains || []).map((d) => String(d).replace(/[^a-zA-Z0-9.\-]/g, "")).filter(Boolean);
+  const cleanProfile = String(profile).replace(/[^a-zA-Z0-9 _-]/g, ""); // profile dir name only
+  const src = cookiesDbPath(cleanProfile);
+  if (!existsSync(src)) throw new Error(`no Chrome Cookies DB for profile '${cleanProfile}' at ${src}`);
+  const read = () => {
     const db = snapshotDb(src);
-    try { return queryRows(db, domains); }
+    try { return queryRows(db, cleanDomains); }
     finally { for (const ext of ["", "-wal", "-shm"]) { try { rmSync(db + ext, { force: true }); } catch {} } }
   };
   let rows;
-  try { rows = readRows(); }
-  catch (e) { if (/malformed|locked|disk image/i.test(String(e?.message))) rows = readRows(); else throw e; }
+  try { rows = read(); }
+  catch (e) { if (/malformed|locked|disk image/i.test(String(e?.message))) rows = read(); else throw e; }
+  return { rows, profile: cleanProfile, domains: cleanDomains };
+}
 
-  if (dryRun) {
-    const hosts = groupByHost(rows);
-    return { dryRun: true, profile, totalCookies: rows.length, hostCount: hosts.length, hosts };
-  }
-  if (!rows.length) return { ok: true, imported: 0, note: "no matching cookies" };
+// Dry-run: which hosts/counts WOULD be imported. No Keychain prompt, no values.
+export function listChromeCookieHosts({ domains = [], profile = "Default" } = {}) {
+  const { rows, profile: p } = readChromeRows({ domains, profile });
+  const hosts = groupByHost(rows);
+  return { dryRun: true, profile: p, totalCookies: rows.length, hostCount: hosts.length, hosts };
+}
 
+// Canonical Chrome → cookies decryption (macOS v10). Returns Playwright-shaped
+// cookies + accounting. No daemon, no filesystem writes — pure. Triggers the
+// Keychain consent prompt. Reused by importChrome (and vendored by topics-app).
+export function decryptChromeCookies({ domains = [], profile = "Default" } = {}) {
+  const { rows, profile: p, domains: d } = readChromeRows({ domains, profile });
+  if (!rows.length) return { profile: p, domains: d, cookies: [], decrypted: 0, decryptFailed: 0, skippedEmpty: 0, appBoundEncrypted: 0 };
   const key = keychainKey(); // Keychain consent prompt here
   const cookies = [];
   let decryptFailed = 0, skippedEmpty = 0, appBoundEncrypted = 0;
@@ -144,17 +152,25 @@ export async function importChrome({ session, domains = [], profile = "Default",
     if (c.value === "") { skippedEmpty++; continue; } // legitimately empty — skip, but account for it
     cookies.push(c);
   }
+  return { profile: p, domains: d, cookies, decrypted: cookies.length, decryptFailed, skippedEmpty, appBoundEncrypted };
+}
+
+export async function importChrome({ session, domains = [], profile = "Default", dryRun = false, headed = false }) {
+  if (dryRun) return listChromeCookieHosts({ domains, profile });
+  const { profile: p, cookies, decrypted, decryptFailed, skippedEmpty, appBoundEncrypted } = decryptChromeCookies({ domains, profile });
+  if (!cookies.length) return { ok: true, imported: 0, note: "no matching cookies", appBoundEncrypted };
 
   // The state file holds DECRYPTED session tokens — write it private (0600) in a
   // private dir (0700). writeFileSync's mode is umask-masked, so chmod explicitly.
   mkdirSync(STATES, { recursive: true, mode: 0o700 });
   try { chmodSync(STATES, 0o700); } catch {}
-  const handle = `chrome-${profile.replace(/[^a-zA-Z0-9_-]/g, "_")}${domains.length ? "-" + domains.join("_").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) : ""}`;
+  const cleanDomains = (domains || []).map((d) => String(d).replace(/[^a-zA-Z0-9.\-]/g, "")).filter(Boolean);
+  const handle = `chrome-${p.replace(/[^a-zA-Z0-9_-]/g, "_")}${cleanDomains.length ? "-" + cleanDomains.join("_").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) : ""}`;
   const statePath = join(STATES, `${handle}.json`);
   writeFileSync(statePath, JSON.stringify({ cookies, origins: [] }), { mode: 0o600 });
   try { chmodSync(statePath, 0o600); } catch {}
   const res = await rpc("loadState", { name: session, state: handle, headed });
-  const out = { ok: true, profile, decrypted: cookies.length, decryptFailed, skippedEmpty, handle, ...res };
+  const out = { ok: true, profile: p, decrypted, decryptFailed, skippedEmpty, handle, ...res };
   if (appBoundEncrypted) {
     out.appBoundEncrypted = appBoundEncrypted;
     out.note = `${appBoundEncrypted} cookie(s) use App-Bound Encryption (v20) — not importable by the macOS v10 path`;
