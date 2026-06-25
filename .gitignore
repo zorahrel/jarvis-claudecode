@@ -93,3 +93,4 @@ mcp-needs-auth-cache*.json
 # Token files of any kind
 *token*.json
 *credential*.json
+relocated-mcp/

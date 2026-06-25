@@ -907,6 +907,22 @@ export const api = {
   mcpToolsRefresh: () =>
     request<{ ok: boolean; tools: Record<string, McpServerTools>; refreshedAt: number }>(
       '/api/mcp/tools/refresh', { method: 'POST' }),
+  // Gateway-parked MCPs — configs in relocated-servers.json, mounted on demand
+  // via the `gateway` MCP. Surfaced so they are visible + one-click restorable.
+  mcpGateway: async (): Promise<McpGatewayServer[]> => {
+    const r = await fetch('/api/mcp/gateway')
+    if (!r.ok) throw new Error(`mcp-gateway failed: ${r.status}`)
+    const body = (await r.json()) as { gateway?: McpGatewayServer[] }
+    return body.gateway ?? []
+  },
+  mcpGatewayRestore: async (name: string): Promise<{ ok: boolean; name?: string; error?: string }> => {
+    const r = await fetch('/api/mcp/gateway/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    return r.json() as Promise<{ ok: boolean; name?: string; error?: string }>
+  },
 }
 
 // ── MCP Auth Manager — public types (consumed by MCPHealth tab) ─────────────
@@ -929,6 +945,14 @@ export interface McpPendingServer {
   name: string
   url: string
   transport: 'stdio+mcp-remote' | 'http' | 'sse'
+}
+
+export interface McpGatewayServer {
+  name: string
+  url: string
+  transport: string
+  command?: string
+  args?: string[]
 }
 
 export interface McpToolInfo {

@@ -669,6 +669,59 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       json(req, res, { pending: list });
     } catch (e: any) { json(req, res, { error: e.message, pending: [] }, 200); }
 
+  // --- MCP GATEWAY — list MCP servers parked behind the gateway -------------
+  // ~/.claude/jarvis/relocated-mcp/relocated-servers.json holds full configs for
+  // servers relocated OUT of ~/.claude.json (to keep session context lean). They
+  // mount on demand via the `gateway` MCP, so they show in NO Claude session and
+  // — until now — nowhere in this dashboard. Surface them (minus any already
+  // active or pending) so they are visible and one-click restorable.
+  } else if (path === "/api/mcp/gateway" && req.method === "GET") {
+    try {
+      const relocPath = join(HOME, ".claude/jarvis/relocated-mcp/relocated-servers.json");
+      let parked: Record<string, any> = {};
+      if (existsSync(relocPath)) {
+        try {
+          const raw = JSON.parse(readFileSync(relocPath, "utf-8"));
+          parked = (raw && raw.mcpServers) ? raw.mcpServers : (raw || {});
+        } catch { /* corrupt — treat as empty */ }
+      }
+      const active = existsSync(join(HOME, ".claude.json"))
+        ? ((JSON.parse(readFileSync(join(HOME, ".claude.json"), "utf-8")).mcpServers) || {})
+        : {};
+      let pending: Record<string, unknown> = {};
+      const pPath = join(HOME, ".claude/mcp-pending.json");
+      if (existsSync(pPath)) { try { pending = JSON.parse(readFileSync(pPath, "utf-8")); } catch { /* empty */ } }
+      const list = Object.entries(parked)
+        .filter(([name]) => !(name in active) && !(name in pending))
+        .map(([name, cfg]) => {
+          const c = cfg as { type?: string; url?: string; command?: string; args?: string[] };
+          const url = c.url ?? (Array.isArray(c.args) ? (c.args.find((a) => /^https?:\/\//.test(a)) ?? "") : "");
+          const transport = c.type === "http" || c.type === "sse" ? c.type : "stdio";
+          return { name, url, transport, command: c.command ?? "", args: c.args ?? [] };
+        });
+      json(req, res, { gateway: list });
+    } catch (e: any) { json(req, res, { error: e.message, gateway: [] }, 200); }
+
+  // --- MCP GATEWAY RESTORE — move a parked server back into ~/.claude.json ---
+  } else if (path === "/api/mcp/gateway/restore" && req.method === "POST") {
+    try {
+      const body = await parseBody(req) as { name?: string };
+      if (!body.name || typeof body.name !== "string") return json(req, res, { ok: false, error: "missing name" }, 400);
+      const name = body.name;
+      const relocPath = join(HOME, ".claude/jarvis/relocated-mcp/relocated-servers.json");
+      if (!existsSync(relocPath)) return json(req, res, { ok: false, error: "no relocated-servers.json" }, 404);
+      const raw = JSON.parse(readFileSync(relocPath, "utf-8"));
+      const parked = (raw && raw.mcpServers) ? raw.mcpServers : (raw || {});
+      const cfg = parked[name];
+      if (!cfg) return json(req, res, { ok: false, error: `not parked: ${name}` }, 404);
+      const confPath = join(HOME, ".claude.json");
+      const conf = JSON.parse(readFileSync(confPath, "utf-8")) as { mcpServers?: Record<string, unknown> };
+      conf.mcpServers = conf.mcpServers ?? {};
+      conf.mcpServers[name] = cfg;
+      writeFileSync(confPath, JSON.stringify(conf, null, 2));
+      json(req, res, { ok: true, name });
+    } catch (e: any) { json(req, res, { ok: false, error: e.message }, 200); }
+
   // --- MCP APPROVE-PENDING — authorize a parked server and commit it ---
   // Body: { name }. Flow:
   //   1. Resolve the parked config from ~/.claude/mcp-pending.json.

@@ -15,7 +15,7 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { InfoBox } from '../components/ui/InfoBox'
 import { Field, Input } from '../components/ui/Field'
 import { BadgeLink } from '../components/BadgeLink'
-import type { Tool, ToolsResponse, FullRoute, FullAgent, McpPendingServer, McpServerTools } from '../api/client'
+import type { Tool, ToolsResponse, FullRoute, FullAgent, McpPendingServer, McpGatewayServer, McpServerTools } from '../api/client'
 import { ChannelIcon, ToolIcon } from '../icons'
 
 const MCP_STATUS_HELP: Record<string, string> = {
@@ -114,6 +114,34 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
   }, [])
 
   useEffect(() => { loadPendingMcps() }, [loadPendingMcps])
+
+  // Gateway-parked MCPs — full configs in relocated-servers.json, mounted on
+  // demand via the `gateway` MCP, so absent from every session AND (until now)
+  // from this dashboard. Surface them so the user can see + one-click restore.
+  const [gatewayMcps, setGatewayMcps] = useState<McpGatewayServer[]>([])
+  const [restoringMcp, setRestoringMcp] = useState<Set<string>>(new Set())
+  const loadGatewayMcps = useCallback(async () => {
+    try { setGatewayMcps(await api.mcpGateway()) } catch { /* silent */ }
+  }, [])
+  useEffect(() => { loadGatewayMcps() }, [loadGatewayMcps])
+  const restoreGatewayMcp = useCallback(async (name: string) => {
+    setRestoringMcp((prev) => new Set(prev).add(name))
+    onToast?.(`Restoring ${name} to ~/.claude.json…`, 'info')
+    try {
+      const r = await api.mcpGatewayRestore(name)
+      if (r.ok) {
+        onToast?.(`${name}: restored — now active (re-auth if needed)`, 'success')
+        await Promise.all([loadGatewayMcps(), loadMcpStatus(), refresh()])
+      } else {
+        onToast?.(`${name}: ${r.error ?? 'restore failed'}`, 'error')
+      }
+    } catch (e) {
+      onToast?.(`${name}: ${e instanceof Error ? e.message : String(e)}`, 'error')
+    } finally {
+      setRestoringMcp((prev) => { const n = new Set(prev); n.delete(name); return n })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadGatewayMcps, loadMcpStatus])
 
   const approveMcp = useCallback(async (name: string) => {
     setApproving((s) => new Set(s).add(name))
@@ -316,7 +344,17 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
     _pending: p,
   } as ToolDef & { _pending: McpPendingServer }))
 
-  const augmentedTools: ToolDef[] = [...tools, ...pendingPseudoTools]
+  const gatewayPseudoTools: (ToolDef & { _gateway: McpGatewayServer })[] = gatewayMcps.map((g) => ({
+    id: `mcp:${g.name}`,
+    type: 'mcp',
+    label: g.name,
+    mcpConfig: g.url
+      ? { type: 'http', url: g.url }
+      : { type: 'stdio', command: g.command || '', args: g.args || [] },
+    _gateway: g,
+  } as ToolDef & { _gateway: McpGatewayServer }))
+
+  const augmentedTools: ToolDef[] = [...tools, ...pendingPseudoTools, ...gatewayPseudoTools]
   const categories = categorizeTools(augmentedTools)
 
   const toolRoutesCount = (toolId: string) => (routeMap[toolId] || []).length
@@ -402,6 +440,18 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                           </Badge>
                         )
                       }
+                      const gatewayMeta = (t as ToolDef & { _gateway?: McpGatewayServer })._gateway
+                      if (gatewayMeta) {
+                        return (
+                          <Badge
+                            tone="neutral"
+                            size="xs"
+                            title={`Parked behind the MCP gateway — config in relocated-servers.json, mounted on demand to keep session context lean. Click "Restore" to add it back to ~/.claude.json (active in every session).`}
+                          >
+                            behind gateway
+                          </Badge>
+                        )
+                      }
                       const st = mcpStatus[serverName]
                       if (!st) return null
                       const tone = st.status === 'connected' ? 'ok' : st.status === 'auth' ? 'warn' : 'err'
@@ -456,12 +506,32 @@ export function Tools({ onToast }: { onToast?: (msg: string, type: 'success' | '
                         </div>
                       )
                     }
+                    const gatewayMeta = (t as ToolDef & { _gateway?: McpGatewayServer })._gateway
+                    if (gatewayMeta) {
+                      const isRestoring = restoringMcp.has(serverName)
+                      return (
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }} onClick={e => e.stopPropagation()}>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            disabled={isRestoring}
+                            onClick={() => restoreGatewayMcp(serverName)}
+                            title="Add this gateway-parked server back to ~/.claude.json (active in every Claude session)"
+                          >
+                            {isRestoring ? 'Restoring…' : 'Restore'}
+                          </Button>
+                        </div>
+                      )
+                    }
                     const st = mcpStatus[serverName]
                     if (!st) return null
                     const inflight = mcpActionInflight[serverName]
                     return (
                       <div style={{ display: 'flex', gap: 6, marginBottom: 6 }} onClick={e => e.stopPropagation()}>
-                        {st.status === 'auth' && (
+                        {(st.status === 'auth' ||
+                          // A remote OAuth server that 401s shows as `failed`,
+                          // not `auth` — still offer Authenticate for it.
+                          (st.status === 'failed' && /\((HTTP|SSE)\)|mcp-remote/.test(st.target))) && (
                           <Button
                             size="xs"
                             variant="primary"
