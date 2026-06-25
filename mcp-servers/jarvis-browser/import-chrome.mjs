@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 /**
  * jbrowser import-chrome — seed a jarvis-browser session from the user's REAL
- * Chrome cookies, so the session is instantly logged into everything Chrome is.
+ * browser cookies, so the session is instantly logged into everything that
+ * browser is. Despite the name it now supports ANY Chromium-family browser on
+ * macOS (Chrome, Chromium, Brave, Edge, Arc, Dia, Opera, Vivaldi) — they share
+ * the exact same cookie-encryption scheme; only the data dir and the Keychain
+ * "Safe Storage" service name differ.
  *
  * It REUSES existing sessions; it never types passwords and never creates
  * accounts. It reads only the Cookies store — NOT Login Data (saved passwords).
@@ -10,12 +14,13 @@
  *   key = PBKDF2-HMAC-SHA1(keychainPassword, "saltysalt", 1003, 16)
  *   plaintext = AES-128-CBC-decrypt(iv = 16 spaces, ciphertext = value[3:])
  *   strip PKCS7 padding, then strip a leading 32-byte SHA256(host_key) if present
- *   (newer Chrome binds the cookie to its host with that prefix).
+ *   (newer Chromium binds the cookie to its host with that prefix).
  * The Keychain read (`security find-generic-password`) triggers a one-time macOS
  * consent prompt — that OS gate is the authorization, by design.
  *
  * Usage:
- *   jbrowser import-chrome <session> [--domains a.com,b.com] [--profile Default] [--dry-run] [--headed]
+ *   jbrowser import-chrome <session> [--browser chrome] [--domains a.com,b.com] [--profile Default] [--dry-run] [--headed]
+ *   --browser   chrome|chromium|brave|edge|arc|dia|opera|vivaldi  (default chrome)
  *   --dry-run   list importable domains + cookie counts (NO Keychain, NO values)
  */
 import { execFileSync } from "node:child_process";
@@ -26,15 +31,48 @@ import { copyFileSync, rmSync, existsSync, writeFileSync, mkdirSync, chmodSync }
 import { rpc } from "./lib/client.mjs";
 
 const STATES = join(homedir(), ".claude/jarvis/state/browser-states");
+const SUPPORT = join(homedir(), "Library/Application Support");
 
-function cookiesDbPath(profile) {
-  return join(homedir(), "Library/Application Support/Google/Chrome", profile, "Cookies");
+// Per-browser knobs. `dir` = the folder under ~/Library/Application Support that
+// holds the profile directories (Arc/Dia nest theirs under "User Data"); `keychain`
+// = the generic-password service that stores the AES key. Everything else (the v10
+// decryption math) is identical across the Chromium family.
+const BROWSERS = {
+  chrome:   { dir: "Google/Chrome",              keychain: "Chrome Safe Storage" },
+  chromium: { dir: "Chromium",                   keychain: "Chromium Safe Storage" },
+  brave:    { dir: "BraveSoftware/Brave-Browser", keychain: "Brave Safe Storage" },
+  edge:     { dir: "Microsoft Edge",             keychain: "Microsoft Edge Safe Storage" },
+  arc:      { dir: "Arc/User Data",              keychain: "Arc Safe Storage" },
+  dia:      { dir: "Dia/User Data",              keychain: "Dia Safe Storage" },
+  opera:    { dir: "com.operasoftware.Opera",    keychain: "Opera Safe Storage" },
+  vivaldi:  { dir: "Vivaldi",                    keychain: "Vivaldi Safe Storage" },
+};
+
+export const SUPPORTED_BROWSERS = Object.keys(BROWSERS);
+
+function browserDef(browser) {
+  const key = String(browser || "chrome").toLowerCase();
+  const def = BROWSERS[key];
+  if (!def) throw new Error(`unknown browser '${browser}'. supported: ${SUPPORTED_BROWSERS.join(", ")}`);
+  return { key, ...def };
 }
 
-// Work on a private copy so a running Chrome can't lock us out and we never touch
+function cookiesDbPath(def, profile) {
+  // Modern Chromium keeps cookies in <profile>/Network/Cookies; older builds (and
+  // some forks) use the flat <profile>/Cookies. Prefer the legacy flat path when it
+  // exists (matches prior behaviour) and fall back to the Network/ location.
+  const base = join(SUPPORT, def.dir, profile);
+  const flat = join(base, "Cookies");
+  const network = join(base, "Network", "Cookies");
+  if (existsSync(flat)) return flat;
+  if (existsSync(network)) return network;
+  return flat; // report the canonical path in the error
+}
+
+// Work on a private copy so a running browser can't lock us out and we never touch
 // the live profile. Bring the WAL/SHM siblings so recently-written rows are seen.
 function snapshotDb(src) {
-  const dst = join(tmpdir(), `jbrowser-chrome-${process.pid}-${Date.now()}.db`);
+  const dst = join(tmpdir(), `jbrowser-cookies-${process.pid}-${Date.now()}.db`);
   copyFileSync(src, dst);
   for (const ext of ["-wal", "-shm"]) if (existsSync(src + ext)) { try { copyFileSync(src + ext, dst + ext); } catch {} }
   return dst;
@@ -55,9 +93,9 @@ function queryRows(dbPath, domains) {
   return out ? JSON.parse(out) : [];
 }
 
-function keychainKey() {
-  // Triggers the macOS Keychain consent prompt for "Chrome Safe Storage".
-  const pw = execFileSync("security", ["find-generic-password", "-ws", "Chrome Safe Storage"]).toString().replace(/\n$/, "");
+function keychainKey(def) {
+  // Triggers the macOS Keychain consent prompt for "<Browser> Safe Storage".
+  const pw = execFileSync("security", ["find-generic-password", "-ws", def.keychain]).toString().replace(/\n$/, "");
   return pbkdf2Sync(pw, "saltysalt", 1003, 16, "sha1");
 }
 
@@ -70,12 +108,12 @@ function decryptValue(encHex, key, hostKey) {
   let out = Buffer.concat([dec.update(buf.subarray(3)), dec.final()]);
   const pad = out[out.length - 1]; // strip PKCS7
   if (pad > 0 && pad <= 16) out = out.subarray(0, out.length - pad);
-  const hostHash = createHash("sha256").update(hostKey).digest(); // newer Chrome host-binding prefix
+  const hostHash = createHash("sha256").update(hostKey).digest(); // newer Chromium host-binding prefix
   if (out.length >= 32 && out.subarray(0, 32).equals(hostHash)) out = out.subarray(32);
   return out.toString("utf8");
 }
 
-// Chrome expires_utc = microseconds since 1601-01-01; 0 = session cookie.
+// Chromium expires_utc = microseconds since 1601-01-01; 0 = session cookie.
 function toUnixSeconds(us) {
   const n = Number(us);
   if (!n) return -1;
@@ -91,11 +129,11 @@ function toPlaywrightCookie(row, key) {
   if (sameSite === "None" && !secure) sameSite = "Lax"; // Playwright rejects insecure None
   const path = row.path || "/";
   const base = { name: row.name, value, expires: toUnixSeconds(row.expires_utc), httpOnly: !!row.is_httponly, secure, sameSite };
-  // Chrome host_key starting with "." = a DOMAIN cookie (shared with subdomains)
-  // → set domain+path. Otherwise it's HOST-ONLY; crucially, __Host-/__Secure-
-  // prefixed cookies FORBID a Domain attribute, so setting domain makes Chromium
-  // silently drop them. Inject host-only cookies via `url` (no domain attribute),
-  // baking the path into the url so it's preserved.
+  // host_key starting with "." = a DOMAIN cookie (shared with subdomains) → set
+  // domain+path. Otherwise it's HOST-ONLY; crucially, __Host-/__Secure- prefixed
+  // cookies FORBID a Domain attribute, so setting domain makes Chromium silently
+  // drop them. Inject host-only cookies via `url` (no domain attribute), baking the
+  // path into the url so it's preserved.
   if (row.host_key.startsWith(".")) return { ...base, domain: row.host_key, path };
   const scheme = secure ? "https" : "http";
   return { ...base, url: `${scheme}://${row.host_key}${path.startsWith("/") ? path : "/" + path}` };
@@ -109,13 +147,14 @@ function groupByHost(rows) {
 
 // Sanitize inputs + read matching cookie rows from a private DB snapshot, with one
 // retry on a torn (WAL) live copy. Shared by the dry-run and the real decrypt paths.
-function readChromeRows({ domains = [], profile = "Default" } = {}) {
+function readBrowserRows({ browser = "chrome", domains = [], profile = "Default" } = {}) {
+  const def = browserDef(browser);
   // Defense in depth: strip anything that isn't a hostname char (drops quotes, %,
   // _, spaces) so a domain can't perturb the SQL literal or act as a LIKE wildcard.
   const cleanDomains = (domains || []).map((d) => String(d).replace(/[^a-zA-Z0-9.\-]/g, "")).filter(Boolean);
   const cleanProfile = String(profile).replace(/[^a-zA-Z0-9 _-]/g, ""); // profile dir name only
-  const src = cookiesDbPath(cleanProfile);
-  if (!existsSync(src)) throw new Error(`no Chrome Cookies DB for profile '${cleanProfile}' at ${src}`);
+  const src = cookiesDbPath(def, cleanProfile);
+  if (!existsSync(src)) throw new Error(`no ${def.key} Cookies DB for profile '${cleanProfile}' at ${src}`);
   const read = () => {
     const db = snapshotDb(src);
     try { return queryRows(db, cleanDomains); }
@@ -124,23 +163,23 @@ function readChromeRows({ domains = [], profile = "Default" } = {}) {
   let rows;
   try { rows = read(); }
   catch (e) { if (/malformed|locked|disk image/i.test(String(e?.message))) rows = read(); else throw e; }
-  return { rows, profile: cleanProfile, domains: cleanDomains };
+  return { rows, browser: def.key, def, profile: cleanProfile, domains: cleanDomains };
 }
 
 // Dry-run: which hosts/counts WOULD be imported. No Keychain prompt, no values.
-export function listChromeCookieHosts({ domains = [], profile = "Default" } = {}) {
-  const { rows, profile: p } = readChromeRows({ domains, profile });
+export function listBrowserCookieHosts({ browser = "chrome", domains = [], profile = "Default" } = {}) {
+  const { rows, browser: b, profile: p } = readBrowserRows({ browser, domains, profile });
   const hosts = groupByHost(rows);
-  return { dryRun: true, profile: p, totalCookies: rows.length, hostCount: hosts.length, hosts };
+  return { dryRun: true, browser: b, profile: p, totalCookies: rows.length, hostCount: hosts.length, hosts };
 }
 
-// Canonical Chrome → cookies decryption (macOS v10). Returns Playwright-shaped
+// Canonical browser → cookies decryption (macOS v10). Returns Playwright-shaped
 // cookies + accounting. No daemon, no filesystem writes — pure. Triggers the
-// Keychain consent prompt. Reused by importChrome (and vendored by topics-app).
-export function decryptChromeCookies({ domains = [], profile = "Default" } = {}) {
-  const { rows, profile: p, domains: d } = readChromeRows({ domains, profile });
-  if (!rows.length) return { profile: p, domains: d, cookies: [], decrypted: 0, decryptFailed: 0, skippedEmpty: 0, appBoundEncrypted: 0 };
-  const key = keychainKey(); // Keychain consent prompt here
+// Keychain consent prompt.
+export function decryptBrowserCookies({ browser = "chrome", domains = [], profile = "Default" } = {}) {
+  const { rows, browser: b, def, profile: p, domains: d } = readBrowserRows({ browser, domains, profile });
+  if (!rows.length) return { browser: b, profile: p, domains: d, cookies: [], decrypted: 0, decryptFailed: 0, skippedEmpty: 0, appBoundEncrypted: 0 };
+  const key = keychainKey(def); // Keychain consent prompt here
   const cookies = [];
   let decryptFailed = 0, skippedEmpty = 0, appBoundEncrypted = 0;
   for (const r of rows) {
@@ -152,31 +191,37 @@ export function decryptChromeCookies({ domains = [], profile = "Default" } = {})
     if (c.value === "") { skippedEmpty++; continue; } // legitimately empty — skip, but account for it
     cookies.push(c);
   }
-  return { profile: p, domains: d, cookies, decrypted: cookies.length, decryptFailed, skippedEmpty, appBoundEncrypted };
+  return { browser: b, profile: p, domains: d, cookies, decrypted: cookies.length, decryptFailed, skippedEmpty, appBoundEncrypted };
 }
 
-export async function importChrome({ session, domains = [], profile = "Default", dryRun = false, headed = false }) {
-  if (dryRun) return listChromeCookieHosts({ domains, profile });
-  const { profile: p, cookies, decrypted, decryptFailed, skippedEmpty, appBoundEncrypted } = decryptChromeCookies({ domains, profile });
-  if (!cookies.length) return { ok: true, imported: 0, note: "no matching cookies", appBoundEncrypted };
+export async function importBrowser({ session, browser = "chrome", domains = [], profile = "Default", dryRun = false, headed = false }) {
+  if (dryRun) return listBrowserCookieHosts({ browser, domains, profile });
+  const { browser: b, profile: p, cookies, decrypted, decryptFailed, skippedEmpty, appBoundEncrypted } = decryptBrowserCookies({ browser, domains, profile });
+  if (!cookies.length) return { ok: true, browser: b, imported: 0, note: "no matching cookies", appBoundEncrypted };
 
   // The state file holds DECRYPTED session tokens — write it private (0600) in a
   // private dir (0700). writeFileSync's mode is umask-masked, so chmod explicitly.
   mkdirSync(STATES, { recursive: true, mode: 0o700 });
   try { chmodSync(STATES, 0o700); } catch {}
   const cleanDomains = (domains || []).map((d) => String(d).replace(/[^a-zA-Z0-9.\-]/g, "")).filter(Boolean);
-  const handle = `chrome-${p.replace(/[^a-zA-Z0-9_-]/g, "_")}${cleanDomains.length ? "-" + cleanDomains.join("_").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) : ""}`;
+  const handle = `${b}-${p.replace(/[^a-zA-Z0-9_-]/g, "_")}${cleanDomains.length ? "-" + cleanDomains.join("_").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) : ""}`;
   const statePath = join(STATES, `${handle}.json`);
   writeFileSync(statePath, JSON.stringify({ cookies, origins: [] }), { mode: 0o600 });
   try { chmodSync(statePath, 0o600); } catch {}
   const res = await rpc("loadState", { name: session, state: handle, headed });
-  const out = { ok: true, profile: p, decrypted, decryptFailed, skippedEmpty, handle, ...res };
+  const out = { ok: true, browser: b, profile: p, decrypted, decryptFailed, skippedEmpty, handle, ...res };
   if (appBoundEncrypted) {
     out.appBoundEncrypted = appBoundEncrypted;
     out.note = `${appBoundEncrypted} cookie(s) use App-Bound Encryption (v20) — not importable by the macOS v10 path`;
   }
   return out;
 }
+
+// ── Backward-compatible Chrome-named exports (chrome default). Kept because other
+//    code (cli.mjs, the topics-app vendored copy) imports these by name. ──────────
+export const listChromeCookieHosts = (o = {}) => listBrowserCookieHosts({ ...o, browser: o.browser || "chrome" });
+export const decryptChromeCookies = (o = {}) => decryptBrowserCookies({ ...o, browser: o.browser || "chrome" });
+export const importChrome = (o = {}) => importBrowser({ ...o, browser: o.browser || "chrome" });
 
 // CLI entry (only when run directly, not when imported by cli.mjs).
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -185,12 +230,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const opt = (f) => { const i = args.indexOf(f); if (i >= 0) { const v = args[i + 1]; args.splice(i, 2); return v; } return undefined; };
   const dryRun = has("--dry-run");
   const headed = has("--headed");
+  const browser = opt("--browser") || "chrome";
   const profile = opt("--profile") || "Default";
   const domainsRaw = opt("--domains");
   const domains = domainsRaw ? domainsRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
   const session = args[0];
-  if (!session) { console.error("usage: jbrowser import-chrome <session> [--domains a.com,b.com] [--profile Default] [--dry-run] [--headed]"); process.exit(2); }
-  importChrome({ session, domains, profile, dryRun, headed })
+  if (!session) { console.error("usage: jbrowser import-chrome <session> [--browser chrome|dia|arc|brave|edge|chromium|opera|vivaldi] [--domains a.com,b.com] [--profile Default] [--dry-run] [--headed]"); process.exit(2); }
+  importBrowser({ session, browser, domains, profile, dryRun, headed })
     .then((r) => console.log(JSON.stringify(r, null, 2)))
     .catch((e) => { console.error("error:", e?.message || String(e)); process.exit(1); });
 }
