@@ -155,6 +155,21 @@ export class WhatsAppConnector implements Connector {
    */
   private presenceRefreshTimer: NodeJS.Timeout | null = null;
 
+  /**
+   * Reconnect backoff state. The old code called start() IMMEDIATELY on every
+   * `connection: "close"` with no backoff AND without tearing down the old
+   * socket — so on a persistent failure (e.g. a 408 timeout loop) it span up
+   * a fresh Baileys socket as fast as the timeout fired, each one creating ~5
+   * internal `@cacheable/node-cache` NodeCaches whose setInterval sweep timers
+   * are never disposed. Worse, the old socket's listeners stayed attached and
+   * kept firing → the reconnects MULTIPLIED. One 1.7-day run leaked ~458k
+   * NodeCache/timer/Map objects (~1.6 GB heap, ~6.8 GB RSS). These three fields
+   * gate a single, backed-off, self-disposing reconnect.
+   */
+  private reconnecting = false;
+  private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+
   /** Phone number requested for next pairing-code start (E.164 digits, no +) */
   private pendingPairingPhone: string | null = null;
   private snapshot: WAStatusSnapshot = { status: "idle", updatedAt: Date.now() };
@@ -180,13 +195,11 @@ export class WhatsAppConnector implements Connector {
     this.pendingPairingPhone = opts?.phoneNumber
       ? opts.phoneNumber.replace(/[^0-9]/g, "")
       : null;
-    try {
-      this.sock?.ev.removeAllListeners("connection.update");
-      this.sock?.ev.removeAllListeners("messages.upsert");
-      this.sock?.ev.removeAllListeners("creds.update");
-      this.sock?.end(undefined);
-    } catch {}
-    this.sock = null;
+    // Reset reconnect backoff and dispose the old socket cleanly.
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.reconnecting = false;
+    this.reconnectAttempts = 0;
+    this.teardownSocket();
     if (existsSync(this.authDir)) {
       try { rmSync(this.authDir, { recursive: true, force: true }); } catch (err) {
         log.error({ err }, "Failed to wipe wa-auth dir");
@@ -201,7 +214,54 @@ export class WhatsAppConnector implements Connector {
     WhatsAppConnector.instance = this;
   }
 
+  /**
+   * Fully dispose the current socket: remove ALL its event listeners (so a dead
+   * socket can't keep firing connection.update → reconnect, which is what made
+   * the reconnects multiply) and end its WS. Idempotent. Baileys-internal
+   * NodeCache timers still can't be cleared from here, but with no reconnect
+   * storm only a handful of sockets are ever created, so the residual is moot.
+   */
+  private teardownSocket(): void {
+    const old = this.sock;
+    if (!old) return;
+    this.sock = null;
+    try {
+      // Baileys' typed emitter requires an event name per call — drop every
+      // listener this connector attaches so the dead socket goes fully silent.
+      old.ev.removeAllListeners("creds.update");
+      old.ev.removeAllListeners("connection.update");
+      old.ev.removeAllListeners("messages.upsert");
+      old.ev.removeAllListeners("messaging-history.set");
+    } catch {}
+    try { old.end(undefined); } catch {}
+  }
+
+  /**
+   * Schedule a single, backed-off reconnect. The `reconnecting` guard collapses
+   * the burst of close events (live socket + any not-yet-torn-down old ones)
+   * into ONE pending reconnect. Backoff: 2s → 4s → … → cap 5min, reset on a
+   * successful "open". start() tears the old socket down before building a new
+   * one, so no listeners or sockets accumulate.
+   */
+  private scheduleReconnect(code?: number): void {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    this.reconnectAttempts++;
+    const delay = Math.min(5 * 60_000, 2_000 * 2 ** Math.min(this.reconnectAttempts - 1, 8));
+    log.warn({ code, attempt: this.reconnectAttempts, delayMs: delay }, "WhatsApp disconnected — reconnect scheduled");
+    this.setStatus({ status: "connecting", error: `disconnected (${code ?? "?"}) — retry in ${Math.round(delay / 1000)}s` });
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnecting = false;
+      this.start().catch((err) => log.error({ err }, "WhatsApp reconnect start() threw"));
+    }, delay);
+  }
+
   async start(): Promise<void> {
+    // Dispose any prior socket FIRST so listeners/caches never accumulate across
+    // (re)connects — the core of the leak fix.
+    this.teardownSocket();
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
     const { version } = await fetchLatestBaileysVersion();
     const silentLogger = pino({ level: "silent" });
@@ -270,14 +330,16 @@ export class WhatsAppConnector implements Connector {
         if (this.presenceRefreshTimer) { clearInterval(this.presenceRefreshTimer); this.presenceRefreshTimer = null; }
         const code = (lastDisconnect?.error as any)?.output?.statusCode;
         if (code !== DisconnectReason.loggedOut) {
-          log.warn({ code }, "WhatsApp disconnected, reconnecting...");
-          this.setStatus({ status: "connecting", error: `disconnected (${code ?? "?"})` });
-          this.start();
+          this.scheduleReconnect(code);
         } else {
           log.error("WhatsApp logged out — manual re-auth needed");
           this.setStatus({ status: "logged-out", qr: undefined, pairingCode: undefined });
         }
       } else if (connection === "open") {
+        // Connected — clear the reconnect backoff so the next drop starts fresh.
+        this.reconnectAttempts = 0;
+        this.reconnecting = false;
+        if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
         this.selfJid = this.sock?.user?.id ?? "";
         this.myLidBase = (this.sock?.user as any)?.lid?.split(":")[0]?.split("@")[0] || "";
         log.info({ selfJid: this.selfJid, myLidBase: this.myLidBase }, "WhatsApp connected");
@@ -782,9 +844,10 @@ export class WhatsAppConnector implements Connector {
   }
 
   async stop(): Promise<void> {
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.reconnecting = false;
     if (this.presenceRefreshTimer) { clearInterval(this.presenceRefreshTimer); this.presenceRefreshTimer = null; }
-    this.sock?.end(undefined);
-    this.sock = null;
+    this.teardownSocket();
     log.info("WhatsApp disconnected");
   }
 
