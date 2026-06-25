@@ -66,7 +66,8 @@ function parseClaudeMcpList(out: string): McpServerStatus[] {
   return out.split("\n")
     .map(l => l.replace(/\x1b\[[0-9;]*m/g, "").trim())
     .map((l): McpServerStatus | null => {
-      const m = l.match(/^(.+?)\s+-\s+([✓✗!])\s+(.*)$/);
+      // CLI uses U+2713/U+2714 for OK, U+2717/U+2718 for fail, "!" for auth.
+      const m = l.match(/^(.+?)\s+-\s+([✓✔✗✘!])\s+(.*)$/);
       if (!m) return null;
       const [, head, icon, statusText] = m as [string, string, string, string];
       // Names may contain colons; split on FIRST ": ".
@@ -76,9 +77,9 @@ function parseClaudeMcpList(out: string): McpServerStatus[] {
       const target = head.slice(idx + 2).trim();
       if (!name) return null;
       const status: McpStatus =
-        icon === "✓" ? "connected" :
+        (icon === "✓" || icon === "✔") ? "connected" :
         icon === "!" ? "auth" :
-        icon === "✗" ? "failed" : "unknown";
+        (icon === "✗" || icon === "✘") ? "failed" : "unknown";
       return { name, target, status, statusText: statusText.trim() };
     })
     .filter((x): x is McpServerStatus => x !== null);
