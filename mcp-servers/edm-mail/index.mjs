@@ -21,6 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { simpleParser } from "mailparser";
 import { z } from "zod";
 
@@ -32,6 +33,7 @@ const SMTP_HOST = process.env.EDM_SMTP_HOST || "ex.mail.ovh.net";
 const SMTP_PORT = Number(process.env.EDM_SMTP_PORT || 587);
 const FROM_NAME = process.env.EDM_FROM_NAME || "";
 const TRASH = "Deleted Items";
+const SENT_FOLDER = process.env.EDM_SENT_FOLDER || "Sent Items";
 
 if (!USER || !PASS) {
   console.error("[edm-mail] missing EDM_USER / EDM_PASS in environment");
@@ -308,12 +310,21 @@ server.tool(
     cc: z.string().optional(),
     bcc: z.string().optional(),
     html: z.string().optional(),
+    attachments: z.array(z.object({
+      path: z.string().describe("Local file path to attach"),
+      filename: z.string().optional().describe("Override the attached file name"),
+    })).optional().describe("File attachments, each by local path"),
     confirm: z.boolean().default(false).describe("Must be true to actually send. Leave false to preview."),
   },
-  async ({ to, subject, text, cc, bcc, html, confirm }) => {
+  async ({ to, subject, text, cc, bcc, html, attachments, confirm }) => {
     const from = FROM_NAME ? `${FROM_NAME} <${USER}>` : USER;
+    const atts = (attachments || []).map((a) => ({
+      path: a.path,
+      filename: a.filename || a.path.split("/").pop(),
+    }));
     if (!confirm) {
-      const preview = { dryRun: true, from, to, cc: cc || null, bcc: bcc || null, subject, body: text };
+      const preview = { dryRun: true, from, to, cc: cc || null, bcc: bcc || null, subject, body: text,
+        attachments: atts.map((a) => a.filename) };
       return { content: [{ type: "text", text:
         "DRY RUN — nothing sent. Confirm with the user, then call mail_send again with confirm:true.\n\n" +
         JSON.stringify(preview, null, 2) }] };
@@ -322,8 +333,19 @@ server.tool(
       host: SMTP_HOST, port: SMTP_PORT, secure: false, requireTLS: true,
       auth: { user: USER, pass: PASS },
     });
-    const info = await transport.sendMail({ from, to, cc, bcc, subject, text, html });
-    return { content: [{ type: "text", text: JSON.stringify({ sent: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected }, null, 2) }] };
+    const mailOpts = { from, to, cc, bcc, subject, text, html,
+      attachments: atts.length ? atts : undefined };
+    const info = await transport.sendMail(mailOpts);
+    // SMTP delivers but does NOT file a copy in Sent — IMAP-APPEND a copy so it shows up in "Sent Items".
+    let savedToSent = false;
+    try {
+      const raw = await new MailComposer({ ...mailOpts, messageId: info.messageId }).compile().build();
+      await withImap(async (c) => { await c.append(SENT_FOLDER, raw, ["\\Seen"]); });
+      savedToSent = true;
+    } catch (e) {
+      console.error("[edm-mail] append to Sent failed:", e?.message || e);
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ sent: true, savedToSent, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected }, null, 2) }] };
   },
 );
 
