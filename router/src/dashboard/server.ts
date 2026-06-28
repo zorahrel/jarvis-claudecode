@@ -124,6 +124,7 @@ export function startDashboard(port: number): void {
   const bindHost = process.env.DASHBOARD_BIND || "127.0.0.1";
 
   const httpServer = createHttpServer(handler);
+  httpServer.on("error", (err: any) => log.error({ err: err?.message }, "Dashboard HTTP server error"));
   attachWebSocket(httpServer);
   httpServer.listen(port, bindHost, () => {
     log.info("Dashboard HTTP on http://%s:%d", bindHost, port);
@@ -139,6 +140,7 @@ export function startDashboard(port: number): void {
         handler,
       );
       attachWebSocket(httpsServer as unknown as import("http").Server);
+      httpsServer.on("error", (err: any) => log.error({ err: err?.message }, "Dashboard HTTPS server error"));
       httpsServer.listen(port + 1, bindHost, () => {
         log.info("Dashboard HTTPS on https://%s:%d", bindHost, port + 1);
       });

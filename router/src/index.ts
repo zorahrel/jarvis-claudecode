@@ -21,6 +21,35 @@ import { startMcpTokenRefresher } from "./services/mcp-token-refresher";
 
 const log = logger.child({ module: "main" });
 
+// ── Last-resort process guards ───────────────────────────────────────────────
+// A late Baileys/ws transport timeout (e.g. "Opening handshake has timed out")
+// can emit 'error' on the RAW socket AFTER the connection was torn down, when no
+// listener survives in the chain → Node escalates it to a fatal uncaughtException
+// and the WHOLE multi-channel router dies (33 such crashes in router.err.log).
+// The WhatsApp connector already drives a backed-off reconnect from
+// connection.update, so we absorb ONLY these specific, known-recoverable
+// transport messages — letting WhatsApp self-heal without restarting
+// Telegram/Discord/cron. Every OTHER uncaught error is logged fatal and exits
+// (launchd KeepAlive restarts cleanly); we deliberately do NOT match on a
+// ws/baileys stack frame, which would mask unrelated bugs in the hot path.
+process.on("uncaughtException", (err: any) => {
+  const msg = String(err?.message ?? err);
+  const isRecoverableWsTimeout =
+    /Opening handshake has timed out/.test(msg) ||
+    /WebSocket was closed before the connection was established/.test(msg);
+  if (isRecoverableWsTimeout) {
+    log.warn({ err: msg }, "Absorbed Baileys/ws handshake timeout — WhatsApp self-recovers via reconnect");
+    return;
+  }
+  log.fatal({ err }, "Uncaught exception — exiting");
+  try { releasePid(); } catch {}
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason: any) => {
+  log.error({ err: (reason as any)?.message ?? reason }, "Unhandled promise rejection (logged, not fatal)");
+});
+
 const connectors: Connector[] = [];
 
 /**

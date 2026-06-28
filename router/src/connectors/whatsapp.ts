@@ -291,6 +291,16 @@ export class WhatsAppConnector implements Connector {
       },
     });
 
+    // Belt-and-suspenders: surface transport-level ws errors at the connector
+    // altitude. Baileys already attaches its own mapWebSocketError(end) to
+    // sock.ws (which drives connection.update → scheduleReconnect), so this only
+    // adds a labelled log — the real crash guard is the scoped uncaughtException
+    // handler in index.ts, because the fatal throw is on the RAW ws below this
+    // wrapper, after teardown severs the listener chain.
+    this.sock.ws.on("error", (err: any) => {
+      log.warn({ err: err?.message }, "WhatsApp ws transport error (handled)");
+    });
+
     this.sock.ev.on("creds.update", saveCreds);
 
     // If the dashboard requested pairing-code mode AND this is a fresh auth,
@@ -347,11 +357,18 @@ export class WhatsAppConnector implements Connector {
         // Keep mobile push notifications flowing: announce ourselves as
         // unavailable globally and refresh periodically. Without this, WA
         // server thinks a linked device is active and suppresses pushes.
+        // On a CONTINUOUSLY-connected companion (post reconnect-storm fix) the
+        // device drifts back to "active" between refreshes, so a long interval
+        // leaves windows where inbound messages never reach the phone. Keep the
+        // refresh tight (45s) and also re-assert per inbound batch below.
         this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
         if (this.presenceRefreshTimer) clearInterval(this.presenceRefreshTimer);
         this.presenceRefreshTimer = setInterval(() => {
-          this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
-        }, 5 * 60 * 1000);
+          // `this.sock?.x().catch()` throws synchronously if sock nulls between
+          // ticks (teardown race): undefined.catch → TypeError. Guard it so a
+          // presence refresh can never take down the process.
+          try { this.sock?.sendPresenceUpdate("unavailable").catch(() => {}); } catch {}
+        }, 45 * 1000);
         // Fetch group names for all configured group routes
         this.cacheGroupNames();
       }
@@ -368,6 +385,10 @@ export class WhatsAppConnector implements Connector {
       }
 
       if (type !== "notify" && type !== "append") return;
+      // A delivered message can flip this companion to "active" in WA's eyes and
+      // suppress the primary phone's push notification. Re-assert "unavailable"
+      // immediately on each inbound batch so the phone keeps notifying.
+      this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
       for (const waMsg of messages) {
         try {
           await this.processMessage(waMsg);
@@ -819,9 +840,10 @@ export class WhatsAppConnector implements Connector {
         }
       },
       startTyping: () => {
-        this.sock?.sendPresenceUpdate("composing", replyJid).catch(() => {});
+        try { this.sock?.sendPresenceUpdate("composing", replyJid).catch(() => {}); } catch {}
         const iv = setInterval(() => {
-          this.sock?.sendPresenceUpdate("composing", replyJid).catch(() => {});
+          // Guard the sock-null teardown race (undefined.catch → TypeError).
+          try { this.sock?.sendPresenceUpdate("composing", replyJid).catch(() => {}); } catch {}
         }, 2500);
         return () => {
           clearInterval(iv);

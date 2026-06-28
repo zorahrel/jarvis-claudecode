@@ -98,8 +98,11 @@ function cleanupDedupe(): void {
   }
 }
 
-// Periodic cleanup every 5 min
-setInterval(cleanupDedupe, 5 * 60 * 1000);
+// Periodic cleanup every 5 min. Guard the callback: an unguarded throw in a
+// global setInterval would escalate to a process-fatal uncaughtException.
+setInterval(() => {
+  try { cleanupDedupe(); } catch (err) { log.error({ err }, "cleanupDedupe failed"); }
+}, 5 * 60 * 1000);
 
 /** Process an incoming message: dedupe → rate limit → route → claude → reply */
 export async function handleMessage(msg: IncomingMessage): Promise<void> {
