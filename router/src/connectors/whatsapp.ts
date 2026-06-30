@@ -354,14 +354,14 @@ export class WhatsAppConnector implements Connector {
         this.myLidBase = (this.sock?.user as any)?.lid?.split(":")[0]?.split("@")[0] || "";
         log.info({ selfJid: this.selfJid, myLidBase: this.myLidBase }, "WhatsApp connected");
         this.setStatus({ status: "connected", jid: this.selfJid, qr: undefined, pairingCode: undefined, error: undefined });
-        // Keep mobile push notifications flowing: announce ourselves as
-        // unavailable globally and refresh periodically. Without this, WA
-        // server thinks a linked device is active and suppresses pushes.
-        // On a CONTINUOUSLY-connected companion (post reconnect-storm fix) the
-        // device drifts back to "active" between refreshes, so a long interval
-        // leaves windows where inbound messages never reach the phone. Keep the
-        // refresh tight (45s) and also re-assert per inbound batch below.
-        this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
+        // Keep mobile push notifications flowing on the primary phone: a linked
+        // device WA considers "online" suppresses pushes across ALL chats.
+        // markOnlineOnConnect:false + presence "unavailable" is the documented
+        // fix — BUT Baileys SILENTLY drops sendPresenceUpdate ("no name present,
+        // ignoring") when creds.me.name hasn't synced yet, which is exactly the
+        // state at 'open'. Firing it blind here (as before) often no-ops, leaving
+        // the device stuck "online". Gate on me.name + retry until it lands.
+        this.announceUnavailable();
         if (this.presenceRefreshTimer) clearInterval(this.presenceRefreshTimer);
         this.presenceRefreshTimer = setInterval(() => {
           // `this.sock?.x().catch()` throws synchronously if sock nulls between
@@ -863,6 +863,27 @@ export class WhatsAppConnector implements Connector {
     };
 
     void handleMessage(msg).catch((err) => log.error({ err }, "handleMessage threw"));
+  }
+
+  /**
+   * Mark this linked device "unavailable" so WhatsApp keeps delivering push
+   * notifications to the primary phone. Baileys drops the presence stanza with
+   * "no name present, ignoring" when `creds.me.name` hasn't synced yet — common
+   * right after 'open' — leaving the device stuck "online" and pushes suppressed.
+   * Gate the call on the name being populated and retry (1s × up to 20) until it
+   * succeeds, instead of firing once and silently failing.
+   */
+  private announceUnavailable(attempt = 0): void {
+    const name = (this.sock as any)?.authState?.creds?.me?.name ?? (this.sock as any)?.user?.name;
+    if (!name) {
+      if (this.sock && attempt < 20) setTimeout(() => this.announceUnavailable(attempt + 1), 1000);
+      else if (attempt >= 20) log.warn("presence 'unavailable' NOT sent: creds.me.name never synced");
+      return;
+    }
+    try {
+      this.sock?.sendPresenceUpdate("unavailable").catch(() => {});
+      log.info({ waitedMs: attempt * 1000 }, "announced presence 'unavailable' — phone pushes should resume");
+    } catch {}
   }
 
   async stop(): Promise<void> {
