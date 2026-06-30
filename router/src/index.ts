@@ -10,6 +10,7 @@ import { WhatsAppConnector, TelegramConnector, DiscordConnector } from "./connec
 import type { Connector } from "./connectors";
 import { initCrons, stopCrons, setDeliveryFn } from "./services/cron";
 import { acquirePid, releasePid } from "./services/pid";
+import { isAbsorbableWsError } from "./services/crash-guard";
 import { logger } from "./services/logger";
 import { activeCount, activeJobs, loadPersistedJobs, clearPersistedJobs, type PendingJob } from "./services/pending-jobs";
 import { killAllProcesses, getDiagnostics } from "./services/claude";
@@ -34,10 +35,7 @@ const log = logger.child({ module: "main" });
 // ws/baileys stack frame, which would mask unrelated bugs in the hot path.
 process.on("uncaughtException", (err: any) => {
   const msg = String(err?.message ?? err);
-  const isRecoverableWsTimeout =
-    /Opening handshake has timed out/.test(msg) ||
-    /WebSocket was closed before the connection was established/.test(msg);
-  if (isRecoverableWsTimeout) {
+  if (isAbsorbableWsError(msg)) {
     log.warn({ err: msg }, "Absorbed Baileys/ws handshake timeout — WhatsApp self-recovers via reconnect");
     return;
   }
