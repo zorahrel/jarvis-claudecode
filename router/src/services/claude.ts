@@ -964,7 +964,15 @@ function spawnSession(
           if (inputTokens > s.totalInputTokens) s.totalInputTokens = inputTokens;
 
           const text = e.result ?? s.currentText;
-          if (!text || text === "waiting for message") continue;
+          // Keep-warm idle pings resolve to this sentinel — ignore them. But do
+          // NOT skip on empty text: a turn that ends after tool calls with no
+          // final text block (orchestrator delegating then stopping), or a slash
+          // command like /compact that returns nothing, must STILL resolve.
+          // Otherwise askClaude hangs until MESSAGE_TIMEOUT_MS (30 min) — the
+          // channel shows the start but never a final result — and compaction
+          // hangs into COMPACT_TIMEOUT → respawn-without-summary, leaving the
+          // stale pendingResolve to reject the fallback with TURN_IN_FLIGHT.
+          if (text === "waiting for message") continue;
           s.consecutiveTimeouts = 0;
           const resolve = s.pendingResolve;
           const files = [...s.pendingFiles];
