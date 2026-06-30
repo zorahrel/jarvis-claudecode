@@ -695,6 +695,31 @@ function parseSessionKey(key: string): { channel: string; target: string; agent?
   return { channel, target, agent };
 }
 
+// --- Proactive turn delivery ---
+// When the agent produces a turn with NO caller awaiting it — it woke up on its
+// own, typically because a background sub-agent/task completed and injected a
+// <task-notification> and the agent synthesised a follow-up — push that text to
+// the originating channel. Without this the user gets the "I'll get back to you"
+// reply but never the actual result. Best-effort, budget-capped.
+function deliverProactiveTurn(s: SdkSession, text: string): void {
+  if (!s.alive || s.isSubagent) return;
+  const parsed = parseSessionKey(s.sessionKey);
+  if (!parsed) return;
+  const deliver = getDeliveryFn();
+  if (!deliver) { log.warn({ sessionKey: s.sessionKey }, "Proactive turn ready but no delivery fn"); return; }
+  if (!hasNotifyBudget(s.sessionKey, 100)) {
+    log.warn({ sessionKey: s.sessionKey }, "Proactive turn dropped — session notify budget exhausted");
+    return;
+  }
+  const formatted = formatForChannel(text, parsed.channel);
+  deliver(parsed.channel, parsed.target, formatted)
+    .then(() => {
+      consumeNotifyBudget(s.sessionKey);
+      log.info({ sessionKey: s.sessionKey, textLen: text.length }, "Proactive agent turn delivered to channel");
+    })
+    .catch((err: any) => log.error({ err: err?.message, sessionKey: s.sessionKey }, "Proactive turn delivery failed"));
+}
+
 // --- Task-notification handler (same body as CLI adapter) ---
 function handleTaskNotification(s: SdkSession, env: TaskNotificationEnvelope): void {
   if (!s.alive) return;
@@ -992,6 +1017,17 @@ function spawnSession(
             cacheRead: cacheRead || undefined,
             costUsd: e.total_cost_usd,
           });
+        } else if (e.type === "result" && !s.isSubagent) {
+          // Proactive turn: no caller is awaiting (the agent woke up on its own
+          // — e.g. a background sub-agent/task completed, injected a
+          // <task-notification>, and the agent produced a follow-up). Deliver it
+          // to the originating channel; otherwise the user gets "I'll get back to
+          // you" but never the result. Budget-capped, best-effort.
+          const proactiveText = e.result ?? s.currentText;
+          s.currentText = "";
+          if (proactiveText && proactiveText.trim().length > 0 && !isKeepWarmSentinel(proactiveText)) {
+            deliverProactiveTurn(s, proactiveText);
+          }
         }
       }
     } catch (err: any) {
