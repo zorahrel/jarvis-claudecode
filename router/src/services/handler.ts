@@ -13,6 +13,7 @@ import { existsSync, statSync } from "fs";
 import { basename, extname } from "path";
 import { chunkForDiscord } from "./discord-chunker";
 import { formatForChannel } from "./formatting";
+import { hasDeliverableText, EMPTY_TURN_FALLBACK } from "./turn-delivery";
 import { recordExchange } from "./session-cache";
 import { formatTimingFooter } from "./timings";
 import { recordCost } from "./cost-tracker";
@@ -383,10 +384,9 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
     // after tool calls without a synthesis), deliver an honest fallback instead
     // of a footer-only / empty message — the channel must never show only the
     // start with no result. Explicit silence still uses the [[no_reply]] path.
-    const hasBody = typeof response.text === "string" && response.text.trim().length > 0;
-    const formatted = hasBody
+    const formatted = hasDeliverableText(response.text)
       ? formatForChannel(response.text, msg.channel)
-      : "✓ fatto — l'agente ha completato il turno senza un messaggio finale.";
+      : EMPTY_TURN_FALLBACK;
     const model = response.model ?? "—";
     const footer = formatTimingFooter(timings, agentName, model, response.inputTokens, response.outputTokens);
     const finalResponse = `${formatted}\n\n${footer}`;

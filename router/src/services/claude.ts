@@ -31,6 +31,7 @@ import { getSkipSet as getMcpSkipSet, refreshMcpStatus } from "./mcp-status";
 import { buildMessagingMcps } from "../mcp";
 import { MEDIA_DIR } from "./media";
 import { issueToken, revokeToken } from "./notify-tokens";
+import { isKeepWarmSentinel } from "./turn-delivery";
 import { resetNotifyBudget, hasNotifyBudget, consumeNotifyBudget } from "./rate-limiter";
 import { shouldCompact } from "./context";
 import { broadcast, clientCount } from "../dashboard/ws";
@@ -972,7 +973,7 @@ function spawnSession(
           // channel shows the start but never a final result — and compaction
           // hangs into COMPACT_TIMEOUT → respawn-without-summary, leaving the
           // stale pendingResolve to reject the fallback with TURN_IN_FLIGHT.
-          if (text === "waiting for message") continue;
+          if (isKeepWarmSentinel(text)) continue;
           s.consecutiveTimeouts = 0;
           const resolve = s.pendingResolve;
           const files = [...s.pendingFiles];
