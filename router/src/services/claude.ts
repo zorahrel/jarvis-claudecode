@@ -31,7 +31,7 @@ import { getSkipSet as getMcpSkipSet, refreshMcpStatus } from "./mcp-status";
 import { buildMessagingMcps } from "../mcp";
 import { MEDIA_DIR } from "./media";
 import { issueToken, revokeToken } from "./notify-tokens";
-import { isKeepWarmSentinel } from "./turn-delivery";
+import { isKeepWarmSentinel, isReactionToRecentNotice } from "./turn-delivery";
 import { resetNotifyBudget, hasNotifyBudget, consumeNotifyBudget } from "./rate-limiter";
 import { shouldCompact } from "./context";
 import { broadcast, clientCount } from "../dashboard/ws";
@@ -349,6 +349,10 @@ interface SdkSession {
   lastSummary?: string;
   notifiedTaskIds?: Set<string>;
   bgToolUseStarts?: Map<string, { startedAt: number; kind: string }>;
+  /** When a tracked-task completion notice was last delivered to the channel.
+   *  The agent's immediately-following reaction to that <task-notification> is
+   *  then redundant, so the proactive-delivery branch skips it (dedup window). */
+  lastTaskNoticeAt?: number;
   pid: number | null;
 }
 
@@ -772,6 +776,10 @@ function handleTaskNotification(s: SdkSession, env: TaskNotificationEnvelope): v
   const text = `${body}\n\n${footer}`;
   const formatted = formatForChannel(text, parsed.channel);
 
+  // Mark synchronously so the agent's imminent reaction to this <task-notification>
+  // (a proactive turn) is recognised as redundant and skipped — one delivery per
+  // completion, not the structured notice AND the agent's echo of it.
+  s.lastTaskNoticeAt = Date.now();
   deliver(parsed.channel, parsed.target, formatted)
     .then(() => {
       consumeNotifyBudget(s.sessionKey);
@@ -1025,7 +1033,13 @@ function spawnSession(
           // you" but never the result. Budget-capped, best-effort.
           const proactiveText = e.result ?? s.currentText;
           s.currentText = "";
-          if (proactiveText && proactiveText.trim().length > 0 && !isKeepWarmSentinel(proactiveText)) {
+          // Dedup vs handleTaskNotification: if a tracked-task completion notice
+          // was just delivered, this turn is the agent's redundant reaction to
+          // it — skip (the notice already informed the channel). Untracked
+          // sub-agents send no notice, so their relay still passes through here.
+          const noticeJustSent = isReactionToRecentNotice(s.lastTaskNoticeAt, Date.now());
+          s.lastTaskNoticeAt = undefined; // single-use: only the immediate reaction is suppressed
+          if (!noticeJustSent && proactiveText && proactiveText.trim().length > 0 && !isKeepWarmSentinel(proactiveText)) {
             deliverProactiveTurn(s, proactiveText);
           }
         }

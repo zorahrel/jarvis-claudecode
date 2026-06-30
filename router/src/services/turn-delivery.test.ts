@@ -13,6 +13,8 @@ import {
   hasDeliverableText,
   EMPTY_TURN_FALLBACK,
   KEEPWARM_SENTINEL,
+  isReactionToRecentNotice,
+  PROACTIVE_DEDUP_WINDOW_MS,
 } from "./turn-delivery.js";
 
 test("isKeepWarmSentinel: ONLY the keep-warm sentinel is skipped", () => {
@@ -47,4 +49,22 @@ test("the channel always gets a non-empty final body (no silent turn)", () => {
   const body = hasDeliverableText("") ? "<formatted>" : EMPTY_TURN_FALLBACK;
   assert.ok(body.trim().length > 0, "empty turn must still deliver a non-empty body");
   assert.equal(body, EMPTY_TURN_FALLBACK);
+});
+
+test("isReactionToRecentNotice: untracked sub-agent (no notice) → NOT suppressed (relay passes)", () => {
+  // The repro case: delegated sub-agents send no task notice, so their relay
+  // must still be delivered.
+  assert.equal(isReactionToRecentNotice(undefined, 1_000_000), false);
+});
+
+test("isReactionToRecentNotice: a notice just sent → reaction suppressed (no double)", () => {
+  const now = 1_000_000;
+  assert.equal(isReactionToRecentNotice(now - 1_000, now), true);
+});
+
+test("isReactionToRecentNotice: notice outside the window → reaction delivered", () => {
+  const now = 1_000_000;
+  assert.equal(isReactionToRecentNotice(now - (PROACTIVE_DEDUP_WINDOW_MS + 1_000), now), false);
+  // boundary: exactly the window is NOT suppressed (strictly-less-than)
+  assert.equal(isReactionToRecentNotice(now - PROACTIVE_DEDUP_WINDOW_MS, now), false);
 });

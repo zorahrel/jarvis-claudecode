@@ -29,3 +29,17 @@ export const EMPTY_TURN_FALLBACK =
 export function hasDeliverableText(rawText: string | null | undefined): boolean {
   return typeof rawText === "string" && rawText.trim().length > 0;
 }
+
+/** Dedup guard: a proactive turn is redundant when a tracked-task completion
+ *  notice was just delivered to the channel — the turn is the agent's reaction
+ *  to that same <task-notification>, so the notice already informed the user.
+ *  Untracked sub-agents send no notice (lastTaskNoticeAt stays undefined), so
+ *  their relay is NOT suppressed. */
+export const PROACTIVE_DEDUP_WINDOW_MS = 30_000;
+export function isReactionToRecentNotice(
+  lastTaskNoticeAt: number | undefined,
+  now: number,
+  windowMs: number = PROACTIVE_DEDUP_WINDOW_MS,
+): boolean {
+  return lastTaskNoticeAt !== undefined && now - lastTaskNoticeAt < windowMs;
+}
