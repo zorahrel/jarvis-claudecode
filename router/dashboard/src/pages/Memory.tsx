@@ -26,6 +26,7 @@ interface MemMemory {
   user_id?: string
   memory?: string
   created_at?: string
+  event_type?: string
 }
 
 interface MemSearchDoc {
@@ -95,6 +96,16 @@ const kbdStyle: React.CSSProperties = {
   lineHeight: 1.2,
   minWidth: 14,
   textAlign: 'center' as const,
+}
+
+// OMEGA episodic memory event types (badge colors in the Memories browser)
+const EVENT_TYPE_COLORS: Record<string, string> = {
+  decision: '#8b5cf6',
+  task_completion: '#10b981',
+  lesson_learned: '#f59e0b',
+  user_preference: '#ec4899',
+  error_pattern: '#ef4444',
+  project: '#06b6d4',
 }
 
 const GRAPH_COLORS: Record<string, string> = {
@@ -226,6 +237,7 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   const [related, setRelated] = useState<MemSearchDoc[]>([])
 
   const [memsUserFilter, setMemsUserFilter] = useState('')
+  const [memsTypeFilter, setMemsTypeFilter] = useState('')
   const [memsSort, setMemsSort] = useState('date-desc')
 
   const [searching, setSearching] = useState(false)
@@ -312,14 +324,21 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
     return Array.from(set).sort()
   }, [memories])
 
+  const memsTypes = useMemo(() => {
+    const set = new Set<string>()
+    memories.forEach((m) => { if (m.event_type) set.add(m.event_type) })
+    return Array.from(set).sort()
+  }, [memories])
+
   const filteredMems = useMemo(() => {
     let out = [...memories]
     if (memsUserFilter) out = out.filter((m) => m.user_id === memsUserFilter)
+    if (memsTypeFilter) out = out.filter((m) => (m.event_type || '') === memsTypeFilter)
     if (memsSort === 'date-desc') out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
     else if (memsSort === 'date-asc') out.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
     else if (memsSort === 'user') out.sort((a, b) => (a.user_id || '').localeCompare(b.user_id || ''))
     return out
-  }, [memories, memsUserFilter, memsSort])
+  }, [memories, memsUserFilter, memsTypeFilter, memsSort])
 
   const sortedGridFiles = useMemo(() => {
     // When a search is active, restrict the grid to docs that matched the query.
@@ -1195,6 +1214,9 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
                 memsUsers={memsUsers}
                 memsUserFilter={memsUserFilter}
                 setMemsUserFilter={setMemsUserFilter}
+                memsTypes={memsTypes}
+                memsTypeFilter={memsTypeFilter}
+                setMemsTypeFilter={setMemsTypeFilter}
                 memsSort={memsSort}
                 setMemsSort={setMemsSort}
                 deleteMem={deleteMem}
@@ -1419,13 +1441,16 @@ interface SidebarProps extends FilePaneProps {
   memsUsers: string[]
   memsUserFilter: string
   setMemsUserFilter: (v: string) => void
+  memsTypes: string[]
+  memsTypeFilter: string
+  setMemsTypeFilter: (v: string) => void
   memsSort: string
   setMemsSort: (v: string) => void
   deleteMem: (id: string) => void
 }
 
 function Sidebar(props: SidebarProps) {
-  const { filesByCategory, selectedFile, onSelectFile, hasSearchResults, searchResults, searching, memQuery, openDocFromSearch, browseView, setBrowseView, filteredMems, memsUsers, memsUserFilter, setMemsUserFilter, memsSort, setMemsSort, deleteMem, files } = props
+  const { filesByCategory, selectedFile, onSelectFile, hasSearchResults, searchResults, searching, memQuery, openDocFromSearch, browseView, setBrowseView, filteredMems, memsUsers, memsUserFilter, setMemsUserFilter, memsTypes, memsTypeFilter, setMemsTypeFilter, memsSort, setMemsSort, deleteMem, files } = props
   return (
     <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border)', display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-1)', position: 'relative', zIndex: 10 }}>
       <div style={{ display: 'flex', gap: 2, padding: '8px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
@@ -1433,7 +1458,7 @@ function Sidebar(props: SidebarProps) {
           Docs ({files.length})
         </button>
         <button onClick={() => setBrowseView('facts')} style={{ flex: 1, padding: '4px 8px', fontSize: 11, background: browseView === 'facts' ? 'rgba(94,106,210,0.15)' : 'transparent', color: browseView === 'facts' ? 'var(--text-1)' : 'var(--text-4)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }}>
-          Facts ({filteredMems.length})
+          Memories ({filteredMems.length})
         </button>
       </div>
 
@@ -1449,7 +1474,7 @@ function Sidebar(props: SidebarProps) {
       {!searching && hasSearchResults && (
         <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', maxHeight: 220, overflowY: 'auto', flexShrink: 0 }}>
           <div style={{ fontSize: 10, color: 'var(--text-4)', marginBottom: 4 }}>
-            {(searchResults.docs?.length || 0)} docs + {(searchResults.memories?.length || 0)} facts
+            {(searchResults.docs?.length || 0)} docs + {(searchResults.memories?.length || 0)} memories
           </div>
           {(searchResults.docs || []).slice(0, 5).map((d, idx) => (
             <div key={d.metadata?.path || d.metadata?.file || idx} onClick={() => openDocFromSearch(d.metadata?.path || d.metadata?.file)} style={{ padding: '4px 6px', marginBottom: 2, background: 'var(--bg-2)', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}>
@@ -1487,10 +1512,14 @@ function Sidebar(props: SidebarProps) {
 
       {browseView === 'facts' && !hasSearchResults && (
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px' }}>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <select value={memsUserFilter} onChange={(e) => setMemsUserFilter(e.target.value)} style={{ fontSize: 10, padding: '2px 4px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-2)' }}>
               <option value="">All agents</option>
               {memsUsers.map((u) => <option key={u} value={u}>{u}</option>)}
+            </select>
+            <select value={memsTypeFilter} onChange={(e) => setMemsTypeFilter(e.target.value)} style={{ fontSize: 10, padding: '2px 4px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-2)' }}>
+              <option value="">All types</option>
+              {memsTypes.map((t) => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
             </select>
             <select value={memsSort} onChange={(e) => setMemsSort(e.target.value)} style={{ fontSize: 10, padding: '2px 4px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-2)' }}>
               <option value="date-desc">Newest</option>
@@ -1501,13 +1530,21 @@ function Sidebar(props: SidebarProps) {
           {filteredMems.map((m) => (
             <div key={m.id} style={{ padding: '6px 8px', marginBottom: 4, background: 'var(--bg-2)', borderRadius: 4, border: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
-                <span style={{ fontSize: 10, color: 'var(--accent)' }}>{m.user_id || 'unknown'}</span>
+                {m.event_type && (
+                  <span style={{ fontSize: 9, fontWeight: 600, padding: '0 5px', borderRadius: 3, lineHeight: '14px', color: EVENT_TYPE_COLORS[m.event_type] || 'var(--text-3)', background: `${EVENT_TYPE_COLORS[m.event_type] || '#94a3b8'}22`, whiteSpace: 'nowrap' }}>
+                    {m.event_type.replace(/_/g, ' ')}
+                  </span>
+                )}
+                {m.user_id && <span style={{ fontSize: 10, color: 'var(--accent)' }}>{m.user_id}</span>}
                 <span style={{ fontSize: 9, color: 'var(--text-4)' }}>{formatMemDate(m.created_at)}</span>
                 <button onClick={() => deleteMem(m.id)} aria-label="Delete memory" style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-4)', cursor: 'pointer', display: 'inline-flex', padding: 2 }}><X size={12} /></button>
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.4 }}>{short(m.memory || '', 150)}</div>
             </div>
           ))}
+          {filteredMems.length === 0 && (
+            <div style={{ padding: 12, fontSize: 11, color: 'var(--text-4)', textAlign: 'center' }}>No memories match the filters</div>
+          )}
         </div>
       )}
 

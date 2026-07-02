@@ -55,6 +55,7 @@ def _m_to_dict(m) -> dict:
         "user_id": scope,
         "score": getattr(m, "score", None),
         "created_at": str(getattr(m, "created_at", "")) or None,
+        "event_type": getattr(m, "event_type", None) or (md.get("event_type") if isinstance(md, dict) else None),
     }
 
 
