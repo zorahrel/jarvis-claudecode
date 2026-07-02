@@ -1,0 +1,1 @@
+{"name":"selftest-echo","description":"Echo test distillate","inputSchema":{"type":"object","properties":{"msg":{"type":"string"}}},"timeoutMs":5000}

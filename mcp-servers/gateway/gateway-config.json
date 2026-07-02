@@ -14,19 +14,6 @@
       }
     },
     {
-      "name": "qlik",
-      "transport": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://edminformatica.eu.qlikcloud.com/api/ai/mcp",
-        "8099",
-        "--static-oauth-client-info",
-        "${QLIK_OAUTH_CLIENT_INFO}"
-      ]
-    },
-    {
       "name": "cf",
       "transport": "stdio",
       "command": "npx",
@@ -34,6 +21,14 @@
         "-y",
         "mcp-remote",
         "https://mcp.cloudflare.com/mcp"
+      ]
+    },
+    {
+      "name": "distilled",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/zorahrel/.claude/jarvis/mcp-servers/distilled/index.mjs"
       ]
     }
   ]

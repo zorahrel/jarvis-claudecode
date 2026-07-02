@@ -1,0 +1,3 @@
+#!/bin/zsh
+input=$(cat)
+echo "echo-ok: $input"
