@@ -69,9 +69,13 @@ function loadConfig() {
   try { return JSON.parse(readFileSync(CONFIG_PATH, "utf8")); }
   catch (e) { log("config parse error:", e.message); return { children: [] }; }
 }
-function saveConfig(children) {
-  const serializable = children.map(({ name, transport, command, args, env, url, headers }) =>
-    ({ name, transport, command, args, env, url, headers }));
+// Persist the CONFIGURED set (source of truth), not just what's mounted — so a
+// child parked with autoMount:false survives restarts instead of being pruned.
+// undefined keys (e.g. autoMount on eager children) are dropped by JSON.stringify.
+function persistConfig() {
+  const serializable = [...state.configured.values()].map(
+    ({ name, transport, command, args, env, url, headers, autoMount }) =>
+      ({ name, transport, command, args, env, url, headers, autoMount }));
   writeFileSync(CONFIG_PATH, JSON.stringify({ children: serializable }, null, 2) + "\n");
 }
 function writeRegistry(state) {
@@ -88,7 +92,8 @@ function writeRegistry(state) {
 
 // ---- runtime state ----
 const state = {
-  children: new Map(),       // name -> { cfg, client, tools:[{name,description,inputSchema}], error }
+  configured: new Map(),     // name -> raw cfg (persisted source of truth, may carry autoMount:false)
+  children: new Map(),       // name -> { cfg, client, tools:[{name,description,inputSchema}], error } — currently MOUNTED
   toolIndex: new Map(),      // prefixedName -> { child, original }
 };
 
@@ -142,6 +147,8 @@ async function mountChild(cfg) {
   }
   const c = await connectChild(cfg);
   state.children.set(cfg.name, c);
+  // Remember it as configured so it persists; mounting never prunes the parked set.
+  if (!state.configured.has(cfg.name)) state.configured.set(cfg.name, cfg);
   rebuildToolIndex();
   return c;
 }
@@ -169,15 +176,16 @@ async function broadcastToolListChanged() {
 const META_TOOLS = [
   {
     name: "gateway_list",
-    description: "List child MCP servers mounted in the gateway and the tools each exposes.",
+    description: "List configured child MCP servers (mounted AND parked) and the tools each exposes. Parked children (mounted:false) can be brought online with gateway_mount({name}).",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "gateway_mount",
     description:
-      "Mount a child MCP server at runtime and expose its tools (namespaced <name>__<tool>). " +
-      "stdio: pass transport='stdio', command, args[], env{}. http/sse: pass transport, url, headers{}. " +
-      "The new tools appear immediately via tools/list_changed — no session restart needed.",
+      "Mount a child MCP server and expose its tools (namespaced <name>__<tool>). " +
+      "To bring a PARKED child online, pass just its {name} — its stored config is reused. " +
+      "To register a NEW child, also pass connection details: stdio → transport='stdio', command, args[], env{}; http/sse → transport, url, headers{}. " +
+      "Tools appear immediately via tools/list_changed — no session restart needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -194,10 +202,10 @@ const META_TOOLS = [
   },
   {
     name: "gateway_unmount",
-    description: "Unmount a child MCP server and remove its tools (emits tools/list_changed).",
+    description: "Stop a child MCP server and remove its tools (emits tools/list_changed). By default the child is PARKED (kept in config, autoMount:false) so it can be remounted by name. Pass forget:true to remove it from config entirely.",
     inputSchema: {
       type: "object",
-      properties: { name: { type: "string" } },
+      properties: { name: { type: "string" }, forget: { type: "boolean", description: "Remove from config instead of parking", default: false } },
       required: ["name"],
     },
   },
@@ -224,24 +232,42 @@ const handleCallTool = async (req) => {
 
   // ---- meta tools ----
   if (name === "gateway_list") {
-    const children = [...state.children.entries()].map(([n, c]) => ({
-      name: n, transport: c.cfg.transport, error: c.error || null,
-      tools: c.tools.map((t) => t.name),
-    }));
+    // Report every configured child, whether mounted or parked, so the caller
+    // knows what it can bring online with gateway_mount({name}).
+    const children = [...state.configured.entries()].map(([n, cfg]) => {
+      const c = state.children.get(n);
+      return {
+        name: n,
+        transport: cfg.transport,
+        mounted: !!c,
+        autoMount: cfg.autoMount !== false,
+        error: c ? (c.error || null) : null,
+        tools: c ? c.tools.map((t) => t.name) : [],
+      };
+    });
     return { content: [{ type: "text", text: JSON.stringify({ children }, null, 2) }] };
   }
 
   if (name === "gateway_mount") {
     try {
-      const cfg = {
-        name: args.name,
-        transport: args.transport || "stdio",
-        command: args.command, args: args.args, env: args.env,
-        url: args.url, headers: args.headers,
-      };
-      if (!cfg.name) throw new Error("name is required");
+      if (!args.name) throw new Error("name is required");
+      // Bare {name} → mount a child already configured (e.g. one parked with
+      // autoMount:false). Full args → register/replace a child, active by default.
+      const hasConn = args.transport || args.command || args.url;
+      let cfg;
+      if (!hasConn && state.configured.has(args.name)) {
+        cfg = { ...state.configured.get(args.name) };
+      } else {
+        cfg = {
+          name: args.name,
+          transport: args.transport || "stdio",
+          command: args.command, args: args.args, env: args.env,
+          url: args.url, headers: args.headers,
+        };
+        state.configured.set(cfg.name, cfg); // new/updated child persists as eager
+      }
       const c = await mountChild(cfg);
-      saveConfig([...state.children.values()].map((x) => x.cfg));
+      persistConfig();
       writeRegistry(state);
       await broadcastToolListChanged();
       return { content: [{ type: "text", text: JSON.stringify({ mounted: cfg.name, tools: c.tools.map((t) => `${cfg.name}${SEP}${t.name}`) }, null, 2) }] };
@@ -253,10 +279,21 @@ const handleCallTool = async (req) => {
   if (name === "gateway_unmount") {
     try {
       const ok = await unmountChild(args.name);
-      saveConfig([...state.children.values()].map((x) => x.cfg));
+      // Default: park it (stays configured, autoMount:false) so it's mountable
+      // again by name. forget:true fully removes it from the configured set.
+      let parked = false;
+      if (state.configured.has(args.name)) {
+        if (args.forget) {
+          state.configured.delete(args.name);
+        } else {
+          state.configured.set(args.name, { ...state.configured.get(args.name), autoMount: false });
+          parked = true;
+        }
+      }
+      persistConfig();
       writeRegistry(state);
       await broadcastToolListChanged();
-      return { content: [{ type: "text", text: JSON.stringify({ unmounted: ok ? args.name : null, found: ok }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ unmounted: ok ? args.name : null, found: ok, parked }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error unmounting: ${e.message}` }], isError: true };
     }
@@ -382,6 +419,12 @@ function startHttpDaemon(port) {
 // ---- boot ----
 const cfg = loadConfig();
 for (const childCfg of cfg.children || []) {
+  // Register every child as configured; only auto-mount those not parked.
+  state.configured.set(childCfg.name, childCfg);
+  if (childCfg.autoMount === false) {
+    log(`parked ${childCfg.name} (${childCfg.transport}) — mount on demand with gateway_mount`);
+    continue;
+  }
   try {
     await mountChild(childCfg);
     log(`mounted ${childCfg.name} (${childCfg.transport}) — ${state.children.get(childCfg.name).tools.length} tools`);

@@ -3,7 +3,8 @@
     {
       "name": "edm",
       "transport": "stdio",
-      "command": "/Users/zorahrel/.claude/jarvis/mcp-servers/edm-mail/start.sh"
+      "command": "/Users/zorahrel/.claude/jarvis/mcp-servers/edm-mail/start.sh",
+      "autoMount": false
     },
     {
       "name": "beeper",
@@ -11,7 +12,8 @@
       "url": "http://127.0.0.1:23373/v0/mcp",
       "headers": {
         "Authorization": "Bearer ${BEEPER_TOKEN}"
-      }
+      },
+      "autoMount": false
     },
     {
       "name": "cf",
@@ -21,7 +23,17 @@
         "-y",
         "mcp-remote",
         "https://mcp.cloudflare.com/mcp"
-      ]
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "omega",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/zorahrel/.claude/jarvis/mcp-servers/omega-search/index.mjs"
+      ],
+      "autoMount": false
     },
     {
       "name": "distilled",
