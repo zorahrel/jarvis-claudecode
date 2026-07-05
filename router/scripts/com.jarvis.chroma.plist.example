@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Example LaunchAgent for ChromaDB HTTP server (document RAG, local).
+  Example LaunchAgent for the docs-index HTTP server (document RAG, local).
 
   Install:
     sed "s|__HOME__|$HOME|g" com.jarvis.chroma.plist.example \
@@ -20,7 +20,7 @@
   <array>
     <string>__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python3</string>
     <string>-u</string>
-    <string>__HOME__/.claude/jarvis/router/scripts/chroma-server.py</string>
+    <string>__HOME__/.claude/jarvis/router/scripts/docs-server.py</string>
   </array>
 
   <key>RunAtLoad</key>
