@@ -8,7 +8,8 @@
 - Reindex incrementale: **0.10 s** (vs 10-30 s full re-embed di Chroma); boot: snapshot servito subito da cache (233 chunk, 0 ri-embeddati al restart).
 - Flip: swap `ProgramArguments` nel plist (label `com.jarvis.chroma` invariata), bootout+bootstrap, `/health /stats /search` verdi, shape JSON conforme a `DocResult` di `memory.ts` (zero modifiche router).
 - Rollback pronto: `~/.claude/backups/memory-consolidation-20260705/com.jarvis.chroma.plist.bak` + `chroma-server.py` e `chroma-data/` intatti.
-- Cleanup rimandato (§6.5): `chromadb` resta nel venv finché non passano giorni di stabilità + ok esplicito.
+- **Cleanup fatto (2026-07-05, ok di Attilio):** `chromadb 1.5.7` disinstallato dal venv (736→680 MB; zero reverse-deps verificate, `omega-memory` richiede solo numpy/onnxruntime/sqlite-vec/tokenizers — tutti restano). `~/.cache/chroma` (166 MB) nel Cestino (modello già copiato in `state/models/`). OMEGA riavviato sul venv snellito: health+search verdi.
+- Rollback ora = `pip install -c constraints.txt chromadb==1.5.7` nel venv + restore plist da `~/.claude/backups/memory-consolidation-20260705/` (`chroma-server.py` e `chroma-data/` mai toccati).
 
 ## 1. Perché
 Manteniamo **due** vector store separati + una dipendenza pesante:

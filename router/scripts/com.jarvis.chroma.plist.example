@@ -7,8 +7,8 @@
       > ~/Library/LaunchAgents/com.jarvis.chroma.plist
     launchctl load ~/Library/LaunchAgents/com.jarvis.chroma.plist
 
-  Uses the same venv as OMEGA (router/scripts/omega-env) — setup.sh installs
-  chromadb there alongside omega-memory.
+  Uses the same venv as OMEGA (router/scripts/omega-env). Deps: numpy,
+  onnxruntime, tokenizers (already pulled in by omega-memory).
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
