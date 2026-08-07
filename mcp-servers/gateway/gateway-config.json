@@ -3,7 +3,7 @@
     {
       "name": "edm",
       "transport": "stdio",
-      "command": "/Users/zorahrel/.claude/jarvis/mcp-servers/edm-mail/start.sh",
+      "command": "${HOME}/.claude/jarvis/mcp-servers/edm-mail/start.sh",
       "autoMount": false
     },
     {
@@ -31,7 +31,7 @@
       "transport": "stdio",
       "command": "node",
       "args": [
-        "/Users/zorahrel/.claude/jarvis/mcp-servers/omega-search/index.mjs"
+        "${HOME}/.claude/jarvis/mcp-servers/omega-search/index.mjs"
       ],
       "autoMount": false
     },
@@ -40,8 +40,123 @@
       "transport": "stdio",
       "command": "node",
       "args": [
-        "/Users/zorahrel/.claude/jarvis/mcp-servers/distilled/index.mjs"
+        "${HOME}/.claude/jarvis/mcp-servers/distilled/index.mjs"
       ]
+    },
+    {
+      "name": "chrome-devtools",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--headless",
+        "--isolated",
+        "--viewport",
+        "1728x1000"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "flights",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "flights[mcp]",
+        "fli-mcp"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "airbnb",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@openbnb/mcp-server-airbnb",
+        "--ignore-robots-txt"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "qlik",
+      "transport": "stdio",
+      "command": "bash",
+      "args": [
+        "/private/tmp/claude-501/-Users-zorahrel-Projects-guidoai/61abb9ce-76cf-4591-a65b-ce877b9394ae/scratchpad/qlik-launch.sh"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "kiwi",
+      "transport": "http",
+      "url": "https://mcp.kiwi.com/",
+      "autoMount": false
+    },
+    {
+      "name": "board",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "${HOME}/Projects/spec-flow/mcp-board/index.js"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "higgsfield",
+      "transport": "http",
+      "url": "https://mcp.higgsfield.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${HIGGSFIELD_TOKEN}",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+      },
+      "autoMount": false
+    },
+    {
+      "name": "wigolo",
+      "transport": "stdio",
+      "command": "/opt/homebrew/bin/wigolo",
+      "args": []
+    },
+    {
+      "name": "topics-board",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "${HOME}/jarvis/mcp-servers/topics-board/server.mjs"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "skills-attic",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "${HOME}/jarvis/mcp-servers/skills-attic/index.mjs"
+      ],
+      "env": {
+        "SKILLS_ATTIC_ROOTS": "${HOME}/Projects/topics-app/.claude/skills:${HOME}/Projects/topics-app/.claude/commands"
+      }
+    },
+    {
+      "name": "rivet",
+      "transport": "stdio",
+      "command": "/opt/homebrew/Cellar/node/25.9.0_3/bin/node",
+      "args": [
+        "/opt/homebrew/lib/node_modules/rivet-design/bin/rivet.js",
+        "mcp",
+        "serve",
+        "--caller-agent",
+        "claude"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "affine",
+      "transport": "stdio",
+      "command": "${HOME}/bin/affine-mcp-jarvis",
+      "autoMount": false
     }
   ]
 }

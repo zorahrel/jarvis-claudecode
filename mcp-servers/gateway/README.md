@@ -1,118 +1,37 @@
-# mcp-hot-gateway
+# gateway — configurazione locale
 
-**An MCP server that mounts other MCP servers at runtime.** The agent calls
-`gateway_mount` itself, mid-session — the child's tools appear instantly via
-`notifications/tools/list_changed`. No session restart. No config-file edit.
+Il gateway **non vive qui**. Il codice è il pacchetto `mcp-hot-gateway`
+(`~/Projects/mcp-hot-gateway`, repo pubblico `zorahrel/mcp-hot-gateway`, MIT),
+collegato in `node_modules/` da `npm install`. Questa cartella tiene solo ciò
+che è specifico di questa macchina.
 
-> Most MCP gateways aggregate servers *statically*: you edit a config file or a
-> DB, restart, and the tools show up. `mcp-hot-gateway` is **agent-driven and
-> runtime-dynamic** — the model (or you) mounts and unmounts child servers
-> while the session is live, and the client picks up the new tools immediately.
+| File | Cos'è |
+|------|-------|
+| `gateway-config.json` | L'elenco dei figli. Percorsi come `${HOME}/...` per restare portabili. |
+| `.env` | I segreti referenziati come `${VAR}` nella config. Gitignorato. |
+| `start.sh` | Carica `.env`, pinna `MCP_GATEWAY_CONFIG` e `MCP_GATEWAY_REGISTRY`, lancia il pacchetto. |
+| `com.jarvis.gateway.plist` | Il LaunchAgent del daemon (porta 23371). |
+| `introspect.mjs` | Dump dei tool per la dashboard del router. **Non** fa parte del pacchetto. |
 
-## The problem this solves
+## Modificare il gateway
 
-You're in a live session with Claude Code (or any MCP client). You realise you
-need a tool from an MCP server that isn't connected. Normally you'd:
-
-1. stop, edit `~/.claude.json` (or the client's config),
-2. restart the session,
-3. lose your context.
-
-With `mcp-hot-gateway` mounted once at boot, you just say *"mount the GitHub MCP
-server"* and its tools are live in the same turn — namespaced `github__*`.
-
-## How it works
-
-`mcp-hot-gateway` is a normal stdio MCP server, loaded once. It exposes three
-always-on meta tools and proxies everything else:
-
-| Tool | What it does |
-|------|--------------|
-| `gateway_list` | List mounted child servers and the tools each exposes. |
-| `gateway_mount` | Connect a child MCP server, register its tools, emit `list_changed`. |
-| `gateway_unmount` | Disconnect a child, drop its tools, emit `list_changed`. |
-
-Child tools are exposed **namespaced** as `<child>__<tool>` (e.g.
-`github__create_issue`), so two children with a tool of the same name never
-collide. Calls are transparently proxied to the right child.
-
-Mounted children are persisted to `gateway-config.json`, so they reconnect
-automatically the next time the gateway boots.
-
-### Supported child transports
-
-- **stdio** — `{ transport: "stdio", command, args, env }`
-- **streamable http** — `{ transport: "http", url, headers }`
-- **sse** — `{ transport: "sse", url, headers }`
-
-## Install
-
-No install needed — run it straight from GitHub with `npx`:
-
-```jsonc
-// ~/.claude.json (or any MCP client config)
-{
-  "mcpServers": {
-    "gateway": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "github:zorahrel/mcp-hot-gateway"]
-    }
-  }
-}
-```
-
-Or clone and run locally:
+Si edita `~/Projects/mcp-hot-gateway`, non questa cartella. `node_modules` è un
+symlink, quindi la modifica è attiva al riavvio successivo — nessun reinstall.
 
 ```bash
-git clone https://github.com/zorahrel/mcp-hot-gateway
-cd mcp-hot-gateway && npm install
-node index.mjs
+npm test --prefix ~/Projects/mcp-hot-gateway     # la barra: esce non-zero se rompe
+launchctl kickstart -k gui/$(id -u)/com.jarvis.gateway
+tail -f ~/.claude/jarvis/logs/gateway.err.log
 ```
 
-## Usage
+## Aggiungere un figlio
 
-Once the gateway is connected, ask your agent to mount a server, or call the
-tool directly:
+A caldo, dalla sessione: `gateway_mount {name, transport, command|url, ...}` —
+viene persistito da solo in `gateway-config.json`. Per parcheggiarlo (resta in
+config ma non parte al boot): `gateway_unmount {name}`.
 
-```jsonc
-// gateway_mount — stdio child
-{
-  "name": "github",
-  "transport": "stdio",
-  "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-github"],
-  "env": { "GITHUB_TOKEN": "ghp_..." }
-}
-```
+## Trappola
 
-```jsonc
-// gateway_mount — http child
-{
-  "name": "weather",
-  "transport": "http",
-  "url": "https://example.com/mcp",
-  "headers": { "Authorization": "Bearer ..." }
-}
-```
-
-The new tools (`github__*`, `weather__*`) are available immediately. Call
-`gateway_unmount { "name": "github" }` to remove them.
-
-> **Client support note:** the live-update relies on the client honoring
-> `notifications/tools/list_changed`. Most modern MCP clients (Claude Code,
-> etc.) do. The persisted config means even clients that only read the tool
-> list at startup will see all previously-mounted children on the next launch.
-
-## Configuration
-
-Both are optional environment variables:
-
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `MCP_GATEWAY_CONFIG` | `./gateway-config.json` | Where mounted children are persisted. |
-| `MCP_GATEWAY_REGISTRY` | *(off)* | If set to a writable path, also writes a flat `{ server → tools }` snapshot JSON — handy for an external dashboard to read. |
-
-## License
-
-MIT © Attilio Cianci
+`start.sh` **deve** esportare `MCP_GATEWAY_CONFIG` esplicitamente. Il default del
+pacchetto è relativo alla posizione del suo `index.mjs`, che ora è
+`~/Projects/mcp-hot-gateway/` — senza quella riga il daemon parte con zero figli.
