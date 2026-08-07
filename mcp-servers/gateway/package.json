@@ -2,12 +2,13 @@
   "name": "jarvis-gateway-config",
   "version": "1.0.0",
   "private": true,
-  "description": "Jarvis-local configuration for the mcp-hot-gateway daemon. The gateway ITSELF lives in ~/Projects/mcp-hot-gateway (published as mcp-hot-gateway) — this directory holds only what is specific to this machine: the child roster (gateway-config.json), its secrets (.env), the launchd job, and introspect.mjs (used by the router dashboard, not part of the gateway).",
+  "description": "Jarvis-local configuration for the mcp-hot-gateway daemon. The gateway ITSELF lives in ~/Projects/mcp-hot-gateway (published as mcp-hot-gateway) \u2014 this directory holds only what is specific to this machine: the child roster (gateway-config.json), its secrets (.env), the launchd job, and introspect.mjs (used by the router dashboard, not part of the gateway).",
   "type": "module",
   "scripts": {
     "test": "npm test --prefix node_modules/mcp-hot-gateway"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "mcp-hot-gateway": "file:../../../../Projects/mcp-hot-gateway"
   }
 }
