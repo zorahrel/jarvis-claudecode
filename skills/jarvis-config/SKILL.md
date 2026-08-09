@@ -1,6 +1,7 @@
 ---
 name: jarvis-config
-description: Add or modify Jarvis Claude Code channels, routes, agents, and cron jobs by editing router/config.yaml and scaffolding agents/<name>/. Use when the user wants to connect Telegram/WhatsApp/Discord, create a new agent, route a chat to an existing agent, schedule a cron, or expose extra services in the dashboard.
+description: |
+  Add/modify Jarvis channels, routes, agents, crons via router/config.yaml + agents/<name>/ scaffolding. Triggers: connect Telegram/WhatsApp/Discord, new agent, route a chat, schedule a cron, expose dashboard services.
 ---
 
 # Jarvis Config Skill
