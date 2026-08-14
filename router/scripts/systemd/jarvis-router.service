@@ -1,7 +1,7 @@
 [Unit]
 Description=Jarvis router (multi-channel + dashboard)
-After=network.target jarvis-chroma.service jarvis-omega.service
-Wants=jarvis-chroma.service jarvis-omega.service
+After=network.target jarvis-docs-index.service jarvis-omega.service
+Wants=jarvis-docs-index.service jarvis-omega.service
 
 [Service]
 Type=simple

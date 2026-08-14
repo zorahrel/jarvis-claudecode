@@ -8,9 +8,9 @@
 
 ## Quick Start
 ```bash
-# Start core services via launchctl (Router, ChromaDB, OMEGA)
+# Start core services via launchctl (Router, docs-index, OMEGA)
 launchctl load ~/Library/LaunchAgents/com.jarvis.router.plist
-launchctl load ~/Library/LaunchAgents/com.jarvis.chroma.plist
+launchctl load ~/Library/LaunchAgents/com.jarvis.docs-index.plist
 launchctl load ~/Library/LaunchAgents/com.jarvis.omega.plist
 ```
 
@@ -21,7 +21,7 @@ Core (always present, hardcoded):
 | Service | Port | LaunchAgent | Health |
 |---------|------|-------------|--------|
 | Router | 3340/3341 | com.jarvis.router | `curl localhost:3340/api/stats` |
-| ChromaDB | 3342 | com.jarvis.chroma | `curl localhost:3342/health` |
+| Docs-index | 3342 | com.jarvis.docs-index | `curl localhost:3342/health` |
 | OMEGA | 3343 | com.jarvis.omega | `curl localhost:3343/health` |
 
 Extra services: add a `services:` section in `router/config.yaml` (see `config.example.yaml`).
@@ -45,13 +45,13 @@ tail -30 ~/.claude/jarvis/logs/router.log
 launchctl kickstart -k gui/$(id -u)/com.jarvis.router
 ```
 
-### ChromaDB/OMEGA down
+### Docs-index/OMEGA down
 ```bash
 curl localhost:3342/health
 curl localhost:3343/health
 # Restart:
 launchctl kickstart -k gui/$(id -u)/com.jarvis.omega
-launchctl kickstart -k gui/$(id -u)/com.jarvis.chroma
+launchctl kickstart -k gui/$(id -u)/com.jarvis.docs-index
 ```
 
 ### OMEGA DB locked
@@ -78,7 +78,7 @@ launchctl kickstart -k gui/$(id -u)/com.jarvis.router
 # Check all services health (from dashboard API)
 curl localhost:3340/api/services
 
-# Reindex ChromaDB
+# Reindex the docs-index
 curl -X POST localhost:3342/reindex
 
 # Search memories
@@ -103,9 +103,9 @@ Edit `CLAUDE.md` agents → process auto-reads on next spawn
 Edit dashboard → `npm run build` inside `router/dashboard/` and restart the router
 
 ## OpenAI Key
-Used for: nothing mandatory. Both ChromaDB and OMEGA use local ONNX embeddings.
+Used for: nothing mandatory. Both the docs-index and OMEGA use local ONNX embeddings.
 Set via env in `.env`: `OPENAI_API_KEY=sk-...`.
-Models (local): `all-MiniLM-L6-v2` (ChromaDB), `bge-small-en-v1.5` (OMEGA).
+Models (local): `all-MiniLM-L6-v2` (docs-index), `bge-small-en-v1.5` (OMEGA).
 
 ## Whisper
 - Binary: `/opt/homebrew/bin/whisper-cli`

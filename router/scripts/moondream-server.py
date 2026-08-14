@@ -3,7 +3,7 @@
 
 Starts the Moondream Station REST server (vision local inference) on
 http://127.0.0.1:2020 without going through the interactive REPL. Suitable
-for launchd / systemd supervision alongside ChromaDB and OMEGA.
+for launchd / systemd supervision alongside docs-index and OMEGA.
 
 Env:
   MOONDREAM_MODEL   model id from the manifest, default 'moondream-2'

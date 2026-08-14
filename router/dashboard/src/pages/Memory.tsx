@@ -1751,7 +1751,7 @@ function KebabMenu({
           <MenuItem
             icon={<RefreshCw size={13} />}
             title={reindexing ? 'Indexing…' : 'Reindex memory'}
-            hint="Rebuild vector index in ChromaDB"
+            hint="Rebuild vector index in docs-index"
             disabled={reindexing}
             onClick={() => { onReindex(); setOpen(false) }}
           />

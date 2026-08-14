@@ -1,0 +1,17 @@
+[Unit]
+# Was jarvis-chroma.service until 2026-08-14. ChromaDB really did sit behind
+# :3342 until docs-server.py replaced it on 2026-07-05; the name outlived it.
+Description=Jarvis docs-index server (document RAG over memory/*.md)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.claude/jarvis/router
+ExecStart=__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python -u scripts/docs-server.py
+Restart=always
+RestartSec=2
+StandardOutput=append:__HOME__/.claude/jarvis/logs/docs-index.log
+StandardError=append:__HOME__/.claude/jarvis/logs/docs-index.err.log
+
+[Install]
+WantedBy=default.target

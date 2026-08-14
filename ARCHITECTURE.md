@@ -16,7 +16,7 @@ Each channel has routes with per-agent capabilities and scoping.
 | Service | Port | Process | Path |
 |---------|------|---------|------|
 | Router | 3340/3341 | com.jarvis.router (launchd) | `~/.claude/jarvis/router/` |
-| ChromaDB | 3342 | com.jarvis.chroma (launchd) | `scripts/chroma-server.py` |
+| Docs-index | 3342 | com.jarvis.docs-index (launchd) | `scripts/docs-server.py` |
 | OMEGA | 3343 | com.jarvis.omega (launchd) | `scripts/omega-server.py` |
 
 Extra services can be added via a `services:` section in `router/config.yaml`
@@ -45,7 +45,7 @@ managed by the tray app if they provide a `launchd:` config.
 │   │   │   ├── message-buffer.ts    # Telegram ring buffer (persisted to state/)
 │   │   │   ├── whatsapp-history.ts  # WA per-chat JSONL store fed by Baileys events
 │   │   │   ├── media.ts           # Whisper, vision, file extract
-│   │   │   ├── memory.ts          # ChromaDB + OMEGA client
+│   │   │   ├── memory.ts          # docs-index + OMEGA client
 │   │   │   ├── router.ts          # Route matching
 │   │   │   ├── services.ts        # Service registry + launchd plist builder
 │   │   │   ├── config-loader.ts
@@ -56,7 +56,7 @@ managed by the tray app if they provide a `launchd:` config.
 │   │       ├── config.ts     # AgentConfig, ServiceDef, Capabilities
 │   │       └── message.ts    # IncomingMessage, Media
 │   ├── scripts/
-│   │   ├── chroma-server.py  # ChromaDB HTTP API
+│   │   ├── docs-server.py    # Docs-index HTTP API (RAG over memory/*.md)
 │   │   └── omega-server.py   # OMEGA HTTP API
 │   ├── config.yaml           # Route config (gitignored)
 │   ├── certs/                # Self-signed TLS
@@ -65,7 +65,7 @@ managed by the tray app if they provide a `launchd:` config.
 ├── memory/                   # Markdown memory (gitignored)
 ├── media/                    # Temp media files (gitignored)
 ├── logs/                     # Service logs (gitignored)
-├── chroma-data/              # ChromaDB persistence (gitignored)
+├── state/                    # docs-index cache + ONNX model (gitignored)
 └── ~/.omega/                  # OMEGA SQLite store (user home, gitignored)
 ```
 
@@ -135,7 +135,7 @@ Connector receives media
 ```
 
 ## Memory System
-- **ChromaDB** (localhost:3342): indexes `.md` files scoped by agent, `all-MiniLM-L6-v2` ONNX locally
+- **Docs-index** (localhost:3342): indexes `.md` files scoped by agent, `all-MiniLM-L6-v2` ONNX locally
 - **OMEGA** (localhost:3343): conversation memory in SQLite + `sqlite-vec` + FTS5 + `bge-small-en-v1.5` ONNX locally
 - **Embeddings**: fully on-device, no external API
 - **Ingestion**: auto-saved after each reply, scope-tagged by session key
@@ -150,7 +150,7 @@ Connector receives media
 ## LaunchAgents
 Core (always present) in `~/Library/LaunchAgents/`:
 - `com.jarvis.router` — KeepAlive
-- `com.jarvis.chroma` — KeepAlive
+- `com.jarvis.docs-index` — KeepAlive
 - `com.jarvis.omega` — KeepAlive
 - `com.jarvis.tray` — RunAtLoad
 

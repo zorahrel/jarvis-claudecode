@@ -1,5 +1,5 @@
 # Jarvis Claude Code - Windows one-shot setup.
-# Idempotent. Installs deps, builds dashboard, sets up OMEGA + ChromaDB, and
+# Idempotent. Installs deps, builds dashboard, sets up OMEGA + docs-index, and
 # registers scheduled tasks that start the three services at logon.
 #
 # Usage:
@@ -90,8 +90,8 @@ if (Test-Path $distIndex) {
     Ok 'dashboard built -> router\dashboard\dist'
 }
 
-# --- OMEGA venv + ONNX model + chromadb -------------------------------------
-Step 'Setting up Python memory servers (OMEGA + ChromaDB)'
+# --- OMEGA venv + ONNX model ------------------------------------------------
+Step 'Setting up Python memory servers (OMEGA + docs-index)'
 $venv = Join-Path $Scripts 'omega-env'
 $venvPython = Join-Path $venv 'Scripts\python.exe'
 if (-not (Test-Path $venv)) {
@@ -108,13 +108,16 @@ if (-not $hasOmega) {
     Ok 'omega-memory installed'
 } else { Skip 'omega-memory already installed' }
 
-$hasChroma = $false
-try { & $venvPython -c "import chromadb, dotenv" 2>$null; $hasChroma = ($LASTEXITCODE -eq 0) } catch {}
-if (-not $hasChroma) {
-    Info 'installing chromadb + python-dotenv (about 30s)'
-    & $venvPython -m pip install --quiet chromadb python-dotenv
-    Ok 'chromadb installed'
-} else { Skip 'chromadb already installed' }
+# chromadb used to be installed here for chroma-server.py (:3342). Since
+# 2026-07-05 that port is served by docs-server.py, which needs only numpy +
+# onnxruntime + tokenizers - all already pulled in by omega-memory.
+$hasDotenv = $false
+try { & $venvPython -c "import dotenv" 2>$null; $hasDotenv = ($LASTEXITCODE -eq 0) } catch {}
+if (-not $hasDotenv) {
+    Info 'installing python-dotenv'
+    & $venvPython -m pip install --quiet python-dotenv
+    Ok 'python-dotenv installed'
+} else { Skip 'python-dotenv already installed' }
 
 $modelCache = Join-Path $env:USERPROFILE '.cache\omega\models\bge-small-en-v1.5-onnx'
 if (-not (Test-Path $modelCache) -or -not (Get-ChildItem $modelCache -ErrorAction SilentlyContinue)) {
@@ -165,7 +168,7 @@ if ($NoAgents) {
     Step 'Scheduled tasks'
     Skip 'auto-start disabled (-NoAgents)'
 } else {
-    Step 'Registering scheduled tasks (chroma + omega + router)'
+    Step 'Registering scheduled tasks (docs-index + omega + router)'
     if (-not (Test-Path $LogsDir)) { New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null }
 
     $pythonw = Join-Path $venv 'Scripts\pythonw.exe'
@@ -175,10 +178,10 @@ if ($NoAgents) {
 
     $tasks = @(
         @{
-            Name = 'JarvisChroma'
+            Name = 'JarvisDocsIndex'
             Action = New-ScheduledTaskAction `
                 -Execute $pythonw `
-                -Argument "`"$(Join-Path $Scripts 'chroma-server.py')`"" `
+                -Argument "`"$(Join-Path $Scripts 'docs-server.py')`"" `
                 -WorkingDirectory $Router
         },
         @{
@@ -239,7 +242,7 @@ Write-Host ""
 
 if ($tasksInstalled) {
     Write-Host "All services run in the background and auto-start at logon:" -ForegroundColor White
-    Write-Host "  ChromaDB (docs)         :3342"
+    Write-Host "  Docs-index (RAG)        :3342"
     Write-Host "  OMEGA    (conversation) :3343"
     Write-Host "  Router   (bots + web)   :3340 / :3341"
     Write-Host ""
@@ -253,7 +256,7 @@ if ($tasksInstalled) {
 } else {
     Write-Host "Start the stack manually (three terminals):"
     Write-Host "  cd router"
-    Write-Host "  scripts\omega-env\Scripts\python.exe scripts\chroma-server.py"
+    Write-Host "  scripts\omega-env\Scripts\python.exe scripts\docs-server.py"
     Write-Host "  scripts\omega-env\Scripts\python.exe scripts\omega-server.py"
     Write-Host "  npm start"
 }

@@ -2,6 +2,12 @@
 
 > Stato: **FLIPPATO 2026-07-05** — `:3342` è ora `docs-server.py` (zero chromadb). Preparato 2026-07-04, rivisto v2 e implementato 2026-07-05.
 > Deploy: (A) drop-in su :3342 · embedding MiniLM invariato · OMEGA non toccato.
+>
+> **Seguito 2026-08-14** — la label launchd, tenuta apposta invariata nel flip per
+> non toccare il router, è stata rinominata `com.jarvis.chroma` →
+> **`com.jarvis.docs-index`** (idem `jarvis-docs-index.service` su Linux,
+> `JarvisDocsIndex` su Windows, log `docs-index.log`). Il resto di questo
+> documento è il verbale del 05/07 e resta com'era scritto allora.
 
 ## 0. Esito (verificato)
 - **Shadow-compare (:3352 vs :3342 Chroma): 10/10 query con ordine top-5 identico, max |Δscore| = 0.000000** — replica embedding bit-exact. `/documents` identico su tutti gli scope (152/110/42 file).

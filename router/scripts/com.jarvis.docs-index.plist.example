@@ -3,18 +3,22 @@
   Example LaunchAgent for the docs-index HTTP server (document RAG, local).
 
   Install:
-    sed "s|__HOME__|$HOME|g" com.jarvis.chroma.plist.example \
-      > ~/Library/LaunchAgents/com.jarvis.chroma.plist
-    launchctl load ~/Library/LaunchAgents/com.jarvis.chroma.plist
+    sed "s|__HOME__|$HOME|g" com.jarvis.docs-index.plist.example \
+      > ~/Library/LaunchAgents/com.jarvis.docs-index.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jarvis.docs-index.plist
 
   Uses the same venv as OMEGA (router/scripts/omega-env). Deps: numpy,
   onnxruntime, tokenizers (already pulled in by omega-memory).
+
+  The label was com.jarvis.chroma until 2026-08-14: ChromaDB really did sit
+  behind :3342 until docs-server.py replaced it on 2026-07-05, and the name
+  outlived it. See docs/memory-consolidation.md.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jarvis.chroma</string>
+  <string>com.jarvis.docs-index</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -29,9 +33,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>__HOME__/.claude/jarvis/logs/chroma.log</string>
+  <string>__HOME__/.claude/jarvis/logs/docs-index.log</string>
   <key>StandardErrorPath</key>
-  <string>__HOME__/.claude/jarvis/logs/chroma.err.log</string>
+  <string>__HOME__/.claude/jarvis/logs/docs-index.err.log</string>
 
   <key>WorkingDirectory</key>
   <string>__HOME__/.claude/jarvis/router</string>

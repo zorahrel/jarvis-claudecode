@@ -1,6 +1,6 @@
 import { homedir } from "os";
 import { join, resolve } from "path";
-import type { ServiceDef, ServiceLaunchd } from "../types";
+import type { ServiceDef } from "../types";
 import { getConfig, expandHome } from "./config-loader";
 import { logger } from "./logger";
 
@@ -36,14 +36,19 @@ export function getCoreServices(): ServiceDef[] {
       },
     },
     {
-      name: "ChromaDB",
+      // Document RAG over memory/*.md. ChromaDB was replaced by docs-server.py
+      // (sqlite + numpy, same HTTP contract) on 2026-07-05; the launchd label,
+      // args and log name still said "chroma" until 2026-08-14, so the tray app
+      // was offering to restart a service that no longer existed under that
+      // name. See docs/memory-consolidation.md.
+      name: "Docs-index",
       port: 3342,
       healthUrl: "http://localhost:3342/health",
       launchd: {
-        label: "com.jarvis.chroma",
-        args: ["/opt/homebrew/bin/python3", "-u", "scripts/chroma-server.py"],
+        label: "com.jarvis.docs-index",
+        args: ["scripts/omega-env/bin/python3", "-u", "scripts/docs-server.py"],
         cwd: ROUTER_DIR,
-        logName: "chroma",
+        logName: "docs-index",
       },
     },
     {
@@ -159,6 +164,11 @@ function xmlEscape(s: string): string {
 /**
  * Generate launchd plist XML for a service. Values are XML-escaped.
  * Throws if the service has no launchd config.
+ *
+ * Log names follow the convention already on disk in ~/.claude/jarvis/logs:
+ * `<name>.log` + `<name>.err.log`. This used to emit `<name>-error.log`, which
+ * no installed plist ever used, so a tray-written plist silently moved stderr
+ * to a second file nobody tails.
  */
 export function generatePlist(svc: ServiceDef): string {
   if (!svc.launchd) throw new Error(`Service ${svc.name} has no launchd config`);
@@ -184,7 +194,7 @@ ${argsXML}
     <key>StandardOutPath</key>
     <string>${xmlEscape(LOG_DIR)}/${logName}.log</string>
     <key>StandardErrorPath</key>
-    <string>${xmlEscape(LOG_DIR)}/${logName}-error.log</string>
+    <string>${xmlEscape(LOG_DIR)}/${logName}.err.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

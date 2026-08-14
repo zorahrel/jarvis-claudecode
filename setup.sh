@@ -135,12 +135,16 @@ else
   skip "omega-memory already installed"
 fi
 
-if ! python -c "import chromadb, dotenv" 2>/dev/null; then
-  info "installing chromadb + python-dotenv (≈30s)"
-  pip install --quiet chromadb python-dotenv
-  ok "chromadb installed"
+# chromadb used to be installed here for chroma-server.py (:3342). Since
+# 2026-07-05 that port is served by docs-server.py, which needs only numpy +
+# onnxruntime + tokenizers — all already pulled in by omega-memory. Installing
+# chromadb again would add ~100 MB of rust bindings that nothing imports.
+if ! python -c "import dotenv" 2>/dev/null; then
+  info "installing python-dotenv"
+  pip install --quiet python-dotenv
+  ok "python-dotenv installed"
 else
-  skip "chromadb already installed"
+  skip "python-dotenv already installed"
 fi
 
 MODEL_CACHE="$HOME/.cache/omega/models/bge-small-en-v1.5-onnx"
@@ -276,7 +280,7 @@ fi
 #
 # Three services registered per platform so the user never has to keep a
 # terminal open:
-#   chroma (:3342)  ·  omega (:3343)  ·  router (:3340/:3341)
+#   docs-index (:3342)  ·  omega (:3343)  ·  router (:3340/:3341)
 #
 # macOS → LaunchAgents (launchctl)     Linux → systemd user units
 # Windows setup is handled by setup.ps1.
@@ -302,11 +306,11 @@ if [ "$NO_AGENTS" = "1" ]; then
   step "System services"
   skip "auto-start disabled (--no-agents)"
 elif [ "$PLATFORM" = "Darwin" ]; then
-  step "Installing LaunchAgents (chroma + omega + router)"
+  step "Installing LaunchAgents (docs-index + omega + router)"
   LA_DIR="$HOME/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
 
-  for svc in chroma omega moondream router; do
+  for svc in docs-index omega moondream router; do
     template="$SCRIPTS/com.jarvis.${svc}.plist.example"
     target="$LA_DIR/com.jarvis.${svc}.plist"
     if [ ! -f "$template" ]; then
@@ -323,13 +327,13 @@ elif [ "$PLATFORM" = "Darwin" ]; then
   SERVICES_INSTALLED=1
 
 elif [ "$PLATFORM" = "Linux" ]; then
-  step "Installing systemd user units (chroma + omega + router)"
+  step "Installing systemd user units (docs-index + omega + router)"
   if ! command -v systemctl >/dev/null 2>&1; then
     warn "systemctl not found — skipping (install services manually)"
   else
     UNIT_DIR="$HOME/.config/systemd/user"
     mkdir -p "$UNIT_DIR"
-    for svc in chroma omega moondream router; do
+    for svc in docs-index omega moondream router; do
       template="$SCRIPTS/systemd/jarvis-${svc}.service"
       target="$UNIT_DIR/jarvis-${svc}.service"
       if [ ! -f "$template" ]; then
@@ -339,7 +343,7 @@ elif [ "$PLATFORM" = "Linux" ]; then
       ok "wrote $target"
     done
     systemctl --user daemon-reload
-    for svc in chroma omega moondream router; do
+    for svc in docs-index omega moondream router; do
       if [ -f "$UNIT_DIR/jarvis-${svc}.service" ]; then
         systemctl --user enable --now "jarvis-${svc}.service" 2>&1 \
           | sed 's/^/    /' || true
@@ -399,7 +403,7 @@ else
 
 ${BOLD}Start the stack manually:${RESET}
   ${BLUE}cd router${RESET}
-  ${BLUE}./scripts/omega-env/bin/python scripts/chroma-server.py &${RESET}   ${DIM}# :3342${RESET}
+  ${BLUE}./scripts/omega-env/bin/python scripts/docs-server.py &${RESET}   ${DIM}# :3342${RESET}
   ${BLUE}./scripts/omega-env/bin/python scripts/omega-server.py &${RESET}    ${DIM}# :3343${RESET}
   ${BLUE}npm start${RESET}                                                   ${DIM}# :3340${RESET}
 EOF
