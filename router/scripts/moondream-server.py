@@ -17,10 +17,18 @@ Env:
   MOONDREAM_TIMEOUT inference timeout in seconds, default 180
   MOONDREAM_IDLE    minutes without a request before the daemon unloads the
                     model and exits, default 20. 0 disables the idle exit.
-                    moondream-2 sits on ~5.6 GB resident: keeping it warm for
-                    days costs a fifth of a 32 GB Mac to answer nothing. The
-                    CLI restarts it on demand (~15 s cold start).
+                    moondream-2 sits on ~5.5 GB resident: keeping it warm for
+                    days costs a sixth of a 32 GB Mac to answer nothing. The
+                    CLI restarts it on demand (~12 s cold start).
   HF_TOKEN          optional HuggingFace token (pass-through, not stored).
+
+Why 5.5 GB for a "small local model": moondream2 is 1.87 B parameters in
+bfloat16 = 3.6 GB of weights, and they are already bfloat16 on disk — loading
+them as float32 is NOT what happens here (measured: passing dtype=bfloat16
+explicitly changes nothing). On top of the weights, MPS keeps a scratch cache
+that grows to ~1.3 GB after the first inference and never shrinks on its own.
+That last GB is the only part that is genuinely wasted while idle, so the
+daemon releases it after each request via torch.mps.empty_cache().
 
 The daemon foregrounds the uvicorn server thread; SIGTERM / SIGINT shut it
 down cleanly.
@@ -56,6 +64,22 @@ MANIFEST_URL = (
     "https://m87-md-prod-assets.s3.us-west-2.amazonaws.com/"
     "station/mds2/production_manifest.json"
 )
+
+
+def _release_mps_cache() -> None:
+    """Restituisce al sistema la cache di scratch di Metal.
+
+    torch e' importato pigramente: il daemon parte anche dove non c'e' (e in
+    quel caso non c'e' nemmeno la cache da liberare). Qualunque errore qui e'
+    irrilevante rispetto al servire la richiesta, quindi si ingoia.
+    """
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -116,9 +140,18 @@ def main() -> int:
             # /health e /docs sono poll di monitoraggio, non uso: contarli
             # terrebbe il modello in RAM per sempre grazie al nostro stesso
             # health check.
-            if request.url.path not in ("/health", "/docs", "/openapi.json"):
+            counts = request.url.path not in ("/health", "/docs", "/openapi.json")
+            if counts:
                 last_seen["t"] = time.monotonic()
-            return await call_next(request)
+            response = await call_next(request)
+            if counts:
+                # La cache di scratch di MPS cresce a ~1.3GB dopo la prima
+                # inferenza e non si restringe mai da sola: e' l'unico GB dei
+                # 5.5 che sia davvero sprecato mentre non stiamo facendo
+                # niente. Liberarla NON scarica i pesi: la query dopo risponde
+                # uguale, la si ripaga in decimi di secondo.
+                _release_mps_cache()
+            return response
 
         if not manifest.get_backend_for_model(target_model):
             log(f"no backend for model '{target_model}'")
