@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""psj — process list con nomi leggibili.
+
+`ps` mostra "Python" e "node" venti volte: inutile. psj deriva un nome
+dall'argv, dalla cwd, dal launchd label e dalla porta in ascolto, e segnala
+chi ascolta su 0.0.0.0 (raggiungibile dalla LAN) invece che su loopback.
+
+Uso:
+  psj              tutti i processi utente non-Apple, con nome
+  psj -a           include anche i processi di sistema
+  psj -n           solo chi ha una porta in ascolto
+  psj -x           solo le esposizioni LAN (0.0.0.0 / *)
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = str(Path.home())
+
+# `lsof` vive in /usr/sbin, che NON e' nel PATH di un contesto non interattivo
+# (hook, launchd, agenti). Senza questo psj gira, esce 0 e stampa una tabella
+# VUOTA: nessuna porta, nessun servizio esposto, tutto tranquillo. Un guasto
+# che si traveste da "va tutto bene" e' peggio di un errore, soprattutto in uno
+# strumento il cui unico scopo e' dire cosa c'e' di aperto.
+os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/sbin:/sbin:/usr/bin:/bin"
+
+SYSTEM_PREFIXES = (
+    "/System/", "/usr/lib", "/usr/libexec", "/usr/sbin", "/sbin/",
+    "/Library/Apple/", "/usr/bin/",
+)
+
+RUNTIMES = re.compile(
+    r"(^|/)(python[\d.]*|Python|node|bun|deno|ruby|perl|tsx|php|java|sh|bash|zsh)$"
+)
+
+
+def sh(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                              timeout=20).stdout
+    except Exception:
+        return ""
+
+
+def launchd_labels():
+    """pid -> label, dai servizi launchd caricati."""
+    out = {}
+    for line in sh("launchctl list").splitlines()[1:]:
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0].isdigit():
+            out[int(parts[0])] = parts[2]
+    return out
+
+
+def listen_ports():
+    """pid -> [(porta, esposto_lan)]"""
+    out = {}
+    raw = sh("lsof -nP -iTCP -sTCP:LISTEN")
+    # Zero righe non vuol dire "nessuna porta aperta": su questa macchina ce ne
+    # sono sempre (ControlCenter, rapportd). Vuol dire che lsof non ha parlato,
+    # e uno strumento che dice "niente di esposto" perche' e' cieco e' peggio di
+    # uno che non parte: si tace un rischio invece di segnalarlo.
+    if not raw.strip():
+        print("psj: lsof non ha restituito nulla — le porte NON sono state "
+              "controllate (permessi? PATH?)", file=sys.stderr)
+        return None
+    for line in raw.splitlines()[1:]:
+        f = line.split()
+        if len(f) < 9:
+            continue
+        try:
+            pid = int(f[1])
+        except ValueError:
+            continue
+        addr = f[-2] if f[-1] == "(LISTEN)" else f[-1]
+        if ":" not in addr:
+            continue
+        host, _, port = addr.rpartition(":")
+        lan = not (host.startswith("127.0.0.1") or host.startswith("[::1]"))
+        out.setdefault(pid, {})
+        # Un servizio in ascolto dual-stack compare due volte (IPv4 e IPv6) e
+        # usciva "18789,18789,60383", che sembra un bug del servizio invece che
+        # del report. Si tiene una riga per porta, e se ANCHE UNA delle due e'
+        # esposta la porta e' esposta: l'unione e' l'unica lettura prudente.
+        out[pid][port] = out[pid].get(port, False) or lan
+    return {pid: sorted(d.items()) for pid, d in out.items()}
+
+
+def cwds(pids):
+    out = {}
+    # lsof vuole la lista di pid separata da virgole, non da spazi
+    chunk = ",".join(str(p) for p in pids)
+    for line in sh(f"lsof -a -d cwd -Fpn -p {chunk}").splitlines():
+        if line.startswith("p"):
+            cur = int(line[1:])
+        elif line.startswith("n"):
+            out[cur] = line[1:]
+    return out
+
+
+def procs():
+    # RSS invece di %mem: la percentuale nasconde quanto sia davvero grosso un
+    # processo, e VSZ (che su ARM64 macOS segna ~400GB per QUALSIASI processo,
+    # spazio di indirizzi virtuale condiviso) fa gridare al leak per niente.
+    raw = sh("ps -Ao pid=,ppid=,user=,%cpu=,rss=,etime=,command=")
+    out = []
+    for line in raw.splitlines():
+        f = line.split(None, 6)
+        if len(f) < 7:
+            continue
+        pid, ppid, user, cpu, rss, etime, cmd = f
+        out.append(dict(pid=int(pid), ppid=int(ppid), user=user,
+                        cpu=float(cpu), mem=int(rss) / 1024, etime=etime, cmd=cmd))
+    return out
+
+
+def fmt_mem(mb):
+    if mb >= 1024:
+        return f"{mb / 1024:.1f}G"
+    return f"{mb:.0f}M"
+
+
+def shorten(p):
+    """Percorso leggibile: ~/... e via i node_modules infiniti."""
+    p = p.replace(HOME, "~")
+    return p
+
+
+def project_of(path):
+    m = re.search(r"Projects/([^/\s]+)", path)
+    if m:
+        return m.group(1)
+    if "/.claude/jarvis" in path or "/jarvis/" in path:
+        return "jarvis"
+    if "/.jcode" in path:
+        return "jcode"
+    if "/.openclaw" in path or "/openclaw" in path:
+        return "openclaw"
+    return None
+
+
+def name_for(pr, cwd, label):
+    """Il nome umano del processo. Ordine: script > label launchd > app > argv0."""
+    cmd = pr["cmd"]
+    argv = cmd.split()
+    exe = argv[0] if argv else cmd
+    base = os.path.basename(exe)
+
+    # App bundle: prendi il nome del .app (il path può contenere spazi,
+    # quindi si cerca sulla riga intera e non su argv[0])
+    m = re.search(r"/([^/]+)\.app/Contents/(?:MacOS|Resources)/", cmd)
+    app = m.group(1) if m else None
+    if app and (" Helper" in app or app.endswith("Helper")):
+        app = app.split(" Helper")[0] + " helper"
+
+    if not RUNTIMES.search(base):
+        if app:
+            extra = ""
+            if "--type=" in cmd:
+                t = re.search(r"--type=(\S+)", cmd).group(1)
+                extra = f" [{t.split('.')[-1]}]"
+            return app + extra, project_of(cmd) or project_of(cwd or "")
+        return base, project_of(cmd) or project_of(cwd or "")
+
+    # runtime: cerca lo script vero negli argomenti
+    script = None
+    for a in argv[1:]:
+        if a.startswith("-"):
+            continue
+        if re.search(r"\.(py|js|mjs|cjs|ts|tsx|sh|pl|rb)$", a):
+            script = a
+            break
+    if script is None:
+        m = re.search(r"-m\s+(\S+)", cmd)
+        if m:
+            script = f"-m {m.group(1)}"
+    if script is None and len(argv) > 1:
+        script = argv[1]
+
+    proj = project_of(script or "") or project_of(cwd or "") or project_of(cmd)
+    if not proj and cwd and cwd not in ("/", HOME):
+        # nessun ~/Projects di mezzo: la cartella di lavoro è comunque
+        # l'indizio migliore su chi sia questo processo
+        proj = os.path.basename(cwd.rstrip("/"))
+    label_short = label.replace("com.jarvis.", "").replace("com.armonia.", "") if label else None
+
+    if label_short and script and re.search(r"http\.server|^-m ", script):
+        nm = f"{base.lower()}:{label_short}"
+    elif script:
+        s = os.path.basename(script) if not script.startswith("-m") else script
+        nm = f"{base.lower()}:{s}"
+    elif label_short:
+        nm = f"{base.lower()}:{label_short}"
+    else:
+        nm = base.lower()
+    return nm, proj
+
+
+def main():
+    args = set(sys.argv[1:])
+    show_all = "-a" in args
+    only_net = "-n" in args
+    only_exposed = "-x" in args
+
+    ps = procs()
+    labels = launchd_labels()
+    ports = listen_ports()
+    if ports is None:
+        # -n e -x rispondono SOLO sulle porte: senza lsof non hanno una risposta
+        # da dare, e darne una vuota sarebbe una bugia. Esce 2 come i gate
+        # visivi: non "niente da segnalare", ma "non ho potuto guardare".
+        if only_net or only_exposed:
+            sys.exit(2)
+        ports = {}
+    me = os.environ.get("USER", "")
+
+    keep = []
+    for pr in ps:
+        cmd = pr["cmd"]
+        if not show_all:
+            if pr["user"] != me and pr["pid"] not in ports:
+                continue
+            if any(cmd.startswith(p) for p in SYSTEM_PREFIXES):
+                continue
+            if "/System/Library/" in cmd or ".appex/" in cmd:
+                continue
+        keep.append(pr)
+
+    cw = cwds([p["pid"] for p in keep]) if keep else {}
+
+    rows = []
+    for pr in keep:
+        pl = ports.get(pr["pid"], [])
+        if only_net and not pl:
+            continue
+        exposed = [p for p, lan in pl if lan]
+        if only_exposed and not exposed:
+            continue
+        cwd = cw.get(pr["pid"], "")
+        nm, proj = name_for(pr, cwd, labels.get(pr["pid"]))
+        portstr = ",".join(
+            (p + "!" if lan else p) for p, lan in sorted(pl, key=lambda x: x[0])
+        )
+        rows.append((pr, nm, proj or "", portstr, labels.get(pr["pid"], "")))
+
+    rows.sort(key=lambda r: (r[2], r[1]))
+
+    if not show_all:
+        # Le app grosse (Chrome, ActivityWatch, Cursor) sono 5-20 processi con
+        # lo stesso nome: uno solo interessa, gli altri sono rumore. Collassa
+        # gli omonimi SENZA porta in una riga con il conteggio, sommando CPU e
+        # memoria — che è poi il numero che si vuole davvero sapere.
+        grouped = {}
+        order = []
+        out = []
+        for r in rows:
+            pr, nm, proj, portstr, label = r
+            if portstr or nm == "<defunct>":
+                out.append((r, 1))
+                continue
+            k = (nm, proj)
+            if k in grouped:
+                g = grouped[k]
+                g["n"] += 1
+                g["cpu"] += pr["cpu"]
+                g["mem"] += pr["mem"]
+            else:
+                grouped[k] = dict(r=r, n=1, cpu=pr["cpu"], mem=pr["mem"])
+                order.append(k)
+        merged = []
+        for r, n in out:
+            merged.append((r, n))
+        for k in order:
+            g = grouped[k]
+            pr, nm, proj, portstr, label = g["r"]
+            pr = dict(pr, cpu=g["cpu"], mem=g["mem"])
+            merged.append(((pr, nm, proj, portstr, label), g["n"]))
+        merged.sort(key=lambda x: (x[0][2], x[0][1]))
+        rows_out = merged
+    else:
+        rows_out = [(r, 1) for r in rows]
+
+    def label_of(r, n):
+        return r[1] + (f" ×{n}" if n > 1 else "")
+
+    w_name = max([len(label_of(r, n)) for r, n in rows_out] + [4])
+    w_proj = max([len(r[2]) for r, _ in rows_out] + [7])
+    print(f"{'PID':>6}  {'NAME'.ljust(w_name)}  {'PROJECT'.ljust(w_proj)}  "
+          f"{'PORTS':<14} {'CPU':>5} {'RSS':>6}  UPTIME")
+    for r, n in rows_out:
+        pr, nm, proj, portstr, label = r
+        print(f"{pr['pid']:>6}  {label_of(r, n).ljust(w_name)}  {proj.ljust(w_proj)}  "
+              f"{portstr:<14} {pr['cpu']:>5.1f} {fmt_mem(pr['mem']):>6}  {pr['etime']}")
+
+    exp = [r for r, _ in rows_out if "!" in r[3]]
+    if exp and not only_exposed:
+        print(f"\n! {len(exp)} in ascolto su tutte le interfacce (LAN):")
+        for pr, nm, proj, portstr, _ in exp:
+            lanports = [p[:-1] for p in portstr.split(",") if p.endswith("!")]
+            print(f"    {pr['pid']:>6}  {nm}  ->  {', '.join(lanports)}")
+
+
+if __name__ == "__main__":
+    main()
