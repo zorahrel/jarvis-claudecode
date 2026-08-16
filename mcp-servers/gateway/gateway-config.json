@@ -155,8 +155,17 @@
     {
       "name": "affine",
       "transport": "stdio",
-      "command": "${HOME}/bin/affine-mcp-jarvis",
+      "command": "/Users/zorahrel/bin/affine-mcp-jarvis",
       "autoMount": false
+    },
+    {
+      "name": "viaggi",
+      "transport": "stdio",
+      "command": "/Users/zorahrel/.bun/bin/bun",
+      "args": [
+        "run",
+        "/Users/zorahrel/Projects/viaggi-mcp/src/index.ts"
+      ]
     }
   ]
 }
