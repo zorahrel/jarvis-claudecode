@@ -53,6 +53,39 @@ const VISION_BIN = process.env.JARVIS_VISION_CMD || join(homedir(), ".claude/jar
 // misurato). Sommati, il PRIMO read_screen dopo una pausa veniva ucciso a meta'
 // e tornava "vision exit null" — un guasto apparente su un backend sano.
 const VISION_TIMEOUT_MS = Number(process.env.JARVIS_VISION_TIMEOUT_MS || 90000);
+
+// Uno screenshot puo' non contenere nulla: sessione appena creata e mai
+// navigata, pagina non ancora dipinta, tab in background, render fallito. Il
+// guaio non e' l'immagine vuota, e' che un VLM non dice "non vedo niente" —
+// INVENTA. Misurato il 16/08 su un about:blank 1280x900: moondream2 ha
+// risposto "# Global Economic Outlook" tre volte su tre, identico e
+// sicurissimo, e il daemon lo restituiva con ok:true. Un backend sano, una
+// risposta plausibile, zero pixel dietro: indistinguibile da una lettura vera.
+//
+// La difesa non puo' stare nel modello, sta qui, PRIMA di interrogarlo. Un PNG
+// uniforme si comprime quasi a nulla e si riconosce dal peso per pixel.
+// MISURATO su questa macchina, non stimato:
+//   0.0010 b/px  PNG bianco puro generato
+//   0.0046 b/px  about:blank del browser (1280x900, 5289 B)
+//   0.0154 b/px  example.com, la pagina vera piu' spoglia che esista (17718 B)
+//   0.2960 b/px  una landing con grafica
+// La soglia sta a 0.008: 1.7x sopra il vuoto peggiore e 2x sotto la pagina
+// vera piu' povera. Il margine e' stretto da entrambi i lati perche' i due
+// casi sono davvero vicini; a parita' di dubbio si preferisce far passare la
+// lettura (un falso "vuoto" toglie una capacita', un falso "pieno" mente).
+const BLANK_BYTES_PER_PIXEL = 0.008;
+
+function looksBlank(path, width, height) {
+  try {
+    const px = (width || 1280) * (height || 900);
+    return statSync(path).size / px < BLANK_BYTES_PER_PIXEL;
+  } catch {
+    // Se non si riesce nemmeno a leggere il file, non e' questo il controllo
+    // che deve dirlo: se ne accorge runVision.
+    return false;
+  }
+}
+
 function runVision(imgPath, question, long) {
   return new Promise((resolve) => {
     // Guard argv flag-smuggling: the vision wrapper treats a leading-dash arg as a
@@ -481,6 +514,22 @@ const methods = {
       const path = join(SHOTS, `${session.name}-${ts}.png`);
       if (p.ref !== undefined) await session.locator(p.ref).screenshot({ path });
       else await session.page.screenshot({ path, fullPage: !!p.fullPage });
+      // fullPage puo' essere molto piu' alto del viewport: senza le dimensioni
+      // vere una pagina lunga e legittima sembrerebbe "vuota" per byte/pixel.
+      const vp = p.fullPage ? null : session.page.viewportSize?.();
+      if (looksBlank(path, vp?.width, vp?.height)) {
+        return {
+          path,
+          vision: "SCHERMATA VUOTA: lo screenshot non contiene nulla da leggere " +
+            "(pagina non ancora dipinta, tab in background o render fallito). " +
+            "Non e' stata posta alcuna domanda al modello: su un'immagine vuota " +
+            "risponderebbe comunque, inventando. Attendi il render e ripeti.",
+          backend: "none",
+          ok: false,
+          blank: true,
+          question: p.question || null,
+        };
+      }
       const v = await runVision(path, p.question, p.long);
       return { path, vision: v.text, backend: v.backend, ok: v.ok, question: p.question || null };
     });
