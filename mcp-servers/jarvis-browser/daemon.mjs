@@ -43,9 +43,16 @@ for (const d of [PROFILES, SHOTS, STATES]) mkdirSync(d, { recursive: true });
 try { chmodSync(STATES, 0o700); } catch {}
 
 // Lightweight vision backend for READING screenshots without inlining pixels
-// into the agent's context. Default = the local `moondream` wrapper (Moondream
-// Cloud, ~0.7s, cheap); swap a competitor via JARVIS_VISION_CMD. Returns text.
+// into the agent's context. Default = the local `moondream` wrapper; swap a
+// competitor via JARVIS_VISION_CMD. Returns text.
 const VISION_BIN = process.env.JARVIS_VISION_CMD || join(homedir(), ".claude/jarvis/scripts/moondream");
+// Il timeout era 30s, scelto quando dietro c'era Moondream Cloud (~0.7s a
+// risposta). Da agosto il wrapper cade sul backend LOCALE, che ha due costi che
+// il cloud non aveva: un cold start di ~12s quando il daemon e' stato scaricato
+// per inattivita', e code lunghe fino a 40-60s su certi prompt sfortunati (gia'
+// misurato). Sommati, il PRIMO read_screen dopo una pausa veniva ucciso a meta'
+// e tornava "vision exit null" — un guasto apparente su un backend sano.
+const VISION_TIMEOUT_MS = Number(process.env.JARVIS_VISION_TIMEOUT_MS || 90000);
 function runVision(imgPath, question, long) {
   return new Promise((resolve) => {
     // Guard argv flag-smuggling: the vision wrapper treats a leading-dash arg as a
@@ -63,7 +70,7 @@ function runVision(imgPath, question, long) {
     try { child = spawn(VISION_BIN, args, { env: process.env }); }
     catch (e) { return resolve({ ok: false, backend: VISION_BIN, text: `vision unavailable: ${e.message}` }); }
     let out = "", err = "";
-    const killer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 30000);
+    const killer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, VISION_TIMEOUT_MS);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
     child.on("error", (e) => { clearTimeout(killer); resolve({ ok: false, backend: VISION_BIN, text: `vision error: ${e.message}` }); });
@@ -381,6 +388,12 @@ const methods = {
         case "scrollTo": await loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT }); break;
         case "back": await session.page.goBack({ waitUntil: "domcontentloaded" }); session.lastSnap = null; break;
         case "wait": await session.page.waitForTimeout(Math.min(p.ms ?? 1000, 10000)); break;
+        case "setInputFiles": {
+          const files = Array.isArray(p.files) ? p.files : [p.files];
+          if (p.selector) await session.page.setInputFiles(p.selector, files, { timeout: ACTION_TIMEOUT });
+          else await loc.setInputFiles(files, { timeout: ACTION_TIMEOUT });
+          break;
+        }
         default: throw new Error(`unknown action: ${a}`);
       }
       const obs = await session.observe({ incremental: true, max: p.max });
