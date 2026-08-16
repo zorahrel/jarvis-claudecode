@@ -94,3 +94,4 @@ mcp-needs-auth-cache*.json
 *token*.json
 *credential*.json
 relocated-mcp/
+bin-ocr-vision
