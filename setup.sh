@@ -180,7 +180,12 @@ fi
 if [ -n "$MD_VENV" ] && [ -x "$MD_VENV/bin/pip" ]; then
   # shellcheck disable=SC1091
   source "$MD_VENV/bin/activate"
-  if ! python -c "import moondream_station" 2>/dev/null; then
+  # La guardia deve controllare TORCH, non solo moondream_station: un venv che
+  # ha il package ma non torch e' esattamente lo stato rotto del 16/08/2026 (il
+  # server parte, ascolta su :2020 e fallisce ogni inferenza). Controllando solo
+  # moondream_station questo setup.sh direbbe "already installed" e lascerebbe
+  # la vision morta per sempre.
+  if ! python -c "import moondream_station, torch" 2>/dev/null; then
     info "installing moondream-station + runtime deps (≈2 min)"
     pip install --quiet --upgrade pip
     # torch NON e' una dipendenza dichiarata di moondream-station ma il backend
@@ -197,6 +202,17 @@ if [ -n "$MD_VENV" ] && [ -x "$MD_VENV/bin/pip" ]; then
     skip "moondream-station already installed"
   fi
   deactivate
+
+  # Un servizio che apre la porta non e' un servizio che risponde: l'unico
+  # health check che vale e' una inferenza vera. Se la Station e' su, la
+  # esercitiamo davvero invece di fidarci del LISTEN.
+  if curl -sS -m 2 -o /dev/null http://127.0.0.1:2020/docs 2>/dev/null; then
+    if "$HOME/.claude/jarvis/scripts/moondream" --selftest >/dev/null 2>&1; then
+      ok "moondream vision live (inferenza verificata)"
+    else
+      warn "Station risponde su :2020 ma l'inferenza fallisce — controlla logs/moondream-error.log"
+    fi
+  fi
 
   info "first boot of com.jarvis.moondream will download Moondream 2 (~1-2 GB)"
 fi

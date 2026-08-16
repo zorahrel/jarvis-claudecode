@@ -11,6 +11,8 @@
 #                                            # query sul ritaglio — USARE per soggetti
 #                                            # piccoli in scene ampie/neon (il full-frame
 #                                            # confonde il modello)
+#   moondream --selftest                     # health check: inferenza di cui si
+#                                            # conosce la risposta (exit 0 = vede)
 #
 # <image> = path locale, http(s) URL, o `-` per leggere base64/dataurl da stdin.
 # Output: testo plain su stdout, errori su stderr (exit code != 0).
@@ -75,8 +77,37 @@ if [[ "$BACKEND" == "cloud" && -z "${MOONDREAM_API_KEY:-}" ]]; then
 fi
 
 if [[ $# -lt 1 ]]; then
-  sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//' >&2
+  # L'help e' il blocco di commento fino alla prima riga vuota commentata: un
+  # range di righe fisso (era `3,12p`) si tronca in silenzio ogni volta che si
+  # aggiunge un'opzione, ed e' gia' successo con --selftest.
+  sed -n '3,/^#$/p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 64
+fi
+
+# --selftest: genera un'immagine nota e verifica che la RISPOSTA sia giusta.
+# Un `curl /docs` che torna 200 dice solo che la porta e' aperta — il 16/08/2026
+# il server ascoltava su :2020 e falliva ogni inferenza per torch mancante.
+# L'unico health check che vale e' un'inferenza di cui si conosce la risposta.
+if [[ "$1" == "--selftest" ]]; then
+  SELFIMG="$(mktemp -t moondream-selftest.XXXXXX).png"
+  trap 'rm -f "$SELFIMG"' EXIT
+  python3 - "$SELFIMG" <<'PYEOF' || { echo "moondream selftest: impossibile generare l'immagine (manca Pillow?)" >&2; exit 3; }
+import sys
+from PIL import Image, ImageDraw
+img = Image.new("RGB", (320, 200), "white")
+ImageDraw.Draw(img).ellipse((60, 40, 260, 160), fill="red")
+img.save(sys.argv[1])
+PYEOF
+  ANSWER=$("$0" "$SELFIMG" "What color is the shape? Answer with one word." 2>&1) || {
+    echo "moondream selftest: inferenza fallita — $ANSWER" >&2
+    exit 1
+  }
+  if [[ "${ANSWER,,}" == *red* ]]; then
+    echo "moondream selftest OK (backend risponde e vede: '${ANSWER}')"
+    exit 0
+  fi
+  echo "moondream selftest: il backend risponde ma NON vede — atteso 'red', ricevuto '${ANSWER}'" >&2
+  exit 1
 fi
 
 IMG="$1"; shift || true
