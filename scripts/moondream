@@ -202,6 +202,50 @@ elif [[ ! -f "$IMG" ]]; then
   exit 66
 fi
 
+# UN'IMMAGINE VUOTA NON PRODUCE "non vedo niente": PRODUCE UNA BUGIA.
+#
+# Misurato il 16/08 su PNG uniformi: "# Global Economic Outlook" (3 volte su 3,
+# identico), "# AI and Machine Learning in Healthcare", "# Advanced Topics in
+# Quantum Mechanics". Titoli plausibili, sicurissimi, zero pixel dietro. Il
+# modello non sbaglia a leggere: genera la continuazione piu' probabile, che e'
+# esattamente il suo mestiere. Un'immagine vuota per lui non e' un errore.
+#
+# Perche' qui e non solo nel daemon del browser: la stessa allucinazione arriva
+# da `vis ask`, dagli script di QA e da qualunque cosa chiami questo wrapper.
+# La difesa va dove passa OGNI chiamata, altrimenti si protegge un chiamante e
+# si lasciano scoperti gli altri.
+#
+# Soglia MISURATA, non stimata (byte per pixel, PNG uniformi si comprimono a
+# nulla): 0.0010 bianco puro · 0.0046 about:blank · 0.0154 example.com, la
+# pagina vera piu' spoglia · 0.2960 una landing con grafica. 0.008 sta in mezzo
+# ai due casi vicini. Nel dubbio si lascia passare: un falso "vuoto" toglie una
+# capacita', un falso "pieno" mente. Disattivabile con MOONDREAM_ALLOW_BLANK=1
+# per chi vuole davvero interrogare una tinta piatta.
+if [[ "${MOONDREAM_ALLOW_BLANK:-0}" != "1" ]]; then
+  BLANK=$(python3 - "$IMG" <<'PYEOF' 2>/dev/null || echo "no"
+import sys, os
+try:
+    from PIL import Image
+    with Image.open(sys.argv[1]) as im:
+        w, h = im.size
+    bpp = os.path.getsize(sys.argv[1]) / max(1, w * h)
+    # I JPEG hanno un minimo strutturale di header e tabelle di quantizzazione
+    # che li tiene sopra la soglia: il test vale sui formati senza perdita, e
+    # su un JPEG si preferisce non dire nulla piuttosto che sbagliare.
+    fmt = os.path.splitext(sys.argv[1])[1].lower()
+    print("si" if bpp < 0.008 and fmt in (".png", ".webp", ".gif") else "no")
+except Exception:
+    print("no")
+PYEOF
+)
+  if [[ "$BLANK" == "si" ]]; then
+    echo "moondream: IMMAGINE VUOTA — $IMG non contiene nulla da leggere." >&2
+    echo "  Nessuna domanda posta al modello: su un'immagine vuota risponderebbe" >&2
+    echo "  lo stesso, inventando (misurato). Se e' voluto: MOONDREAM_ALLOW_BLANK=1" >&2
+    exit 3
+  fi
+fi
+
 EXT="${IMG##*.}"
 # `${VAR,,}` e' bash 4+, ma `#!/usr/bin/env bash` su macOS puo' risolvere al bash
 # 3.2 di sistema (quello in /bin): li' e' un errore di sintassi, e lo script
