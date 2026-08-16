@@ -93,6 +93,34 @@ if [[ $# -lt 1 ]]; then
   exit 64
 fi
 
+# --which: CHI risponderebbe adesso, senza guardare nessuna immagine.
+#
+# Serve a chi tara delle soglie sulle letture di un modello. Il 16/08 il gate
+# visivo di procedural-monsters-demo girava contro moondream2 credendo di
+# parlare con Moondream 3 (cloud, chiave revocata dall'08/08): stesso comando,
+# stessa CLI, stesso formato di risposta, giudice diverso. Le bande di
+# visual-spec.js sono tarate sul jitter di MD3, quindi il verdetto era
+# sistematicamente storto senza che nulla fallisse. Un guasto lo si vede; una
+# SOSTITUZIONE silenziosa no, se non c'e' un modo di chiedere «chi sei».
+if [[ "$1" == "--which" ]]; then
+  if [[ "$BACKEND" == "local" ]]; then
+    # La Station su /v1/models elenca il CATALOGO, non chi e' caricato: il
+    # modello vivo e' quello scritto nel config da chi ha avviato il server.
+    CUR=$(python3 -c 'import json,os
+p = os.path.expanduser("~/.moondream-station/config.json")
+try:
+    print(json.load(open(p)).get("current_model", "sconosciuto"))
+except Exception:
+    print("sconosciuto")' 2>/dev/null)
+    echo "backend: local (${MD_LOCAL_URL})"
+    echo "modello: ${CUR:-sconosciuto}"
+  else
+    echo "backend: cloud (api.moondream.ai)"
+    echo "modello: moondream-3-preview"
+  fi
+  exit 0
+fi
+
 # --selftest: genera un'immagine nota e verifica che la RISPOSTA sia giusta.
 # Un `curl /docs` che torna 200 dice solo che la porta e' aperta — il 16/08/2026
 # il server ascoltava su :2020 e falliva ogni inferenza per torch mancante.
