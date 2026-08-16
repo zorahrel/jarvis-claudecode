@@ -41,6 +41,15 @@ md_local_up() { curl -sS -m 2 -o /dev/null "${MD_LOCAL_URL}/docs" 2>/dev/null; }
 md_local_registered() {
   launchctl print "gui/$(id -u)/com.jarvis.moondream" >/dev/null 2>&1
 }
+# Il daemon esce da solo dopo MOONDREAM_IDLE minuti senza richieste: tiene 5.6GB
+# residenti, e lasciarlo caldo per giorni vuol dire pagare un sesto di un Mac da
+# 32GB per non rispondere a niente. Uscendo pulito (exit 0 con KeepAlive
+# SuccessfulExit=false) launchd NON lo rimette su: tocca a noi riaccenderlo.
+md_kick_local() {
+  md_local_registered || return 1
+  launchctl kickstart "gui/$(id -u)/com.jarvis.moondream" >/dev/null 2>&1 || return 1
+  return 0
+}
 md_wait_local() {
   local deadline=$(( SECONDS + ${MOONDREAM_WAIT:-25} ))
   while (( SECONDS < deadline )); do
@@ -53,7 +62,7 @@ md_wait_local() {
 BACKEND="${MOONDREAM_BACKEND:-auto}"
 case "$BACKEND" in
   local)
-    md_local_up || md_wait_local || {
+    md_local_up || { md_kick_local; md_wait_local; } || {
       echo "moondream: Station locale non pronta su ${MD_LOCAL_URL} (backend=local forzato)" >&2
       exit 2
     }
@@ -62,7 +71,7 @@ case "$BACKEND" in
   auto)
     if md_local_up; then
       BACKEND="local"
-    elif md_local_registered && md_wait_local; then
+    elif md_kick_local && md_wait_local; then
       BACKEND="local"
     else
       BACKEND="cloud"
@@ -102,7 +111,7 @@ PYEOF
     echo "moondream selftest: inferenza fallita — $ANSWER" >&2
     exit 1
   }
-  if [[ "${ANSWER,,}" == *red* ]]; then
+  if [[ "$(printf '%s' "$ANSWER" | tr '[:upper:]' '[:lower:]')" == *red* ]]; then
     echo "moondream selftest OK (backend risponde e vede: '${ANSWER}')"
     exit 0
   fi
@@ -166,7 +175,11 @@ elif [[ ! -f "$IMG" ]]; then
 fi
 
 EXT="${IMG##*.}"
-case "${EXT,,}" in
+# `${VAR,,}` e' bash 4+, ma `#!/usr/bin/env bash` su macOS puo' risolvere al bash
+# 3.2 di sistema (quello in /bin): li' e' un errore di sintassi, e lo script
+# moriva con "bad substitution" invece di guardare l'immagine. tr e' portabile.
+EXT_LC=$(printf '%s' "$EXT" | tr '[:upper:]' '[:lower:]')
+case "$EXT_LC" in
   jpg|jpeg) MIME="image/jpeg" ;;
   png)      MIME="image/png" ;;
   gif)      MIME="image/gif" ;;
