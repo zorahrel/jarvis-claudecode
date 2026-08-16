@@ -183,9 +183,14 @@ if [ -n "$MD_VENV" ] && [ -x "$MD_VENV/bin/pip" ]; then
   if ! python -c "import moondream_station" 2>/dev/null; then
     info "installing moondream-station + runtime deps (≈2 min)"
     pip install --quiet --upgrade pip
+    # torch NON e' una dipendenza dichiarata di moondream-station ma il backend
+    # moondream-2 lo carica via AutoModelForCausalLM: senza, il server parte,
+    # ascolta su :2020 e fallisce OGNI inferenza con "requires the PyTorch
+    # library" (16/08/2026 — il venv era installato ma la vision era morta).
     pip install --quiet \
       moondream-station \
       "transformers>=4.56,<5.0" \
+      torch torchvision accelerate einops pillow \
       pydantic packaging fastapi uvicorn requests
     ok "moondream-station installed"
   else

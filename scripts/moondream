@@ -7,19 +7,70 @@
 #   moondream <image> "domanda libera"      # visual query
 #   moondream <image> --detect "oggetto"    # bounding boxes
 #   moondream <image> --point  "oggetto"    # punti
+#   moondream <image> "domanda" --focus "soggetto"  # detect+crop il soggetto, poi
+#                                            # query sul ritaglio — USARE per soggetti
+#                                            # piccoli in scene ampie/neon (il full-frame
+#                                            # confonde il modello)
 #
 # <image> = path locale, http(s) URL, o `-` per leggere base64/dataurl da stdin.
 # Output: testo plain su stdout, errori su stderr (exit code != 0).
 #
-# Richiede MOONDREAM_API_KEY (letta da env o da ~/.claude/jarvis/router/.env).
+# Backend: Moondream Station locale su http://127.0.0.1:2020 se risponde,
+# altrimenti Moondream Cloud con MOONDREAM_API_KEY (env o
+# ~/.claude/jarvis/router/.env). Forzabile con MOONDREAM_BACKEND=local|cloud.
 
 set -euo pipefail
+
+MD_LOCAL_URL="${MOONDREAM_LOCAL_URL:-http://127.0.0.1:2020}"
 
 if [[ -z "${MOONDREAM_API_KEY:-}" && -f "$HOME/.claude/jarvis/router/.env" ]]; then
   MOONDREAM_API_KEY="$(grep -E '^MOONDREAM_API_KEY=' "$HOME/.claude/jarvis/router/.env" | head -1 | cut -d= -f2-)"
 fi
-if [[ -z "${MOONDREAM_API_KEY:-}" ]]; then
-  echo "moondream: MOONDREAM_API_KEY not set (and not in ~/.claude/jarvis/router/.env)" >&2
+
+# Il backend si sceglie PRIMA di leggere l'immagine: sapere subito che nessun
+# backend e' vivo evita di codificare in base64 un file per poi fallire.
+md_local_up() { curl -sS -m 2 -o /dev/null "${MD_LOCAL_URL}/docs" 2>/dev/null; }
+
+# La Station ci mette ~15s a diventare pronta dopo un boot/riavvio di launchd.
+# Senza questa attesa `auto` in quella finestra cade sulla cloud — che oggi e'
+# revocata — e l'utente si vede un 401 con il backend buono che stava partendo.
+# Aspettiamo solo se il servizio esiste davvero: se non e' caricato in launchd
+# non c'e' niente da aspettare e si passa subito alla cloud.
+md_local_registered() {
+  launchctl print "gui/$(id -u)/com.jarvis.moondream" >/dev/null 2>&1
+}
+md_wait_local() {
+  local deadline=$(( SECONDS + ${MOONDREAM_WAIT:-25} ))
+  while (( SECONDS < deadline )); do
+    md_local_up && return 0
+    sleep 2
+  done
+  return 1
+}
+
+BACKEND="${MOONDREAM_BACKEND:-auto}"
+case "$BACKEND" in
+  local)
+    md_local_up || md_wait_local || {
+      echo "moondream: Station locale non pronta su ${MD_LOCAL_URL} (backend=local forzato)" >&2
+      exit 2
+    }
+    ;;
+  cloud) ;;
+  auto)
+    if md_local_up; then
+      BACKEND="local"
+    elif md_local_registered && md_wait_local; then
+      BACKEND="local"
+    else
+      BACKEND="cloud"
+    fi
+    ;;
+  *) echo "moondream: MOONDREAM_BACKEND non valido: $BACKEND (local|cloud|auto)" >&2; exit 2 ;;
+esac
+
+if [[ "$BACKEND" == "cloud" && -z "${MOONDREAM_API_KEY:-}" ]]; then
+  echo "moondream: nessun backend disponibile — Station locale giu' su ${MD_LOCAL_URL} e MOONDREAM_API_KEY non impostata" >&2
   exit 2
 fi
 
@@ -33,14 +84,38 @@ MODE="caption"
 LENGTH="short"
 QUERY=""
 
+FOCUS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -l|--long) LENGTH="long"; shift ;;
     --detect)  MODE="detect"; QUERY="${2:-}"; shift 2 ;;
     --point)   MODE="point";  QUERY="${2:-}"; shift 2 ;;
+    --focus)   FOCUS="${2:-}"; shift 2 ;;
     *)         MODE="query";  QUERY="$1"; shift ;;
   esac
 done
+
+# --focus "subject": small subjects in busy/wide scenes confuse the model —
+# detect the subject first, crop it (with margin), then run the query/caption
+# on the crop. Two API calls, still ~1.5s total.
+if [[ -n "$FOCUS" && -f "${IMG:-}" ]]; then
+  BBOX=$("$0" "$IMG" --detect "$FOCUS" | jq -r '.objects[0] // empty | "\(.x_min) \(.y_min) \(.x_max) \(.y_max)"')
+  if [[ -n "$BBOX" ]]; then
+    CROP="$(mktemp -t moondream-focus.XXXXXX).png"
+    trap 'rm -f "$CROP"' EXIT
+    read -r X0 Y0 X1 Y1 <<<"$BBOX"
+    python3 - "$IMG" "$CROP" "$X0" "$Y0" "$X1" "$Y1" <<'PYEOF'
+import sys
+from PIL import Image
+img = Image.open(sys.argv[1]); W, H = img.size
+x0, y0, x1, y1 = (float(v) for v in sys.argv[3:7])
+x0, y0, x1, y1 = x0 * W, y0 * H, x1 * W, y1 * H
+mx, my = (x1 - x0) * 0.3, (y1 - y0) * 0.3
+img.crop((max(0, x0 - mx), max(0, y0 - my), min(W, x1 + mx), min(H, y1 + my))).convert('RGB').save(sys.argv[2])
+PYEOF
+    IMG="$CROP"
+  fi
+fi
 
 # Resolve image → data URL or http(s) URL passthrough
 if [[ "$IMG" == http://* || "$IMG" == https://* ]]; then
@@ -97,10 +172,52 @@ case "$MODE" in
     ;;
 esac
 
-RESP=$(curl -sS -X POST "https://api.moondream.ai${ENDPOINT}" \
-  -H "X-Moondream-Auth: ${MOONDREAM_API_KEY}" \
-  -H "Content-Type: application/json" \
-  --data-binary "@-" <<<"$PAYLOAD")
+if [[ "$BACKEND" == "local" ]]; then
+  RAW=$(curl -sS -w $'\n%{http_code}' -m "${MOONDREAM_TIMEOUT:-180}" -X POST "${MD_LOCAL_URL}${ENDPOINT}" \
+    -H "Content-Type: application/json" \
+    --data-binary "@-" <<<"$PAYLOAD")
+else
+  RAW=$(curl -sS -w $'\n%{http_code}' -X POST "https://api.moondream.ai${ENDPOINT}" \
+    -H "X-Moondream-Auth: ${MOONDREAM_API_KEY}" \
+    -H "Content-Type: application/json" \
+    --data-binary "@-" <<<"$PAYLOAD")
+fi
+HTTP="${RAW##*$'\n'}"
+RESP="${RAW%$'\n'*}"
+
+# Un errore dell'API NON deve uscire su stdout come se fosse una didascalia.
+# I JQFILTER qui sopra fanno `.caption // .error`, quindi un 401 finiva sullo
+# stesso canale di una descrizione, con exit 0 — e l'hook read-image-to-moondream
+# tratta "exit 0 + stdout non vuoto" come lettura riuscita: il modello si vedeva
+# consegnare la parola "Unauthorized" come CONTENUTO dell'immagine, senza alcun
+# modo di accorgersene (08/08/2026, chiave revocata lato server). Gli errori
+# vanno su stderr con exit non-zero — che e' anche il contratto dichiarato
+# nell'header di questo script — cosi' l'hook cade sul Read nativo di Claude
+# invece di negare la lettura.
+API_ERR=""
+if command -v jq >/dev/null 2>&1; then
+  API_ERR=$(jq -r 'if type=="object" then (.error // empty) else empty end' <<<"$RESP" 2>/dev/null || true)
+fi
+if [[ -n "$API_ERR" ]] || [[ "$HTTP" =~ ^[45] ]]; then
+  # Il locale e' su ma questa richiesta e' fallita: la cloud puo' ancora
+  # salvarla. Solo in auto — con un backend forzato l'errore resta l'errore.
+  if [[ "$BACKEND" == "local" && "${MOONDREAM_BACKEND:-auto}" == "auto" && -n "${MOONDREAM_API_KEY:-}" ]]; then
+    RAW=$(curl -sS -w $'\n%{http_code}' -X POST "https://api.moondream.ai${ENDPOINT}" \
+      -H "X-Moondream-Auth: ${MOONDREAM_API_KEY}" \
+      -H "Content-Type: application/json" \
+      --data-binary "@-" <<<"$PAYLOAD")
+    HTTP="${RAW##*$'\n'}"
+    RESP="${RAW%$'\n'*}"
+    API_ERR=""
+    if command -v jq >/dev/null 2>&1; then
+      API_ERR=$(jq -r 'if type=="object" then (.error // empty) else empty end' <<<"$RESP" 2>/dev/null || true)
+    fi
+  fi
+fi
+if [[ -n "$API_ERR" ]] || [[ "$HTTP" =~ ^[45] ]]; then
+  echo "moondream: ${API_ERR:-errore HTTP $HTTP} (${BACKEND}${ENDPOINT}, HTTP $HTTP)" >&2
+  exit 1
+fi
 
 if command -v jq >/dev/null 2>&1; then
   echo "$RESP" | jq -r "$JQFILTER"
