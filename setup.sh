@@ -217,6 +217,44 @@ if [ -n "$MD_VENV" ] && [ -x "$MD_VENV/bin/pip" ]; then
   info "first boot of com.jarvis.moondream will download Moondream 2 (~1-2 GB)"
 fi
 
+# --- 3b. CLI locali (vis, psj) ----------------------------------------------
+# Vivono nel repo e si raggiungono da ~/.local/bin via symlink, come moondream:
+# il sorgente sta sotto git, il PATH vede un nome corto. Senza questo passo la
+# cassetta visiva esiste solo sulla macchina dove e' stata scritta.
+step "Linking local CLIs (vis, psj)"
+mkdir -p "$HOME/.local/bin"
+for cli in vis psj; do
+  src="$HOME/.claude/jarvis/scripts/$cli/$cli"
+  dst="$HOME/.local/bin/$cli"
+  if [ ! -f "$src" ]; then
+    warn "$cli non trovato in $src"
+    continue
+  fi
+  chmod +x "$src"
+  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+    skip "$cli already linked"
+  else
+    ln -sf "$src" "$dst"
+    ok "$cli -> ~/.local/bin/$cli"
+  fi
+done
+# L'OCR nativo e' un binario Swift compilato: non sta in git (si ricostruisce
+# in 2s) e senza questo `vis ocr` fallirebbe finche' nessuno chiama `vis doctor`.
+if [ -f "$HOME/.claude/jarvis/scripts/vis/ocr-vision.swift" ] && command -v swiftc >/dev/null 2>&1; then
+  if [ -x "$HOME/.claude/jarvis/scripts/vis/bin-ocr-vision" ]; then
+    skip "OCR Vision already built"
+  elif swiftc -O "$HOME/.claude/jarvis/scripts/vis/ocr-vision.swift" \
+       -o "$HOME/.claude/jarvis/scripts/vis/bin-ocr-vision" 2>/dev/null; then
+    ok "OCR Vision compiled (Apple Vision, zero deps)"
+  else
+    warn "OCR Vision non compilato — esegui 'vis doctor' dopo aver installato Xcode CLT"
+  fi
+fi
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) : ;;
+  *) warn "~/.local/bin non e' nel PATH — aggiungilo a ~/.zshrc" ;;
+esac
+
 # --- 4. Config files ---------------------------------------------------------
 step "Creating config files"
 if [ -f "$ROUTER/.env" ]; then
