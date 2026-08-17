@@ -28,6 +28,16 @@ MD_LOCAL_URL="${MOONDREAM_LOCAL_URL:-http://127.0.0.1:2020}"
 if [[ -z "${MOONDREAM_API_KEY:-}" && -f "$HOME/.claude/jarvis/router/.env" ]]; then
   MOONDREAM_API_KEY="$(grep -E '^MOONDREAM_API_KEY=' "$HOME/.claude/jarvis/router/.env" | head -1 | cut -d= -f2-)"
 fi
+# PIU' CHIAVI = PIU' CREDITO GRATUITO, ma solo se sono di ORG DIVERSI: i $5
+# mensili sono per organizzazione, non per chiave, quindi due chiavi dello
+# stesso org non sommano niente (verificato leggendo org_id dal payload JWT).
+# MOONDREAM_API_KEY resta la principale; le altre vanno in MOONDREAM_API_KEYS
+# separate da virgola e si usano SOLO quando la principale esaurisce il credito
+# o viene rifiutata. Non e' bilanciamento: e' una scorta, e si consuma un org
+# alla volta cosi' il conto resta leggibile.
+if [[ -z "${MOONDREAM_API_KEYS:-}" && -f "$HOME/.claude/jarvis/router/.env" ]]; then
+  MOONDREAM_API_KEYS="$(grep -E '^MOONDREAM_API_KEYS=' "$HOME/.claude/jarvis/router/.env" | head -1 | cut -d= -f2-)"
+fi
 
 # Il backend si sceglie PRIMA di leggere l'immagine: sapere subito che nessun
 # backend e' vivo evita di codificare in base64 un file per poi fallire.
@@ -293,10 +303,29 @@ if [[ "$BACKEND" == "local" ]]; then
     -H "Content-Type: application/json" \
     --data-binary "@-" <<<"$PAYLOAD")
 else
-  RAW=$(curl -sS -w $'\n%{http_code}' -X POST "https://api.moondream.ai${ENDPOINT}" \
-    -H "X-Moondream-Auth: ${MOONDREAM_API_KEY}" \
-    -H "Content-Type: application/json" \
-    --data-binary "@-" <<<"$PAYLOAD")
+  # La principale, poi la scorta. Si passa alla chiave dopo SOLO su un rifiuto
+  # di credenziale o di credito (401/402/403/429): un 500 o un timeout sono
+  # guasti del servizio, e riprovarli con un'altra chiave brucerebbe il credito
+  # di un secondo org per lo stesso motivo.
+  md_cloud_call() {
+    curl -sS -w $'\n%{http_code}' -m "${MOONDREAM_TIMEOUT:-180}" -X POST "https://api.moondream.ai${ENDPOINT}" \
+      -H "X-Moondream-Auth: $1" \
+      -H "Content-Type: application/json" \
+      --data-binary "@-" <<<"$PAYLOAD"
+  }
+  RAW=$(md_cloud_call "${MOONDREAM_API_KEY}")
+  CODE_TRY="${RAW##*$'\n'}"
+  if [[ "$CODE_TRY" =~ ^(401|402|403|429)$ && -n "${MOONDREAM_API_KEYS:-}" ]]; then
+    IFS=',' read -r -a MD_SPARE <<< "$MOONDREAM_API_KEYS"
+    for k in "${MD_SPARE[@]}"; do
+      k="${k//[[:space:]]/}"
+      [[ -z "$k" || "$k" == "${MOONDREAM_API_KEY}" ]] && continue
+      echo "moondream: chiave principale rifiutata ($CODE_TRY), passo alla scorta" >&2
+      RAW=$(md_cloud_call "$k")
+      CODE_TRY="${RAW##*$'\n'}"
+      [[ "$CODE_TRY" =~ ^(401|402|403|429)$ ]] || break
+    done
+  fi
 fi
 HTTP="${RAW##*$'\n'}"
 RESP="${RAW%$'\n'*}"

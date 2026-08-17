@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# moondream-key — installa e VERIFICA una chiave Moondream Cloud.
+#
+# Perche' esiste: il 16/08 la chiave in clipboard era identica a quella gia'
+# revocata dall'08 (iat 2026-05-03), copiata da .env invece che rigenerata. Una
+# chiave si INSTALLA solo dopo che ha risposto: scriverla in .env e scoprire
+# dopo che e' morta significa avere di nuovo un backend che sembra configurato
+# e non funziona.
+#
+#   moondream-key                 legge la chiave dalla clipboard
+#   moondream-key <chiave>        la passa esplicitamente
+#   moondream-key --check         verifica solo quella gia' installata
+#
+# Rigenerarla: https://moondream.ai/c/cloud/api-keys
+set -uo pipefail
+
+ENV_FILE="$HOME/.claude/jarvis/router/.env"
+CONSOLE="https://moondream.ai/c/cloud/api-keys"
+
+die() { echo "moondream-key: $*" >&2; exit 1; }
+
+# Un'immagine di verita' nota: se la risposta non e' 'red' la chiave e' viva ma
+# il servizio risponde male, che e' un caso diverso da 'non autorizzato'.
+make_probe() {
+  local out="$1"
+  python3 - "$out" <<'PY' 2>/dev/null || return 1
+import sys
+from PIL import Image, ImageDraw
+img = Image.new("RGB", (320, 200), "white")
+ImageDraw.Draw(img).ellipse((60, 40, 260, 160), fill="red")
+img.save(sys.argv[1])
+PY
+}
+
+key_age() {
+  # Il payload di un JWT non e' un segreto: dice quando la chiave e' nata, che
+  # e' l'unico modo per accorgersi di aver incollato di nuovo quella vecchia.
+  printf '%s' "$1" | cut -d. -f2 | python3 -c '
+import sys, base64, json, datetime
+s = sys.stdin.read().strip()
+s += "=" * (-len(s) % 4)
+try:
+    d = json.loads(base64.urlsafe_b64decode(s))
+    iat = d.get("iat")
+    print(f"{datetime.datetime.fromtimestamp(iat):%Y-%m-%d}" if iat else "?")
+except Exception:
+    print("?")
+' 2>/dev/null
+}
+
+probe() {
+  local key="$1" img
+  img="$(mktemp -t md-probe).png"
+  trap 'rm -f "$img"' RETURN
+  make_probe "$img" || die "non riesco a generare l'immagine di prova (manca Pillow?)"
+  local b64 resp
+  b64=$(base64 < "$img" | tr -d '\n')
+  resp=$(curl -sS -m 60 -X POST https://api.moondream.ai/v1/query \
+    -H "X-Moondream-Auth: $key" -H "Content-Type: application/json" \
+    -d "{\"image_url\":\"data:image/png;base64,${b64}\",\"question\":\"What color is the shape? One word.\",\"stream\":false}" 2>&1)
+  printf '%s' "$resp"
+}
+
+MODE="install"
+[[ "${1:-}" == "--check" ]] && MODE="check"
+
+if [[ "$MODE" == "check" ]]; then
+  KEY=$(grep -E '^MOONDREAM_API_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+  [[ -z "$KEY" ]] && die "nessuna chiave in $ENV_FILE"
+else
+  KEY="${1:-$(pbpaste 2>/dev/null | tr -d '[:space:]')}"
+  [[ -z "$KEY" ]] && die "nessuna chiave (clipboard vuota). Rigenerala su $CONSOLE"
+  [[ "$KEY" == eyJ* ]] || die "non sembra una chiave Moondream (attesa una JWT che inizia per 'eyJ')"
+
+  OLD=$(grep -E '^MOONDREAM_API_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+  if [[ -n "$OLD" && "$KEY" == "$OLD" ]]; then
+    echo "moondream-key: questa e' GIA' la chiave installata (nata il $(key_age "$KEY"))." >&2
+    echo "  Se il backend dava 401, ricopiarla non cambia nulla: va RIGENERATA." >&2
+    echo "  $CONSOLE" >&2
+    exit 2
+  fi
+fi
+
+echo "chiave nata il: $(key_age "$KEY")"
+echo "verifico contro api.moondream.ai ..."
+RESP=$(probe "$KEY")
+
+if printf '%s' "$RESP" | grep -qi "unauthorized\|invalid\|forbidden"; then
+  echo "RIFIUTATA dal servizio: $(printf '%s' "$RESP" | head -c 120)" >&2
+  echo "  Non la installo: una chiave morta in .env fa sembrare configurato un backend che non risponde." >&2
+  echo "  Rigenerala su $CONSOLE" >&2
+  exit 1
+fi
+
+ANSWER=$(printf '%s' "$RESP" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("answer",""))
+except Exception: print("")' 2>/dev/null)
+
+if ! printf '%s' "$ANSWER" | grep -qi red; then
+  echo "RISPONDE MA NON VEDE: atteso 'red', ricevuto '${ANSWER:-vuoto}'" >&2
+  echo "  raw: $(printf '%s' "$RESP" | head -c 160)" >&2
+  exit 1
+fi
+
+echo "OK — il servizio risponde e vede: '$ANSWER'"
+
+if [[ "$MODE" == "check" ]]; then
+  exit 0
+fi
+
+# Solo ora si scrive. Backup con timestamp: .env contiene anche altre chiavi.
+cp "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"
+if grep -qE '^MOONDREAM_API_KEY=' "$ENV_FILE"; then
+  python3 - "$ENV_FILE" "$KEY" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); key = sys.argv[2]
+out = []
+for line in p.read_text().splitlines():
+    out.append(f"MOONDREAM_API_KEY={key}" if line.startswith("MOONDREAM_API_KEY=") else line)
+p.write_text("\n".join(out) + "\n")
+PY
+else
+  printf 'MOONDREAM_API_KEY=%s\n' "$KEY" >> "$ENV_FILE"
+fi
+chmod 600 "$ENV_FILE"
+echo "installata in $ENV_FILE (backup accanto)"
+echo
+echo "Il wrapper resta su 'auto': usa il locale se e' su, il cloud altrimenti."
+echo "Per forzare il cloud (es. per il gate visivo tarato su Moondream 3):"
+echo "  MOONDREAM_BACKEND=cloud moondream --which"
