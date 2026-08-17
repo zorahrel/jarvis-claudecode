@@ -7,11 +7,20 @@ for launchd / systemd supervision alongside docs-index and OMEGA.
 
 Env:
   MOONDREAM_MODEL   model id from the manifest, default 'moondream-2'
-                    (~1.6B params, fits comfortably in 16-32 GB Macs).
-                    Use 'moondream-3-preview-mlx' for higher quality on
-                    48 GB+ Macs; the un-quantized MLX build needs ~30 GB
-                    resident, the INT4 quantized build produced garbage
-                    tokens in our M2 Max testing.
+                    (~1.9B params, 3.6 GB of weights, fits any 16 GB Mac).
+                    'moondream-3-preview-mlx-quantized' PROVATO il 16/08 su
+                    questo Mac da 32 GB: funziona (la nota di maggio sul
+                    "garbage" non vale piu'), grounding equivalente a MD2
+                    (scarto <0.002 sul detect), ma sbaglia i conteggi dove MD2
+                    azzecca, e' 3-5x piu' lento e il processo e' MORTO da solo
+                    con il kernel che uccideva processi per memoria. Il
+                    manifest dichiara 32 GB minimi: su questa macchina e'
+                    esattamente al limite. La build MLX non quantizzata vuole
+                    ~30 GB residenti: praticabile da 64 GB in su.
+                    ATTENZIONE: ~/.moondream-station/config.json e' CONDIVISO —
+                    avviare una seconda istanza con un MOONDREAM_MODEL diverso
+                    riscrive il current_model del servizio vero. Controllare
+                    sempre `moondream --which` dopo un esperimento.
   MOONDREAM_PORT    REST port, default 2020
   MOONDREAM_HOST    bind host, default 127.0.0.1
   MOONDREAM_TIMEOUT inference timeout in seconds, default 180
