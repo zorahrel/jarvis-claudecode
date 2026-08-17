@@ -259,6 +259,14 @@ case "$cmd" in
       pdftoppm -png -r 150 "$F" "$OUT/pagina"
     fi
     N=$(find "$OUT" -name 'pagina*.png' | wc -l | tr -d ' ')
+    # "0 pagine" con exit 0 e' lo stesso difetto del cieco che risponde: chi
+    # incatena questo comando crederebbe di avere le pagine e troverebbe una
+    # cartella vuota. Un PDF da 0 byte, cifrato o corrotto deve FALLIRE.
+    if [[ "$N" -eq 0 ]]; then
+      echo "vis: nessuna pagina estratta da $F" >&2
+      [[ -s "$F" ]] || echo "  il file e' VUOTO (0 byte)" >&2
+      exit 1
+    fi
     echo "$N pagine in: $OUT"
     ;;
 
