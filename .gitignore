@@ -5,6 +5,12 @@ dist/
 # Secrets
 .env
 router/.env
+# I backup del .env: stessa roba, altro nome. Un `git add -A` li raccoglieva
+# perche' la regola sopra e' per nome esatto, e questo repo e' PUBBLICO.
+.env.*
+*.env.bak*
+**/.env.bak*
+**/*.env.bak*
 
 # Personal data (create your own from examples)
 config.yaml
