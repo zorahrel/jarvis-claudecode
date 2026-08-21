@@ -334,6 +334,25 @@ Jarvis Claude Code orchestrates the **Claude Code CLI**, which is a commercial p
 
 None of this is legal advice — it's the same operational discipline the maintainer applies. When in doubt, read the upstream policy and ask a lawyer, not your chatbot.
 
+## The rest of the toolchain
+
+Jarvis does not run alone. These are separate repositories, each usable on its
+own, that this router leans on:
+
+- **[mcp-hot-gateway](https://github.com/zorahrel/mcp-hot-gateway)** — the single
+  MCP entry point. Mounts and unmounts servers while the agent works, so tools
+  appear without restarting a session. Jarvis configures 18 children through it,
+  most of them parked until needed.
+- **[claude-harness](https://github.com/zorahrel/claude-harness)** — the skills,
+  commands and tools that keep long autonomous runs honest: interrogate the plan
+  before starting, pair every worker with a critic that *runs* the check, and
+  never let "unverified" pass as "done".
+- **[claude-acct-switcher](https://github.com/zorahrel/claude-acct-switcher)** —
+  switching between several Claude MAX accounts without re-authenticating by hand.
+- **[agent-conductor](https://github.com/zorahrel/agent-conductor)** and
+  **[agent-notch](https://github.com/zorahrel/agent-notch)** — driving several
+  concurrent agent sessions, and watching them from the MacBook Pro notch.
+
 ## Contributing
 
 This is a personal project, but ideas and patches are welcome. Please open an issue first for anything non-trivial so we can align on scope. Before submitting a PR:
