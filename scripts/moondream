@@ -32,8 +32,15 @@ set -euo pipefail
 
 MD_LOCAL_URL="${MOONDREAM_LOCAL_URL:-http://127.0.0.1:2020}"
 
-if [[ -z "${MOONDREAM_API_KEY:-}" && -f "$HOME/.claude/jarvis/router/.env" ]]; then
-  MOONDREAM_API_KEY="$(grep -E '^MOONDREAM_API_KEY=' "$HOME/.claude/jarvis/router/.env" | head -1 | cut -d= -f2-)"
+# La chiave: env var, oppure un file .env. MOONDREAM_ENV_FILE lo sposta dove
+# vuoi; il default e' ~/.config/moondream/.env, e il secondo path esiste solo
+# perche' e' dove la teneva questa installazione prima che il file diventasse
+# configurabile.
+MD_ENV_FILE="${MOONDREAM_ENV_FILE:-$HOME/.config/moondream/.env}"
+[[ -f "$MD_ENV_FILE" ]] || MD_ENV_FILE="$HOME/.claude/jarvis/router/.env"
+
+if [[ -z "${MOONDREAM_API_KEY:-}" && -f "$MD_ENV_FILE" ]]; then
+  MOONDREAM_API_KEY="$(grep -E '^MOONDREAM_API_KEY=' "$MD_ENV_FILE" | head -1 | cut -d= -f2- || true)"
 fi
 # PIU' CHIAVI = PIU' CREDITO GRATUITO, ma solo se sono di ORG DIVERSI: i $5
 # mensili sono per organizzazione, non per chiave, quindi due chiavi dello
@@ -42,8 +49,11 @@ fi
 # separate da virgola e si usano SOLO quando la principale esaurisce il credito
 # o viene rifiutata. Non e' bilanciamento: e' una scorta, e si consuma un org
 # alla volta cosi' il conto resta leggibile.
-if [[ -z "${MOONDREAM_API_KEYS:-}" && -f "$HOME/.claude/jarvis/router/.env" ]]; then
-  MOONDREAM_API_KEYS="$(grep -E '^MOONDREAM_API_KEYS=' "$HOME/.claude/jarvis/router/.env" | head -1 | cut -d= -f2-)"
+# `|| true`: con set -e un grep che non trova la riga fa uscire lo script in
+# silenzio, exit 1 e nessun messaggio. La scorta e' facoltativa per
+# definizione, quindi la sua assenza non e' un errore. Stessa cura sopra.
+if [[ -z "${MOONDREAM_API_KEYS:-}" && -f "$MD_ENV_FILE" ]]; then
+  MOONDREAM_API_KEYS="$(grep -E '^MOONDREAM_API_KEYS=' "$MD_ENV_FILE" | head -1 | cut -d= -f2- || true)"
 fi
 
 # Il backend si sceglie PRIMA di leggere l'immagine: sapere subito che nessun
