@@ -17,9 +17,16 @@
 # <image> = path locale, http(s) URL, o `-` per leggere base64/dataurl da stdin.
 # Output: testo plain su stdout, errori su stderr (exit code != 0).
 #
-# Backend: Moondream Station locale su http://127.0.0.1:2020 se risponde,
-# altrimenti Moondream Cloud con MOONDREAM_API_KEY (env o
-# ~/.claude/jarvis/router/.env). Forzabile con MOONDREAM_BACKEND=local|cloud.
+# Backend: Moondream CLOUD (api.moondream.ai) se c'e' una MOONDREAM_API_KEY —
+# env o ~/.claude/jarvis/router/.env — altrimenti la Station locale su
+# http://127.0.0.1:2020. Forzabile con MOONDREAM_BACKEND=local|cloud.
+#
+# Perche' cloud per primo (21/08/2026): la Station locale costa 4.548 MB di
+# footprint, picco 5.579 MB, per rispondere in 2,72s; la cloud risponde in
+# 2,80s occupando zero RAM, con 5.000 richieste/giorno gratis. Sul Mac non si
+# self-hosta niente di pesante quando esiste un cloud gratuito equivalente:
+# quella RAM serve al lavoro vero. Il locale resta la rete di sicurezza per
+# quota esaurita, servizio giu' o assenza di chiave.
 
 set -euo pipefail
 
@@ -79,9 +86,18 @@ case "$BACKEND" in
     ;;
   cloud) ;;
   auto)
-    if md_local_up; then
-      BACKEND="local"
-    elif md_kick_local && md_wait_local; then
+    # CLOUD PRIMA, e non e' una preferenza di gusto: la Station locale tiene
+    # 4.548 MB di footprint (picco 5.579 MB, misurati il 21/08 con `footprint
+    # -p`) per rispondere in 2,72s, mentre la cloud risponde in 2,80s con zero
+    # RAM occupata e 5.000 richieste/giorno gratis. Pagare un settimo di un Mac
+    # da 32GB per 80 millisecondi e' il contrario di un affare, e quella RAM
+    # serve a cio' su cui si sta davvero lavorando.
+    # Il locale resta la RETE DI SICUREZZA: senza chiave, o se la cloud e' giu'
+    # o ha esaurito la quota, si accende lui. Chi lo vuole comunque:
+    # MOONDREAM_BACKEND=local.
+    if [[ -n "${MOONDREAM_API_KEY:-}" ]]; then
+      BACKEND="cloud"
+    elif md_local_up || { md_kick_local && md_wait_local; }; then
       BACKEND="local"
     else
       BACKEND="cloud"
@@ -359,6 +375,31 @@ if [[ -n "$API_ERR" ]] || [[ "$HTTP" =~ ^[45] ]]; then
     fi
   fi
 fi
+
+# E la direzione opposta, che dal 21/08 e' quella che conta: la cloud e' il
+# backend normale, quindi e' lei a poter cadere. Si accende la Station SOLO
+# per quota esaurita o servizio giu' (429/5xx) — un 400 e' una richiesta
+# scritta male e riproporla in locale da' lo stesso errore piu' lentamente.
+# L'avviso su stderr non e' cortesia: sta allocando 4,5 GB sul Mac, e chi
+# legge deve sapere perche' la RAM e' appena sparita.
+if [[ -n "$API_ERR" ]] || [[ "$HTTP" =~ ^[45] ]]; then
+  if [[ "$BACKEND" == "cloud" && "${MOONDREAM_BACKEND:-auto}" == "auto" && "$HTTP" =~ ^(429|5[0-9][0-9])$ ]]; then
+    if md_local_up || { md_kick_local && md_wait_local; }; then
+      echo "moondream: cloud non disponibile (HTTP $HTTP) — accendo la Station locale (~4,5 GB di RAM finche' non va in idle)" >&2
+      RAW=$(curl -sS -w $'\n%{http_code}' -m "${MOONDREAM_TIMEOUT:-180}" -X POST "${MD_LOCAL_URL}${ENDPOINT}" \
+        -H "Content-Type: application/json" \
+        --data-binary "@-" <<<"$PAYLOAD")
+      HTTP="${RAW##*$'\n'}"
+      RESP="${RAW%$'\n'*}"
+      BACKEND="local"
+      API_ERR=""
+      if command -v jq >/dev/null 2>&1; then
+        API_ERR=$(jq -r 'if type=="object" then (.error // empty) else empty end' <<<"$RESP" 2>/dev/null || true)
+      fi
+    fi
+  fi
+fi
+
 if [[ -n "$API_ERR" ]] || [[ "$HTTP" =~ ^[45] ]]; then
   echo "moondream: ${API_ERR:-errore HTTP $HTTP} (${BACKEND}${ENDPOINT}, HTTP $HTTP)" >&2
   exit 1
