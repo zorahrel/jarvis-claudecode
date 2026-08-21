@@ -117,7 +117,8 @@
       "name": "wigolo",
       "transport": "stdio",
       "command": "/opt/homebrew/bin/wigolo",
-      "args": []
+      "args": [],
+      "autoMount": false
     },
     {
       "name": "topics-board",
