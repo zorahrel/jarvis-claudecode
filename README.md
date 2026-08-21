@@ -349,9 +349,11 @@ own, that this router leans on:
   never let "unverified" pass as "done".
 - **[claude-acct-switcher](https://github.com/zorahrel/claude-acct-switcher)** —
   switching between several Claude MAX accounts without re-authenticating by hand.
-- **[agent-conductor](https://github.com/zorahrel/agent-conductor)** and
-  **[agent-notch](https://github.com/zorahrel/agent-notch)** — driving several
-  concurrent agent sessions, and watching them from the MacBook Pro notch.
+- **[agent-notch](https://github.com/zorahrel/agent-notch)** — watching several
+  concurrent agent sessions from the MacBook Pro dynamic notch.
+- **[agent-conductor](https://github.com/zorahrel/agent-conductor)** — driving
+  those sessions from one place. *Archived since June 2026: read-only, kept for
+  reference.*
 
 ## Contributing
 
