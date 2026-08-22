@@ -350,7 +350,8 @@ own, that this router leans on:
 - **[claude-acct-switcher](https://github.com/zorahrel/claude-acct-switcher)** —
   switching between several Claude MAX accounts without re-authenticating by hand.
 - **[agent-notch](https://github.com/zorahrel/agent-notch)** — watching several
-  concurrent agent sessions from the MacBook Pro dynamic notch.
+  concurrent agent sessions from the MacBook Pro dynamic notch. *Not maintained
+  since May 2026: the dashboard on `:3340` already shows the same thing.*
 - **[agent-conductor](https://github.com/zorahrel/agent-conductor)** — driving
   those sessions from one place. *Archived since June 2026: read-only, kept for
   reference.*
