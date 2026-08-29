@@ -28,5 +28,29 @@ command -v brew >/dev/null && brew cleanup --prune=30 2>&1 | tail -1 | sed 's/^/
 find "$HOME/Library/Caches/claude-cli-nodejs" -type d -name "mcp-logs-*" -mtime +14 -exec rm -rf {} + 2>/dev/null
 log "  mcp logs older than 14d pruned"
 
+# 5. npx one-shot packages: npm never expires these, they only pile up.
+python3 - <<'PY' 2>&1 | sed 's/^/  npx: /'
+import os, shutil, time
+d = os.path.expanduser("~/.npm/_npx")
+cut = time.time() - 30 * 86400
+n = freed = 0
+for x in os.listdir(d) if os.path.isdir(d) else []:
+    p = os.path.join(d, x)
+    try:
+        if os.lstat(p).st_mtime >= cut:
+            continue
+    except OSError:
+        continue
+    for rr, _, fs in os.walk(p, onerror=lambda e: None):
+        for f in fs:
+            try:
+                freed += os.lstat(os.path.join(rr, f)).st_size
+            except OSError:
+                pass
+    shutil.rmtree(p, ignore_errors=True)
+    n += 1
+print(f"removed {n} entries older than 30d, {freed/1e9:.2f} GB")
+PY
+
 after=$(df -m / | awk 'NR==2{print $4}')
 log "done, ${after} MB free (freed $((after - before)) MB)"
