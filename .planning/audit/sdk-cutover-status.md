@@ -48,7 +48,7 @@ All 4 connectors active (Telegram, Discord, WhatsApp, Notch). Dashboard API resp
 
 The integration test points that need a live user message to exercise:
 
-1. Telegram round-trip with the `jarvis` agent (telegram:502955633)
+1. Telegram round-trip with the `jarvis` agent (telegram:100000001)
 2. Discord round-trip
 3. WhatsApp round-trip
 4. Bg subagent path actually firing — should work better than CLI per audit evidence

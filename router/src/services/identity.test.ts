@@ -11,28 +11,28 @@ import { resolveUserFrom } from "./identity.js";
 import type { User } from "../types";
 
 const USERS: Record<string, User> = {
-  attilio: { type: "owner", ids: { telegram: 502955633, discord: "921140221473603624", whatsapp: "+393313998288" } },
-  matteo: { type: "team", ids: { whatsapp: "+393461819020" } },
-  simone: { type: "client", ids: { whatsapp: "120363406972712093@g.us" } },
+  attilio: { type: "owner", ids: { telegram: 100000001, discord: "200000000000000001", whatsapp: "+390000000101" } },
+  matteo: { type: "team", ids: { whatsapp: "+390000000102" } },
+  simone: { type: "client", ids: { whatsapp: "120000000000000000@g.us" } },
 };
 
 test("resolves owner across channels (number + string ids)", () => {
-  const tg = resolveUserFrom(USERS, "telegram", "502955633");
+  const tg = resolveUserFrom(USERS, "telegram", "100000001");
   assert.deepEqual(tg, { key: "attilio", name: "Attilio", role: "owner" });
 
-  const dc = resolveUserFrom(USERS, "discord", "921140221473603624");
+  const dc = resolveUserFrom(USERS, "discord", "200000000000000001");
   assert.equal(dc?.role, "owner");
   assert.equal(dc?.name, "Attilio");
 
-  const wa = resolveUserFrom(USERS, "whatsapp", "+393313998288");
+  const wa = resolveUserFrom(USERS, "whatsapp", "+390000000101");
   assert.equal(wa?.role, "owner");
 });
 
 test("resolves team and client roles", () => {
-  assert.equal(resolveUserFrom(USERS, "whatsapp", "+393461819020")?.role, "team");
-  assert.equal(resolveUserFrom(USERS, "whatsapp", "+393461819020")?.name, "Matteo");
+  assert.equal(resolveUserFrom(USERS, "whatsapp", "+390000000102")?.role, "team");
+  assert.equal(resolveUserFrom(USERS, "whatsapp", "+390000000102")?.name, "Matteo");
   // A whole group jid can map to a client (resolveChat path).
-  assert.equal(resolveUserFrom(USERS, "whatsapp", "120363406972712093@g.us")?.role, "client");
+  assert.equal(resolveUserFrom(USERS, "whatsapp", "120000000000000000@g.us")?.role, "client");
 });
 
 test("unknown sender → null", () => {
@@ -42,9 +42,9 @@ test("unknown sender → null", () => {
 
 test("right id, wrong channel → null (no cross-channel id bleed)", () => {
   // Attilio's telegram numeric id must not match on discord.
-  assert.equal(resolveUserFrom(USERS, "discord", "502955633"), null);
+  assert.equal(resolveUserFrom(USERS, "discord", "100000001"), null);
   // Matteo has no telegram id.
-  assert.equal(resolveUserFrom(USERS, "telegram", "+393461819020"), null);
+  assert.equal(resolveUserFrom(USERS, "telegram", "+390000000102"), null);
 });
 
 test("nullish id → null", () => {
@@ -53,5 +53,5 @@ test("nullish id → null", () => {
 });
 
 test("empty users map → null (graceful when config absent)", () => {
-  assert.equal(resolveUserFrom({}, "telegram", "502955633"), null);
+  assert.equal(resolveUserFrom({}, "telegram", "100000001"), null);
 });

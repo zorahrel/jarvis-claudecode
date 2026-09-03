@@ -8,9 +8,9 @@
  * with a role, which the conversation-context header surfaces to the model.
  *
  * Id shapes per channel (must match IncomingMessage.from):
- *   - telegram: numeric user id as string  (e.g. "502955633")
- *   - discord:  author snowflake id         (e.g. "921140221473603624")
- *   - whatsapp: phone in "+39…" form        (e.g. "+393313998288")
+ *   - telegram: numeric user id as string  (e.g. "100000001")
+ *   - discord:  author snowflake id         (e.g. "200000000000000001")
+ *   - whatsapp: phone in "+39…" form        (e.g. "+390000000101")
  *
  * For WhatsApp, a `users:` entry may also map to a GROUP jid (a whole chat that
  * represents one client) — resolveChat covers that case for the location label.

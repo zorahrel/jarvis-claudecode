@@ -17,7 +17,7 @@ import {
 import type { IncomingMessage, AgentConfig } from "../types";
 
 // Inject a resolver so role rendering doesn't depend on live config.
-const OWNER = "+393313998288";
+const OWNER = "+390000000101";
 const deps: ContextDeps = {
   resolveSender: (_channel, id) =>
     id === OWNER ? { key: "attilio", name: "Attilio", role: "owner" } : null,

@@ -64,7 +64,7 @@ def main() -> int:
         print(f'FAIL|socket|stato "{state}"')
         return 0
 
-    # selfJid "393313998288:62@s.whatsapp.net" -> device "62"
+    # selfJid "390000000101:62@s.whatsapp.net" -> device "62"
     mine = jid.split(":")[1].split("@")[0] if ":" in jid else "?"
     print(f"OK|socket|connesso come device :{mine}")
 
