@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * edm-mail — MCP server for the OVH Exchange mailbox
- * attilio.cianci@edminformatica.com (IMAP 993 + SMTP 587, basic auth).
+ * edm-mail — MCP server for an OVH Exchange mailbox
+ * (IMAP 993 + SMTP 587, basic auth). The address lives in EDM_USER, not here.
  *
  * Credentials & host come from env (loaded from ./.env by start.sh):
  *   EDM_USER, EDM_PASS          (required)
