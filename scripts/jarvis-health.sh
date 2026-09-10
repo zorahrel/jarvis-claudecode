@@ -136,6 +136,7 @@ else
         OK)   ok   "$name" "$msg" ;;
         WARN) warn "$name" "$msg" ;;
         FAIL) fail "$name" "$msg" ;;
+        SKIP) skip "$name" "$msg" ;;
       esac
     done <<< "$wa_out"
   fi

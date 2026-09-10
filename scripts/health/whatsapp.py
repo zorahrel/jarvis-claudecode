@@ -21,6 +21,35 @@ import time
 WA_AUTH = os.environ.get(
     "WA_AUTH", os.path.expanduser("~/.claude/jarvis/router/wa-auth")
 )
+CONFIG = os.path.expanduser("~/.claude/jarvis/router/config.yaml")
+
+
+def channel_disabled() -> bool:
+    """True se channels.whatsapp.enabled e' false in config.yaml.
+
+    Dal 10/09/2026 il router e' staccato dal WhatsApp di Attilio (risponde solo
+    OpenClaw): senza questo controllo il probe urlerebbe FAIL|socket ogni
+    mattina per una scelta deliberata. Parsing a mano per non dipendere da PyYAML.
+    """
+    try:
+        lines = open(CONFIG).read().splitlines()
+    except Exception:
+        return False
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped.rstrip(":") == "whatsapp" and indent == 2:
+            inside = True
+            continue
+        if inside:
+            if indent <= 2:
+                break
+            if stripped.startswith("enabled:"):
+                return stripped.split(":", 1)[1].strip().lower() in ("false", "no", "off")
+    return False
 
 
 def lid_base() -> str | None:
@@ -61,6 +90,9 @@ def main() -> int:
     state = status.get("status")
     jid = status.get("jid") or ""
     if state != "connected":
+        if channel_disabled():
+            print("SKIP|whatsapp|canale disattivato in config (risponde OpenClaw)")
+            return 0
         print(f'FAIL|socket|stato "{state}"')
         return 0
 
