@@ -155,7 +155,6 @@ KNOWN_PORTS=$(cat <<'EOF'
 3341 jarvis router https
 3342 docs-index
 3343 omega
-3344 jarvis-browser
 3355 claude-usage-tray
 3737 darkroom backend
 5199 vite dev
