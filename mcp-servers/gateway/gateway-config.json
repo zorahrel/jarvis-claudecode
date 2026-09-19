@@ -80,15 +80,6 @@
       "autoMount": false
     },
     {
-      "name": "qlik",
-      "transport": "stdio",
-      "command": "bash",
-      "args": [
-        "/private/tmp/claude-501/-Users-zorahrel-Projects-guidoai/61abb9ce-76cf-4591-a65b-ce877b9394ae/scratchpad/qlik-launch.sh"
-      ],
-      "autoMount": false
-    },
-    {
       "name": "kiwi",
       "transport": "http",
       "url": "https://mcp.kiwi.com/",
@@ -138,12 +129,13 @@
       ],
       "env": {
         "SKILLS_ATTIC_ROOTS": "${HOME}/Projects/topics-app/.claude/skills:${HOME}/Projects/topics-app/.claude/commands"
-      }
+      },
+      "autoMount": false
     },
     {
       "name": "rivet",
       "transport": "stdio",
-      "command": "/opt/homebrew/Cellar/node/25.9.0_3/bin/node",
+      "command": "/opt/homebrew/bin/node",
       "args": [
         "/opt/homebrew/lib/node_modules/rivet-design/bin/rivet.js",
         "mcp",
@@ -166,7 +158,42 @@
       "args": [
         "run",
         "/Users/zorahrel/Projects/viaggi-mcp/src/index.ts"
-      ]
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "darkroom",
+      "transport": "stdio",
+      "command": "/Users/zorahrel/.bun/bin/bun",
+      "args": [
+        "/Users/zorahrel/Projects/darkroom/mcp/server.ts"
+      ],
+      "env": {
+        "DARKROOM_API": "http://localhost:3737"
+      },
+      "autoMount": false
+    },
+    {
+      "name": "idealo",
+      "transport": "http",
+      "url": "https://mcp.idealo.com/mcp",
+      "autoMount": false
+    },
+    {
+      "name": "shopping",
+      "transport": "stdio",
+      "command": "/Users/zorahrel/.bun/bin/bun",
+      "args": [
+        "run",
+        "/Users/zorahrel/Projects/shopping-mcp/src/index.ts"
+      ],
+      "autoMount": false
+    },
+    {
+      "name": "pablo",
+      "transport": "http",
+      "url": "https://mcp.pablooo.club",
+      "autoMount": false
     }
   ]
 }
