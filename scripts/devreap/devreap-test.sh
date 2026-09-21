@@ -65,7 +65,11 @@ exec 9<>/dev/tcp/127.0.0.1/39102 || bad "non riesco a connettermi al finto in us
 sleep 2
 
 # Soglie abbassate: 500 MB invece di 6 GB, gate swap a 0, 2 strike, 5 kill.
+# DEVREAP_ONLY_PATH e' il recinto ed e' OBBLIGATORIO: senza, queste soglie
+# valgono per tutta la macchina e la suite falcia i dev server veri. E'
+# successo il 21/09 su :3200 mentre provavo il reaper.
 export DEVREAP_FOOTPRINT_MB=500 DEVREAP_SWAP_PCT=0 DEVREAP_STRIKES=2 DEVREAP_KILLS=5
+export DEVREAP_ONLY_PATH="$HOME/Projects/.devreap-test"
 
 echo
 echo "== 1. il censimento li vede entrambi e distingue chi e' in uso"
@@ -118,6 +122,16 @@ check "footprint letto via footprint(1), non ps" \
   "$(grep -c 'footprint", "-p"' "$REAP")" "1"
 
 exec 9<&- 2>/dev/null
+echo
+echo "== 8. il recinto: con soglie da test i processi veri restano invisibili"
+# Il piu' grosso dev server reale della macchina (se c'e') non deve comparire
+# nemmeno nel censimento mentre ONLY_PATH e' attivo.
+REAL=$("$REAP" --list | grep -vE "3910[0-9]|swap usato|^$" | grep -c "porte=" || true)
+check "col recinto attivo vede solo i finti" "$REAL" "0"
+OUT_NOFENCE=$(DEVREAP_ONLY_PATH= "$REAP" --list | grep -c "porte=" || true)
+[ "$OUT_NOFENCE" -gt 0 ] && ok "senza recinto vede la macchina vera (il recinto conta)" \
+                         || bad "senza recinto non vede nulla: il test 8 non prova niente"
+
 echo
 echo "passati $PASS, falliti $FAIL"
 [ "$FAIL" -eq 0 ]

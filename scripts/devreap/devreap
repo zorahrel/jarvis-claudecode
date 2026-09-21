@@ -64,6 +64,13 @@ DEV_PATTERNS = [
     r"\bvite\b.*\b(dev|preview)\b",
 ]
 ALLOWED_ROOTS = [str(HOME / "Projects")]   # fuori di qui non si opera
+
+# Recinto della suite. Quando la suite abbassa le soglie lo fa per TUTTA la
+# macchina, e il 21/09 questo ha ucciso un `next dev` vero su :3200 mentre
+# provavo il reaper. Con DEVREAP_ONLY_PATH impostato, devreap ignora qualunque
+# processo il cui comando non contenga quel path: il test puo' essere aggressivo
+# quanto vuole senza poter toccare niente di reale.
+ONLY_PATH = os.environ.get("DEVREAP_ONLY_PATH", "")
 PROTECTED = [                              # residenti gestiti altrove
     "topics-app/server.ts",
     "Topics Host.app",
@@ -124,6 +131,8 @@ def parse_etime(e):
 
 
 def is_dev_server(cmd):
+    if ONLY_PATH and ONLY_PATH not in cmd:
+        return False                     # recinto della suite: vedi ONLY_PATH
     if any(p in cmd for p in PROTECTED):
         return False
     if not any(root in cmd for root in ALLOWED_ROOTS):
