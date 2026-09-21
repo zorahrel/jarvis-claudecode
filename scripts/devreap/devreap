@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""devreap — uccide i dev server che stanno affamando il Mac. Nient'altro.
+
+Il 21/09/2026 un `next dev` di guidoai in loop (14 GB di footprint, 388% di CPU,
+zero connessioni) piu' due `next start` dimenticati da due giorni hanno riempito
+lo swap al 98%: Topics era vivo e in LISTEN ma non rispondeva piu' entro 25 s, e
+sembrava offline. Il freno interno di Topics vedeva la pressione ("swap sustained
+... nothing to interrupt") ma non puo' uccidere processi che non sono suoi.
+
+Criterio unico, scelto per non poter sbagliare:
+
+    la macchina soffre  +  il processo e' enorme  +  non lo usa nessuno
+    +  e' rimasto cosi' per tre passate di fila (15 min)
+
+Fuori da questa congiunzione non tocca niente. In particolare NON usa
+l'orfananza (`ppid 1`) come indizio: un dev server lanciato con `nohup` apposta
+e' orfano per costruzione, e il client Vite di topics-app sta li' legittimamente
+da giorni. E non guarda l'eta': vecchio non vuol dire morto.
+
+Un dev server ucciso non perde lavoro: lo stato sta nei file, si riavvia in
+trenta secondi. Per questo la raccolta e' sicura, ed e' anche il motivo per cui
+non tocca `bun test`, build o altro che, morendo, butterebbe via un risultato.
+
+Uso:
+    devreap              una passata (per il timer launchd)
+    devreap --list       censimento, non uccide
+    devreap --dry-run    decide e spiega, non uccide
+    devreap --now        ignora il gate di pressione (uso manuale in emergenza)
+"""
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+STATE = HOME / ".claude/jarvis/state/devreap.json"
+LOG = HOME / ".claude/jarvis/logs/devreap.log"
+
+# --- Soglie -----------------------------------------------------------------
+# Le soglie si abbassano da env solo per la suite in test/devreap-test.sh:
+# in produzione nessuno le passa, e questi restano i valori veri.
+def _env(name, default, cast=float):
+    try:
+        return cast(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+SWAP_PRESSURE_PCT = _env("DEVREAP_SWAP_PCT", 85.0)   # sotto: nessuna emergenza
+FOOTPRINT_MB = _env("DEVREAP_FOOTPRINT_MB", 6 * 1024)  # un Next sano sta sotto 2 GB
+STRIKES = _env("DEVREAP_STRIKES", 3, int)            # passate di fila (~15 min)
+KILLS_PER_PASS = _env("DEVREAP_KILLS", 1, int)       # uno per volta, poi rimisura
+
+# Cosa e' un dev server. Solo server: niente test runner, niente build.
+DEV_PATTERNS = [
+    r"next/dist/server/lib/start-server\.js",
+    r"\bnext (dev|start)\b",
+    r"node_modules/\.bin/next\b",
+    r"node_modules/\.bin/vite\b",
+    r"\bvite\b.*\b(dev|preview)\b",
+]
+ALLOWED_ROOTS = [str(HOME / "Projects")]   # fuori di qui non si opera
+PROTECTED = [                              # residenti gestiti altrove
+    "topics-app/server.ts",
+    "Topics Host.app",
+    "openclaw/dist/index.js",
+    "jarvis/router",
+]
+OWNER_HINTS = ["Claude.app", "claude-code", "jcode", "tmux", "Terminal"]
+
+
+def log(msg, echo=False):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {msg}"
+    with LOG.open("a") as f:
+        f.write(line + "\n")
+    if echo or sys.stdout.isatty():
+        print(line)
+
+
+def swap_pct():
+    try:
+        out = subprocess.run(["sysctl", "-n", "vm.swapusage"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return 0.0
+    tot = re.search(r"total = ([\d.]+)M", out)
+    use = re.search(r"used = ([\d.]+)M", out)
+    if not (tot and use) or float(tot.group(1)) == 0:
+        return 0.0
+    return float(use.group(1)) / float(tot.group(1)) * 100
+
+
+def ps_table():
+    out = subprocess.run(["ps", "-Ao", "pid=,ppid=,pcpu=,etime=,command="],
+                         capture_output=True, text=True).stdout
+    procs = {}
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        pid, ppid, cpu, etime, cmd = parts
+        try:
+            procs[int(pid)] = {"ppid": int(ppid), "cpu": float(cpu),
+                               "age": parse_etime(etime), "cmd": cmd}
+        except ValueError:
+            continue
+    return procs
+
+
+def parse_etime(e):
+    days = 0
+    if "-" in e:
+        d, e = e.split("-", 1)
+        days = int(d)
+    bits = [int(x) for x in e.split(":")]
+    while len(bits) < 3:
+        bits.insert(0, 0)
+    return days * 86400 + bits[0] * 3600 + bits[1] * 60 + bits[2]
+
+
+def is_dev_server(cmd):
+    if any(p in cmd for p in PROTECTED):
+        return False
+    if not any(root in cmd for root in ALLOWED_ROOTS):
+        return False
+    return any(re.search(p, cmd) for p in DEV_PATTERNS)
+
+
+def footprint_mb(pid):
+    try:
+        out = subprocess.run(["footprint", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return 0.0
+    m = re.search(r"phys_footprint:\s+([\d.]+)\s*(KB|MB|GB)", out)
+    if not m:
+        return 0.0
+    v, unit = float(m.group(1)), m.group(2)
+    return v / 1024 if unit == "KB" else v if unit == "MB" else v * 1024
+
+
+def net(pid):
+    """(porte in LISTEN, connessioni entranti verso quelle porte)"""
+    try:
+        out = subprocess.run(["lsof", "-nP", "-p", str(pid), "-a", "-i"],
+                             capture_output=True, text=True, timeout=25).stdout
+    except Exception:
+        return set(), 0      # in dubbio: zero porte, ma vedi cautela sotto
+    ports = {m.group(1) for line in out.splitlines()
+             if "(LISTEN)" in line
+             for m in [re.search(r":(\d+) \(LISTEN\)", line)] if m}
+    inbound = sum(1 for line in out.splitlines() if "(ESTABLISHED)" in line
+                  for m in [re.search(r":(\d+)->", line)]
+                  if m and m.group(1) in ports)
+    return ports, inbound
+
+
+def group_root(pid, procs):
+    """Risale l'albero finche' resta dentro il gruppo del dev server."""
+    cur = pid
+    seen = {cur}
+    while True:
+        parent = procs.get(cur, {}).get("ppid", 1)
+        if parent in (0, 1) or parent in seen:
+            return cur
+        pcmd = procs.get(parent, {}).get("cmd", "")
+        if any(h in pcmd for h in OWNER_HINTS):
+            return cur                               # sopra c'e' la sessione
+        if re.search(r"\b(next|bun|node|vite|disclaimer|nohup)\b", pcmd):
+            seen.add(parent)
+            cur = parent
+            continue
+        return cur
+
+
+def descendants(root, procs):
+    out, frontier = [root], [root]
+    while frontier:
+        nxt = [pid for pid, i in procs.items()
+               if i["ppid"] in frontier and pid not in out]
+        out.extend(nxt)
+        frontier = nxt
+    return out
+
+
+def kill_tree(pids, dry=False):
+    if dry:
+        return "dry-run (nessun segnale)"
+    for p in sorted(pids, reverse=True):
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(6)
+    hard = []
+    for p in pids:
+        try:
+            os.kill(p, 0)
+            hard.append(p)
+        except OSError:
+            pass
+    for p in hard:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except OSError:
+            pass
+    return "TERM" if not hard else f"TERM+KILL({len(hard)})"
+
+
+def survey(procs):
+    """Un record per albero dev: porte, connessioni, footprint, eta'."""
+    roots = {}
+    for pid, info in procs.items():
+        if is_dev_server(info["cmd"]):
+            roots.setdefault(group_root(pid, procs), None)
+    # Se una radice e' discendente di un'altra, tieni solo la piu' alta.
+    tops = []
+    for r in roots:
+        if not any(r != o and r in descendants(o, procs) for o in roots):
+            tops.append(r)
+    rows = []
+    for root in sorted(tops):
+        members = sorted(descendants(root, procs))
+        ports, inbound, fp = set(), 0, 0.0
+        for p in members:
+            pt, ib = net(p)
+            ports |= pt
+            inbound += ib
+            fp = max(fp, footprint_mb(p))
+        rows.append({
+            "root": root, "members": members, "ports": sorted(ports),
+            "inbound": inbound, "fp": fp,
+            "cpu": max(procs.get(p, {}).get("cpu", 0.0) for p in members),
+            "age": max(procs.get(p, {}).get("age", 0) for p in members),
+            "cmd": procs.get(root, {}).get("cmd", "?"),
+        })
+    return rows
+
+
+def print_rows(rows, swap):
+    print(f"swap usato {swap:.1f}%  (gate a {SWAP_PRESSURE_PCT}%)\n")
+    if not rows:
+        print("nessun dev server attivo")
+        return
+    for r in rows:
+        verdict = "ok"
+        if r["inbound"] > 0:
+            verdict = "in uso"
+        elif r["fp"] > FOOTPRINT_MB:
+            verdict = "SOSPETTO (grosso e senza connessioni)"
+        print(f"  root={r['root']:<6} porte={','.join(r['ports']) or '-':<12} "
+              f"conn={r['inbound']:<3} {r['fp']:>7.0f}MB cpu={r['cpu']:>5.0f}% "
+              f"eta={r['age']//60:>5}m  {verdict}")
+        print(f"        {r['cmd'][:110]}")
+
+
+def main():
+    flags = set(sys.argv[1:])
+    listing = "--list" in flags
+    dry = "--dry-run" in flags
+    force = "--now" in flags
+
+    procs = ps_table()
+    swap = swap_pct()
+
+    if listing:
+        print_rows(survey(procs), swap)
+        return
+
+    # Gate: se la macchina respira, non c'e' niente da raccogliere.
+    if swap < SWAP_PRESSURE_PCT and not force:
+        if not dry:
+            STATE.parent.mkdir(parents=True, exist_ok=True)
+            STATE.write_text(json.dumps({}))   # pressione passata: azzera i strike
+        return
+
+    rows = survey(procs)
+    state = json.loads(STATE.read_text()) if STATE.exists() else {}
+    new_state, killed = {}, 0
+
+    # I piu' grossi per primi: in emergenza conta liberare, non essere equi.
+    for r in sorted(rows, key=lambda x: -x["fp"]):
+        key = str(r["root"])
+        guilty = r["inbound"] == 0 and r["fp"] > FOOTPRINT_MB
+        if not guilty:
+            continue
+        strikes = state.get(key, 0) + 1
+        if strikes >= STRIKES and killed < KILLS_PER_PASS:
+            res = kill_tree(r["members"], dry)
+            log(f"REAP root={r['root']} porte={','.join(r['ports']) or '-'} "
+                f"fp={r['fp']:.0f}MB cpu={r['cpu']:.0f}% eta={r['age']//60}m "
+                f"swap={swap:.0f}% pids={r['members']} [{res}] :: {r['cmd'][:90]}",
+                echo=True)
+            killed += 1
+            continue
+        new_state[key] = strikes
+        log(f"strike {strikes}/{STRIKES} root={r['root']} fp={r['fp']:.0f}MB "
+            f"conn=0 swap={swap:.0f}% :: {r['cmd'][:80]}")
+
+    if not dry:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps(new_state))
+
+
+if __name__ == "__main__":
+    main()

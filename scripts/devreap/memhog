@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""memhog — chi sta davvero mangiando la memoria, con il numero giusto.
+
+Il 21/09/2026 la caccia e' partita male perche' `ps -o rss` dava 2,5 GB a un
+processo Bun che ne teneva 14: su macOS la memoria compressa non compare nel
+RSS. Il numero vero lo da' `footprint(1)`, ma e' lento, quindi qui si usa una
+scrematura su RSS larga e poi si misura sul serio solo la testa della lista.
+
+    memhog            i dieci piu' pesanti, footprint reale
+    memhog -n 20      quanti ne vuoi
+    memhog --why      aggiunge swap, load e il verdetto su chi stringere
+"""
+import re
+import subprocess
+import sys
+
+
+def sh(args, timeout=25):
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def footprint_mb(pid):
+    m = re.search(r"phys_footprint:\s+([\d.]+)\s*(KB|MB|GB)",
+                  sh(["footprint", "-p", str(pid)]))
+    if not m:
+        return None
+    v, u = float(m.group(1)), m.group(2)
+    return v / 1024 if u == "KB" else v if u == "MB" else v * 1024
+
+
+def inbound_conns(pid):
+    out = sh(["lsof", "-nP", "-p", str(pid), "-a", "-i"])
+    ports = {m.group(1) for line in out.splitlines() if "(LISTEN)" in line
+             for m in [re.search(r":(\d+) \(LISTEN\)", line)] if m}
+    if not ports:
+        return None                      # non e' un server: la domanda non si pone
+    return sum(1 for line in out.splitlines() if "(ESTABLISHED)" in line
+               for m in [re.search(r":(\d+)->", line)]
+               if m and m.group(1) in ports)
+
+
+def main():
+    n = 10
+    if "-n" in sys.argv:
+        try:
+            n = int(sys.argv[sys.argv.index("-n") + 1])
+        except (IndexError, ValueError):
+            pass
+    why = "--why" in sys.argv
+
+    if why:
+        sw = sh(["sysctl", "-n", "vm.swapusage"]).strip()
+        print(f"swap : {sw}")
+        print(f"load : {sh(['uptime']).strip().split('load averages:')[-1].strip()}")
+        print()
+
+    rows = []
+    for line in sh(["ps", "-Ao", "pid=,pcpu=,rss=,command="]).splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            rows.append((int(parts[0]), float(parts[1]), int(parts[2]), parts[3]))
+        except ValueError:
+            continue
+
+    # Scrematura larga su RSS (3n): il compresso puo' nascondere molto, ma non
+    # tutto, e misurare col footprint l'intera tabella costerebbe minuti.
+    rows.sort(key=lambda r: -r[2])
+    measured = []
+    for pid, cpu, rss, cmd in rows[: max(n * 3, 30)]:
+        fp = footprint_mb(pid)
+        if fp:
+            measured.append((fp, pid, cpu, rss / 1024, cmd))
+    measured.sort(reverse=True)
+
+    print(f"{'FOOTPRINT':>10}  {'(ps rss)':>9}  {'CPU':>6}  {'PID':>6}  COMANDO")
+    for fp, pid, cpu, rss, cmd in measured[:n]:
+        note = ""
+        if why and fp > 2048:
+            ib = inbound_conns(pid)
+            if ib == 0:
+                note = "   <- server grosso e senza connessioni"
+            elif ib:
+                note = f"   ({ib} connessioni)"
+        print(f"{fp:>8.0f}MB  {rss:>7.0f}MB  {cpu:>5.0f}%  {pid:>6}  {cmd[:72]}{note}")
+
+    if why:
+        print("\nchi mente: se 'ps rss' e' molto sotto il footprint, e' memoria")
+        print("compressa. Il numero da guardare e' il footprint.")
+
+
+if __name__ == "__main__":
+    main()
