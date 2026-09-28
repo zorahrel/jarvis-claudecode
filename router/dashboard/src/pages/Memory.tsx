@@ -1,12 +1,8 @@
 import type React from 'react'
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import * as THREE from 'three'
-import { Search, MoreHorizontal, RefreshCw, Layers, X } from 'lucide-react'
-import { Panel } from '../components/Panel'
-import { SectionHeader } from '../components/ui/PageHeader'
-import { Button } from '../components/ui/Button'
+import { Search, MoreHorizontal, RefreshCw, X } from 'lucide-react'
 import { Tooltip } from '../components/ui/Tooltip'
-import { Input, Field } from '../components/ui/Field'
 import { parseHashParam } from '../lib/hashFilter'
 
 // ── Types ──
@@ -21,31 +17,14 @@ interface MemFile {
   title?: string
 }
 
-interface MemMemory {
-  id: string
-  user_id?: string
-  memory?: string
-  created_at?: string
-  event_type?: string
-}
-
 interface MemSearchDoc {
   text?: string
   score?: number
   metadata?: { file?: string; path?: string; scope?: string }
 }
 
-interface MemSearchMem {
-  id: string
-  user_id?: string
-  memory?: string
-  created_at?: string
-  score?: number
-}
-
 interface MemSearchResults {
   docs?: MemSearchDoc[]
-  memories?: MemSearchMem[]
   partial?: string[]
 }
 
@@ -76,7 +55,6 @@ interface GraphEdge {
 
 interface MemStatsData {
   docs?: { total_files?: number; total_chunks?: number; by_scope?: Record<string, number> }
-  memories?: { total?: number }
 }
 
 type ViewMode = 'graph' | 'list' | 'grid'
@@ -96,16 +74,6 @@ const kbdStyle: React.CSSProperties = {
   lineHeight: 1.2,
   minWidth: 14,
   textAlign: 'center' as const,
-}
-
-// OMEGA episodic memory event types (badge colors in the Memories browser)
-const EVENT_TYPE_COLORS: Record<string, string> = {
-  decision: '#8b5cf6',
-  task_completion: '#10b981',
-  lesson_learned: '#f59e0b',
-  user_preference: '#ec4899',
-  error_pattern: '#ef4444',
-  project: '#06b6d4',
 }
 
 const GRAPH_COLORS: Record<string, string> = {
@@ -164,16 +132,6 @@ function highlightText(text: string, query: string) {
     .join('')
 }
 
-function formatMemDate(d?: string) {
-  if (!d) return ''
-  try {
-    const dt = new Date(d)
-    return dt.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return d
-  }
-}
-
 function formatFileDate(mtime?: number) {
   if (!mtime) return ''
   try {
@@ -207,11 +165,7 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
       window.history.replaceState(null, '', '#/memory')
     }
   }, [])
-  const [scopeHelp, setScopeHelp] = useState<Record<string, string>>({})
   const [reindexing, setReindexing] = useState(false)
-  const [scopesPanelOpen, setScopesPanelOpen] = useState(false)
-  const [newMemScope, setNewMemScope] = useState('')
-  const [addingScope, setAddingScope] = useState(false)
   const [doctor, setDoctor] = useState<MemDoctor | null>(null)
   const [doctorOpen, setDoctorOpen] = useState(false)
   const [doctorDismissed, setDoctorDismissed] = useState(() => {
@@ -226,24 +180,18 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   })
 
   const [files, setFiles] = useState<MemFile[]>([])
-  const [memories, setMemories] = useState<MemMemory[]>([])
   const [_stats, setStats] = useState<MemStatsData | null>(null)
 
-  const [browseView, setBrowseView] = useState<'documents' | 'facts'>('documents')
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [fileContent, setFileContent] = useState('')
   const [editorMode, setEditorMode] = useState<'preview' | 'edit'>('preview')
   const [savingFile, setSavingFile] = useState(false)
   const [related, setRelated] = useState<MemSearchDoc[]>([])
 
-  const [memsUserFilter, setMemsUserFilter] = useState('')
-  const [memsTypeFilter, setMemsTypeFilter] = useState('')
-  const [memsSort, setMemsSort] = useState('date-desc')
-
   const [searching, setSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<MemSearchResults>({})
   const hasSearchResults = useMemo(
-    () => !!(searchResults.docs?.length || searchResults.memories?.length),
+    () => !!searchResults.docs?.length,
     [searchResults],
   )
 
@@ -318,28 +266,6 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
     return groups
   }, [filteredFiles])
 
-  const memsUsers = useMemo(() => {
-    const set = new Set<string>()
-    memories.forEach((m) => { if (m.user_id) set.add(m.user_id) })
-    return Array.from(set).sort()
-  }, [memories])
-
-  const memsTypes = useMemo(() => {
-    const set = new Set<string>()
-    memories.forEach((m) => { if (m.event_type) set.add(m.event_type) })
-    return Array.from(set).sort()
-  }, [memories])
-
-  const filteredMems = useMemo(() => {
-    let out = [...memories]
-    if (memsUserFilter) out = out.filter((m) => m.user_id === memsUserFilter)
-    if (memsTypeFilter) out = out.filter((m) => (m.event_type || '') === memsTypeFilter)
-    if (memsSort === 'date-desc') out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
-    else if (memsSort === 'date-asc') out.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
-    else if (memsSort === 'user') out.sort((a, b) => (a.user_id || '').localeCompare(b.user_id || ''))
-    return out
-  }, [memories, memsUserFilter, memsTypeFilter, memsSort])
-
   const sortedGridFiles = useMemo(() => {
     // When a search is active, restrict the grid to docs that matched the query.
     // Match against the file path or basename so we surface exactly the search hits.
@@ -371,14 +297,6 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
     } catch { /* ignore */ }
   }, [])
 
-  const loadMemories = useCallback(async () => {
-    try {
-      const scopeParam = memScope ? `?scope=${encodeURIComponent(memScope)}` : ''
-      const data = await apiFetch<{ memories: MemMemory[] }>(`/api/memory/memories${scopeParam}`)
-      setMemories(data.memories || [])
-    } catch { /* ignore */ }
-  }, [memScope])
-
   const loadGraph = useCallback(async () => {
     setLoadingGraph(true)
     try {
@@ -408,13 +326,6 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
       const data = await apiFetch<MemDoctor>('/api/memory/doctor')
       setDoctor(data)
     } catch { /* doctor is advisory — don't toast on failure */ }
-  }, [])
-
-  const loadScopeHelp = useCallback(async () => {
-    try {
-      const data = await apiFetch<{ scopeHelp?: Record<string, string> }>('/api/dashboard-state')
-      if (data.scopeHelp) setScopeHelp(data.scopeHelp)
-    } catch { /* ignore */ }
   }, [])
 
   // ── File operations ──
@@ -475,16 +386,6 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
     }
   }, [onToast, loadFiles, loadGraph])
 
-  const deleteMem = useCallback(async (id: string) => {
-    try {
-      await apiFetch(`/api/memory/${id}`, { method: 'DELETE' })
-      onToast('Deleted', 'success')
-      loadMemories()
-    } catch {
-      onToast('Delete failed', 'error')
-    }
-  }, [onToast, loadMemories])
-
   const reindex = useCallback(async () => {
     setReindexing(true)
     try {
@@ -494,35 +395,13 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
         loadStats()
         loadFiles()
         loadGraph()
-        loadMemories()
       }, 2000)
     } catch {
       onToast('Reindex failed', 'error')
     } finally {
       setReindexing(false)
     }
-  }, [onToast, loadStats, loadFiles, loadGraph, loadMemories])
-
-  const addMemScope = useCallback(async () => {
-    const scope = newMemScope.trim()
-    if (!scope) return
-    setAddingScope(true)
-    try {
-      await fetch('/api/config/memory-scopes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope }),
-      })
-      setNewMemScope('')
-      onToast('Memory scope added: ' + scope, 'success')
-      const res = await fetch('/api/dashboard-state')
-      const data = await res.json() as { scopeHelp?: Record<string, string> }
-      if (data.scopeHelp) setScopeHelp(data.scopeHelp)
-    } catch (e: unknown) {
-      onToast(e instanceof Error ? e.message : String(e), 'error')
-    }
-    setAddingScope(false)
-  }, [newMemScope, onToast])
+  }, [onToast, loadStats, loadFiles, loadGraph])
 
   const openDocFromSearch = useCallback((filePath?: string) => {
     if (!filePath) return
@@ -857,15 +736,9 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
   useEffect(() => {
     loadStats()
     loadFiles()
-    loadMemories()
     loadGraph()
-    loadScopeHelp()
     loadDoctor()
-  }, [loadStats, loadFiles, loadMemories, loadGraph, loadScopeHelp, loadDoctor])
-
-  useEffect(() => {
-    loadMemories()
-  }, [loadMemories])
+  }, [loadStats, loadFiles, loadGraph, loadDoctor])
 
   // ── Init graph only when graph view is active ──
   useEffect(() => {
@@ -1069,7 +942,7 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
           )}
           {memQuery && !searching && hasSearchResults && (
             <span style={{ position: 'absolute', right: 32, fontSize: 10, color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>
-              {(searchResults.docs?.length || 0) + (searchResults.memories?.length || 0)}
+              {searchResults.docs?.length || 0}
             </span>
           )}
         </div>
@@ -1108,7 +981,7 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
             <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> New
           </button>
         </Tooltip>
-        <KebabMenu reindexing={reindexing} onReindex={reindex} onManageScopes={() => setScopesPanelOpen(true)} />
+        <KebabMenu reindexing={reindexing} onReindex={reindex} />
       </div>
       {memQuery && !searching && !hasSearchResults && (
         <div style={{ padding: '4px 20px 0', fontSize: 11, color: 'var(--text-4)', flexShrink: 0 }}>
@@ -1165,9 +1038,6 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
             color={c.color}
           />
         ))}
-        {Object.keys(scopeHelp).filter(s => s && !scopeChips.find(c => c.id === s)).slice(0, 6).map((s) => (
-          <Chip key={s} active={memScope === s} onClick={() => setMemScope(s)} label={s} />
-        ))}
       </div>
 
       {/* Main area — varies by viewMode */}
@@ -1206,20 +1076,7 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
                 hasSearchResults={hasSearchResults}
                 searchResults={searchResults}
                 searching={searching}
-                memQuery={memQuery}
                 openDocFromSearch={openDocFromSearch}
-                browseView={browseView}
-                setBrowseView={setBrowseView}
-                filteredMems={filteredMems}
-                memsUsers={memsUsers}
-                memsUserFilter={memsUserFilter}
-                setMemsUserFilter={setMemsUserFilter}
-                memsTypes={memsTypes}
-                memsTypeFilter={memsTypeFilter}
-                setMemsTypeFilter={setMemsTypeFilter}
-                memsSort={memsSort}
-                setMemsSort={setMemsSort}
-                deleteMem={deleteMem}
                 related={related}
               />
             )}
@@ -1309,67 +1166,6 @@ export function Memory({ onToast }: { onToast: (msg: string, type: 'success' | '
           </div>
         </div>
       )}
-
-      {/* Scopes management */}
-      <Panel open={scopesPanelOpen} title="Memory scopes" onClose={() => setScopesPanelOpen(false)}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.55 }}>
-            Scopes organize memory entries by topic (people, projects, procedures…). Each scope is a folder under{' '}
-            <code style={{ background: 'var(--bg-0)', padding: '1px 5px', borderRadius: 'var(--radius-xs)', fontFamily: 'var(--mono)', fontSize: 11 }}>~/.claude/jarvis/memory/</code>.
-          </div>
-
-          <div>
-            <SectionHeader title="Active scopes" count={Object.keys(scopeHelp).filter((k) => k).length} />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {Object.entries(scopeHelp).filter(([k]) => k).map(([scope, desc]) => (
-                <div
-                  key={scope}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: 10,
-                    padding: '8px 12px',
-                    fontSize: 12,
-                    background: 'var(--bg-0)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius)',
-                  }}
-                >
-                  <span style={{ fontFamily: 'var(--mono)', fontWeight: 600, color: 'var(--text-1)', minWidth: 90 }}>{scope}</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.5 }}>{desc as string}</span>
-                </div>
-              ))}
-              {Object.keys(scopeHelp).filter((k) => k).length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--text-4)', padding: 8 }}>No scopes defined yet.</div>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <SectionHeader title="Add scope" />
-            <Field hint="Lowercase, no spaces. Creates a folder and adds it to the memory index.">
-              <div style={{ display: 'flex', gap: 8 }}>
-                <Input
-                  value={newMemScope}
-                  onChange={(e) => setNewMemScope(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addMemScope()}
-                  placeholder="scope-name"
-                  style={{ flex: 1 }}
-                />
-                <Button
-                  variant="primary"
-                  size="md"
-                  onClick={addMemScope}
-                  loading={addingScope}
-                  disabled={!newMemScope.trim()}
-                >
-                  Add
-                </Button>
-              </div>
-            </Field>
-          </div>
-        </div>
-      </Panel>
     </div>
   )
 }
@@ -1433,33 +1229,15 @@ interface SidebarProps extends FilePaneProps {
   hasSearchResults: boolean
   searchResults: MemSearchResults
   searching: boolean
-  memQuery: string
   openDocFromSearch: (p?: string) => void
-  browseView: 'documents' | 'facts'
-  setBrowseView: (v: 'documents' | 'facts') => void
-  filteredMems: MemMemory[]
-  memsUsers: string[]
-  memsUserFilter: string
-  setMemsUserFilter: (v: string) => void
-  memsTypes: string[]
-  memsTypeFilter: string
-  setMemsTypeFilter: (v: string) => void
-  memsSort: string
-  setMemsSort: (v: string) => void
-  deleteMem: (id: string) => void
 }
 
 function Sidebar(props: SidebarProps) {
-  const { filesByCategory, selectedFile, onSelectFile, hasSearchResults, searchResults, searching, memQuery, openDocFromSearch, browseView, setBrowseView, filteredMems, memsUsers, memsUserFilter, setMemsUserFilter, memsTypes, memsTypeFilter, setMemsTypeFilter, memsSort, setMemsSort, deleteMem, files } = props
+  const { filesByCategory, selectedFile, onSelectFile, hasSearchResults, searchResults, searching, openDocFromSearch, files } = props
   return (
     <div style={{ width: 360, flexShrink: 0, borderLeft: '1px solid var(--border)', display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-1)', position: 'relative', zIndex: 10 }}>
-      <div style={{ display: 'flex', gap: 2, padding: '8px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-        <button onClick={() => setBrowseView('documents')} style={{ flex: 1, padding: '4px 8px', fontSize: 11, background: browseView === 'documents' ? 'rgba(94,106,210,0.15)' : 'transparent', color: browseView === 'documents' ? 'var(--text-1)' : 'var(--text-4)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }}>
-          Docs ({files.length})
-        </button>
-        <button onClick={() => setBrowseView('facts')} style={{ flex: 1, padding: '4px 8px', fontSize: 11, background: browseView === 'facts' ? 'rgba(94,106,210,0.15)' : 'transparent', color: browseView === 'facts' ? 'var(--text-1)' : 'var(--text-4)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }}>
-          Memories ({filteredMems.length})
-        </button>
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0, fontSize: 11, color: 'var(--text-3)' }}>
+        Docs ({files.length})
       </div>
 
       {searching && (
@@ -1474,7 +1252,7 @@ function Sidebar(props: SidebarProps) {
       {!searching && hasSearchResults && (
         <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', maxHeight: 220, overflowY: 'auto', flexShrink: 0 }}>
           <div style={{ fontSize: 10, color: 'var(--text-4)', marginBottom: 4 }}>
-            {(searchResults.docs?.length || 0)} docs + {(searchResults.memories?.length || 0)} memories
+            {searchResults.docs?.length || 0} docs
           </div>
           {(searchResults.docs || []).slice(0, 5).map((d, idx) => (
             <div key={d.metadata?.path || d.metadata?.file || idx} onClick={() => openDocFromSearch(d.metadata?.path || d.metadata?.file)} style={{ padding: '4px 6px', marginBottom: 2, background: 'var(--bg-2)', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}>
@@ -1482,17 +1260,10 @@ function Sidebar(props: SidebarProps) {
               <span style={{ color: 'var(--text-2)', marginLeft: 4 }}>{(d.metadata?.path || d.metadata?.file || '').split('/').pop()?.replace('.md', '') || ''}</span>
             </div>
           ))}
-          {(searchResults.memories || []).slice(0, 3).map((m) => (
-            <div key={m.id} style={{ padding: '4px 6px', marginBottom: 2, background: 'var(--bg-2)', borderRadius: 4, fontSize: 11 }}>
-              <span style={{ fontSize: 9, fontFamily: 'var(--mono)', padding: '0 4px', borderRadius: 2, background: 'rgba(94,106,210,0.15)', color: 'var(--accent)', fontWeight: 600 }}>{(m.score || 0).toFixed(2)}</span>
-              <span style={{ color: 'var(--text-4)', marginLeft: 4 }}>{m.user_id}</span>
-              <div style={{ color: 'var(--text-3)', marginTop: 2, fontSize: 10 }} dangerouslySetInnerHTML={{ __html: highlightText(short(m.memory || '', 80), memQuery) }} />
-            </div>
-          ))}
         </div>
       )}
 
-      {browseView === 'documents' && !hasSearchResults && (
+      {!hasSearchResults && (
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px' }}>
           {Object.keys(filesByCategory).sort().map((cat) => (
             <div key={cat} style={{ marginBottom: 8 }}>
@@ -1507,44 +1278,6 @@ function Sidebar(props: SidebarProps) {
               ))}
             </div>
           ))}
-        </div>
-      )}
-
-      {browseView === 'facts' && !hasSearchResults && (
-        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px' }}>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <select value={memsUserFilter} onChange={(e) => setMemsUserFilter(e.target.value)} style={{ fontSize: 10, padding: '2px 4px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-2)' }}>
-              <option value="">All agents</option>
-              {memsUsers.map((u) => <option key={u} value={u}>{u}</option>)}
-            </select>
-            <select value={memsTypeFilter} onChange={(e) => setMemsTypeFilter(e.target.value)} style={{ fontSize: 10, padding: '2px 4px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-2)' }}>
-              <option value="">All types</option>
-              {memsTypes.map((t) => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
-            </select>
-            <select value={memsSort} onChange={(e) => setMemsSort(e.target.value)} style={{ fontSize: 10, padding: '2px 4px', background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 3, color: 'var(--text-2)' }}>
-              <option value="date-desc">Newest</option>
-              <option value="date-asc">Oldest</option>
-              <option value="user">By agent</option>
-            </select>
-          </div>
-          {filteredMems.map((m) => (
-            <div key={m.id} style={{ padding: '6px 8px', marginBottom: 4, background: 'var(--bg-2)', borderRadius: 4, border: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
-                {m.event_type && (
-                  <span style={{ fontSize: 9, fontWeight: 600, padding: '0 5px', borderRadius: 3, lineHeight: '14px', color: EVENT_TYPE_COLORS[m.event_type] || 'var(--text-3)', background: `${EVENT_TYPE_COLORS[m.event_type] || '#94a3b8'}22`, whiteSpace: 'nowrap' }}>
-                    {m.event_type.replace(/_/g, ' ')}
-                  </span>
-                )}
-                {m.user_id && <span style={{ fontSize: 10, color: 'var(--accent)' }}>{m.user_id}</span>}
-                <span style={{ fontSize: 9, color: 'var(--text-4)' }}>{formatMemDate(m.created_at)}</span>
-                <button onClick={() => deleteMem(m.id)} aria-label="Delete memory" style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-4)', cursor: 'pointer', display: 'inline-flex', padding: 2 }}><X size={12} /></button>
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.4 }}>{short(m.memory || '', 150)}</div>
-            </div>
-          ))}
-          {filteredMems.length === 0 && (
-            <div style={{ padding: 12, fontSize: 11, color: 'var(--text-4)', textAlign: 'center' }}>No memories match the filters</div>
-          )}
         </div>
       )}
 
@@ -1579,7 +1312,7 @@ function ListView({ filesByCategory, selectedFile, onSelectFile, fileContent, ed
         {hasSearchResults && (
           <div style={{ marginBottom: 16, padding: 10, background: 'rgba(94,106,210,0.08)', borderRadius: 6, border: '1px solid rgba(94,106,210,0.2)' }}>
             <div style={{ fontSize: 10, color: 'var(--text-4)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Search results · {searchResults.docs?.length || 0} docs · {searchResults.memories?.length || 0} facts
+              Search results · {searchResults.docs?.length || 0} docs
             </div>
             {(searchResults.docs || []).slice(0, 8).map((d, idx) => (
               <div key={idx} onClick={() => onSelectFile(relPathFromAny(d.metadata?.path || d.metadata?.file || ''))} style={{ padding: '6px 8px', marginBottom: 2, background: 'var(--bg-2)', borderRadius: 4, cursor: 'pointer', display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1700,11 +1433,9 @@ function DoctorBanner({ doctor, open, setOpen, onDismiss, onFileClick }: {
 function KebabMenu({
   reindexing,
   onReindex,
-  onManageScopes,
 }: {
   reindexing: boolean
   onReindex: () => void
-  onManageScopes: () => void
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -1754,12 +1485,6 @@ function KebabMenu({
             hint="Rebuild vector index in docs-index"
             disabled={reindexing}
             onClick={() => { onReindex(); setOpen(false) }}
-          />
-          <MenuItem
-            icon={<Layers size={13} />}
-            title="Manage scopes"
-            hint="Add or review memory scopes"
-            onClick={() => { onManageScopes(); setOpen(false) }}
           />
         </div>
       )}

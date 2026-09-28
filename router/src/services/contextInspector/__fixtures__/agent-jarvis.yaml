@@ -7,4 +7,3 @@ tools:
   - voice
   - documents
   - fileAccess:full
-  - memory:global

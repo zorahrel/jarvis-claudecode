@@ -3,4 +3,3 @@ inheritUserScope: false
 tools:
   - vision
   - fileAccess:readonly
-  - memory:global

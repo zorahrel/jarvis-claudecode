@@ -7,8 +7,8 @@
       > ~/Library/LaunchAgents/com.jarvis.docs-index.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jarvis.docs-index.plist
 
-  Uses the same venv as OMEGA (router/scripts/omega-env). Deps: numpy,
-  onnxruntime, tokenizers (already pulled in by omega-memory).
+  Runs in its own venv (router/scripts/docs-env): numpy, onnxruntime,
+  tokenizers. Until 2026-09-28 it borrowed the OMEGA venv (omega-env).
 
   The label was com.jarvis.chroma until 2026-08-14: ChromaDB really did sit
   behind :3342 until docs-server.py replaced it on 2026-07-05, and the name
@@ -22,7 +22,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python3</string>
+    <string>__HOME__/.claude/jarvis/router/scripts/docs-env/bin/python3</string>
     <string>-u</string>
     <string>__HOME__/.claude/jarvis/router/scripts/docs-server.py</string>
   </array>

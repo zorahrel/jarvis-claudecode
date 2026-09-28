@@ -48,7 +48,6 @@ function categorizeTools(tools: ToolDef[]): Record<string, ToolDef[]> {
     Media: tools.filter(t => ['vision', 'voice', 'documents'].includes(t.id)),
     Email: tools.filter(t => t.id.startsWith('email:')),
     Calendar: tools.filter(t => t.id.startsWith('calendar:')),
-    Memory: tools.filter(t => t.id.startsWith('memory:')),
     System: tools.filter(t => ['subagents', 'fileAccess:full', 'fileAccess:readonly', 'config', 'launchAgents'].includes(t.id)),
     MCP: tools.filter(t => t.type === 'mcp'),
   }
@@ -58,7 +57,6 @@ const categoryLabels: Record<string, string> = {
   Media: 'Media & Processing',
   Email: 'Email Accounts',
   Calendar: 'Calendar Accounts',
-  Memory: 'Memory Scopes',
   System: 'System Capabilities',
   MCP: 'MCP Servers',
 }

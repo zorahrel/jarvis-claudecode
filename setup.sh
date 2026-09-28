@@ -113,32 +113,34 @@ else
   ok "dashboard built → router/dashboard/dist"
 fi
 
-# --- 3. OMEGA venv + model ---------------------------------------------------
-step "Setting up OMEGA conversation-memory server"
-VENV="$SCRIPTS/omega-env"
+# --- 3. docs-index venv ------------------------------------------------------
+# docs-server.py (:3342) needs only numpy + onnxruntime + tokenizers. Until
+# 2026-09-28 it borrowed the OMEGA venv (omega-env); OMEGA is retired, so it
+# gets its own small venv.
+step "Setting up docs-index (document RAG) venv"
+VENV="$SCRIPTS/docs-env"
 if [ ! -d "$VENV" ]; then
   python3 -m venv "$VENV"
-  ok "created venv at router/scripts/omega-env"
+  ok "created venv at router/scripts/docs-env"
 else
-  skip "omega-env already exists"
+  skip "docs-env already exists"
 fi
 
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
-if ! python -c "import omega" 2>/dev/null; then
-  info "installing omega-memory[server] (≈30s)"
+if ! python -c "import numpy, onnxruntime, tokenizers" 2>/dev/null; then
+  info "installing numpy + onnxruntime + tokenizers (≈30s)"
   pip install --quiet --upgrade pip
-  pip install --quiet 'omega-memory[server]'
-  ok "omega-memory installed"
+  pip install --quiet numpy onnxruntime tokenizers
+  ok "docs-index deps installed"
 else
-  skip "omega-memory already installed"
+  skip "docs-index deps already installed"
 fi
 
 # chromadb used to be installed here for chroma-server.py (:3342). Since
-# 2026-07-05 that port is served by docs-server.py, which needs only numpy +
-# onnxruntime + tokenizers — all already pulled in by omega-memory. Installing
-# chromadb again would add ~100 MB of rust bindings that nothing imports.
+# 2026-07-05 that port is served by docs-server.py; installing chromadb again
+# would add ~100 MB of rust bindings that nothing imports.
 if ! python -c "import dotenv" 2>/dev/null; then
   info "installing python-dotenv"
   pip install --quiet python-dotenv
@@ -147,19 +149,24 @@ else
   skip "python-dotenv already installed"
 fi
 
-MODEL_CACHE="$HOME/.cache/omega/models/bge-small-en-v1.5-onnx"
-if [ ! -d "$MODEL_CACHE" ] || [ -z "$(ls -A "$MODEL_CACHE" 2>/dev/null)" ]; then
-  info "downloading ONNX embedding model (≈90 MB, one-time)"
-  omega setup --download-model --client venv >/dev/null
-  ok "ONNX model ready"
+# Embedding model for docs-server.py: the same MiniLM ONNX export Chroma
+# shipped, so the vectors match the ones already cached. Jarvis owns the copy
+# in state/models/ (the old ~/.cache/chroma path is only a fallback).
+DOCS_MODEL="$REPO_ROOT/state/models/all-MiniLM-L6-v2"
+if [ ! -f "$DOCS_MODEL/model.onnx" ]; then
+  info "downloading MiniLM ONNX embedding model (≈90 MB, one-time)"
+  mkdir -p "$DOCS_MODEL"
+  curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
+    | tar -xz -C "$DOCS_MODEL" --strip-components=1
+  ok "MiniLM model ready → state/models/all-MiniLM-L6-v2"
 else
-  skip "ONNX model already present"
+  skip "MiniLM model already present"
 fi
 
 deactivate
 
 # --- 3b. Moondream Station venv (local vision, MLX/Apple Silicon) -----------
-# Separate venv from omega-env because Moondream Station pulls a heavyweight
+# Separate venv from docs-env because Moondream Station pulls a heavyweight
 # transformers + torch + mlx stack and we want crash isolation. Pin
 # transformers <5 because moondream-2 hub code references attributes
 # (all_tied_weights_keys) that were removed in transformers 5.x.
@@ -339,7 +346,7 @@ fi
 #
 # Three services registered per platform so the user never has to keep a
 # terminal open:
-#   docs-index (:3342)  ·  omega (:3343)  ·  router (:3340/:3341)
+#   docs-index (:3342)  ·  moondream (:2020)  ·  router (:3340/:3341)
 #
 # macOS → LaunchAgents (launchctl)     Linux → systemd user units
 # Windows setup is handled by setup.ps1.
@@ -365,11 +372,11 @@ if [ "$NO_AGENTS" = "1" ]; then
   step "System services"
   skip "auto-start disabled (--no-agents)"
 elif [ "$PLATFORM" = "Darwin" ]; then
-  step "Installing LaunchAgents (docs-index + omega + router)"
+  step "Installing LaunchAgents (docs-index + router)"
   LA_DIR="$HOME/Library/LaunchAgents"
   mkdir -p "$LA_DIR"
 
-  for svc in docs-index omega moondream router; do
+  for svc in docs-index moondream router; do
     template="$SCRIPTS/com.jarvis.${svc}.plist.example"
     target="$LA_DIR/com.jarvis.${svc}.plist"
     if [ ! -f "$template" ]; then
@@ -386,13 +393,13 @@ elif [ "$PLATFORM" = "Darwin" ]; then
   SERVICES_INSTALLED=1
 
 elif [ "$PLATFORM" = "Linux" ]; then
-  step "Installing systemd user units (docs-index + omega + router)"
+  step "Installing systemd user units (docs-index + router)"
   if ! command -v systemctl >/dev/null 2>&1; then
     warn "systemctl not found — skipping (install services manually)"
   else
     UNIT_DIR="$HOME/.config/systemd/user"
     mkdir -p "$UNIT_DIR"
-    for svc in docs-index omega moondream router; do
+    for svc in docs-index moondream router; do
       template="$SCRIPTS/systemd/jarvis-${svc}.service"
       target="$UNIT_DIR/jarvis-${svc}.service"
       if [ ! -f "$template" ]; then
@@ -402,7 +409,7 @@ elif [ "$PLATFORM" = "Linux" ]; then
       ok "wrote $target"
     done
     systemctl --user daemon-reload
-    for svc in docs-index omega moondream router; do
+    for svc in docs-index moondream router; do
       if [ -f "$UNIT_DIR/jarvis-${svc}.service" ]; then
         systemctl --user enable --now "jarvis-${svc}.service" 2>&1 \
           | sed 's/^/    /' || true
@@ -440,8 +447,7 @@ if [ "$SERVICES_INSTALLED" = "1" ]; then
   cat <<EOF
 
 ${BOLD}All services are running and auto-start at login:${RESET}
-  ${DIM}ChromaDB  (docs)          :3342${RESET}
-  ${DIM}OMEGA     (conversation)  :3343${RESET}
+  ${DIM}Docs-index (memory RAG)   :3342${RESET}
   ${DIM}Moondream (local vision)  :2020${RESET}
   ${DIM}Router    (bots + web UI) :3340 / :3341${RESET}
 
@@ -462,8 +468,7 @@ else
 
 ${BOLD}Start the stack manually:${RESET}
   ${BLUE}cd router${RESET}
-  ${BLUE}./scripts/omega-env/bin/python scripts/docs-server.py &${RESET}   ${DIM}# :3342${RESET}
-  ${BLUE}./scripts/omega-env/bin/python scripts/omega-server.py &${RESET}    ${DIM}# :3343${RESET}
+  ${BLUE}./scripts/docs-env/bin/python scripts/docs-server.py &${RESET}    ${DIM}# :3342${RESET}
   ${BLUE}npm start${RESET}                                                   ${DIM}# :3340${RESET}
 EOF
 fi

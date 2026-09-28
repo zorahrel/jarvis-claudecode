@@ -4,7 +4,7 @@ import { join } from "path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getProcesses, killProcessByKey, killSessionsByAgent, killSessionsUsingMcp, reconnectMcpInLiveSessions, resolveCliPath } from "../services/claude";
 import { loadSessionThread, isValidKey } from "../services/session-cache";
-import { searchDocsDetailed, searchMemoriesDetailed, getMemoryStats, getDocuments, getMemories, deleteMemory, reindexDocs } from "../services/memory";
+import { searchDocsDetailed, getMemoryStats, getDocuments, reindexDocs } from "../services/memory";
 import { getConfig, readRawConfig, writeRawConfig, getToolRegistry, getToolRouteMap, getEmailAccounts, getAgentRegistry, reloadConfig } from "../services/config-loader";
 import { getCronStates, triggerCronJob, listCronRuns, deleteCronRuns, getDeliveryFn, setCronEnabled } from "../services/cron";
 import { resolveToken } from "../services/notify-tokens";
@@ -72,16 +72,6 @@ const GRAPH_CACHE_TTL_MS = 30_000;
 let _graphCache: { at: number; payload: { nodes: any[]; edges: any[] } } | null = null;
 function invalidateGraphCache(): void { _graphCache = null; }
 
-// --- Scope descriptions for memory dropdown ---
-// Built-in descriptions for common scopes. User-defined scopes (see
-// jarvis.memoryScopePatterns in config.yaml) fall through to a default label
-// rendered by the dashboard.
-export const SCOPE_HELP: Record<string, string> = {
-  "": "All scopes",
-  business: "Default scope for conversations — work / clients / routing",
-  global: "General purpose scope — cross-cutting notes",
-};
-
 export async function handleApi(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
   // Strip query string so endpoint matches with `path === "..."` work correctly
   const qIdx = path.indexOf("?");
@@ -143,7 +133,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       responseTimes: getResponseTimesData(),
       logs: logEntries.slice(-50),
       cliSessions: getCliSessions(),
-      scopeHelp: SCOPE_HELP,
       callers,
       alwaysReplyGroups,
       globalClaudeMd,
@@ -1959,17 +1948,10 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     const limit = parseInt(reqUrl.searchParams.get("limit") || "5");
     if (!q) { json(req, res, { error: "q required" }, 400); return; }
     try {
-      const [docRes, memRes] = await Promise.all([
-        searchDocsDetailed(q, scope, limit),
-        searchMemoriesDetailed(q, scope, limit),
-      ]);
-      const partial: string[] = [];
-      if (docRes.timedOut) partial.push("docs");
-      if (memRes.timedOut) partial.push("memories");
+      const docRes = await searchDocsDetailed(q, scope, limit);
       json(req, res, {
         docs: docRes.results,
-        memories: memRes.results,
-        ...(partial.length ? { partial } : {}),
+        ...(docRes.timedOut ? { partial: ["docs"] } : {}),
       });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
@@ -1985,14 +1967,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
     try {
       const docs = await getDocuments(scope);
       json(req, res, { documents: docs });
-    } catch (e: any) { json(req, res, { error: e.message }, 500); }
-
-  } else if (path.startsWith("/api/memory/memories") && req.method === "GET") {
-    const reqUrl = new URL(req.url ?? "/", "http://localhost");
-    const scope = reqUrl.searchParams.get("scope") || undefined;
-    try {
-      const mems = await getMemories(scope);
-      json(req, res, { memories: mems });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   } else if (path === "/api/memory/reindex" && req.method === "POST") {
@@ -2231,14 +2205,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       scheduleReindex(`DELETE ${rel}`);
       invalidateGraphCache();
       json(req, res, { ok: true, path: rel });
-    } catch (e: any) { json(req, res, { error: e.message }, 500); }
-
-  } else if (path.startsWith("/api/memory/") && req.method === "DELETE") {
-    if (!requireConfirm(req, res)) return;
-    const id = decodeURIComponent(path.slice("/api/memory/".length));
-    try {
-      const ok = await deleteMemory(id);
-      json(req, res, { ok, id });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   // -- Agent file CRUD (read/edit files inside ~/.claude/jarvis/agents/<name>/) --
@@ -2662,30 +2628,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, path:
       invalidateHtmlCache();
       log.info("[dashboard] Deleted cron job: %s", name);
       json(req, res, { ok: true });
-    } catch (e: any) { json(req, res, { error: e.message }, 500); }
-
-  // --- MEMORY SCOPES ---
-  } else if (path === "/api/config/memory-scopes" && req.method === "GET") {
-    try {
-      const raw = readRawConfig();
-      const scopes = raw.jarvis?.memoryScopes ?? Object.keys(SCOPE_HELP).filter(Boolean);
-      json(req, res, { scopes });
-    } catch (e: any) { json(req, res, { error: e.message }, 500); }
-
-  } else if (path === "/api/config/memory-scopes" && req.method === "POST") {
-    try {
-      const body = await parseBody(req);
-      if (!body.scope) { json(req, res, { error: "scope required" }, 400); return; }
-      const raw = readRawConfig();
-      if (!raw.jarvis) raw.jarvis = {};
-      if (!raw.jarvis.memoryScopes) raw.jarvis.memoryScopes = Object.keys(SCOPE_HELP).filter(Boolean);
-      if (!raw.jarvis.memoryScopes.includes(body.scope)) {
-        raw.jarvis.memoryScopes.push(body.scope);
-      }
-      await writeRawConfig(raw);
-      invalidateHtmlCache();
-      log.info("[dashboard] Added memory scope: %s", body.scope);
-      json(req, res, { ok: true, scopes: raw.jarvis.memoryScopes });
     } catch (e: any) { json(req, res, { error: e.message }, 500); }
 
   } else if (path === "/api/agents/full" && req.method === "GET") {

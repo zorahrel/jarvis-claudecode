@@ -8,7 +8,6 @@ import { checkIncomingRate, checkAgentRate } from "./rate-limiter";
 import { trackMessage, trackResponseTime, pushLog, broadcast, clientCount } from "../dashboard/server";
 import { getConfig } from "./config-loader";
 import type { ResponseStatus } from "../dashboard/state";
-import { addMemory } from "./memory";
 import { existsSync, statSync } from "fs";
 import { basename, extname } from "path";
 import { chunkForDiscord } from "./discord-chunker";
@@ -247,10 +246,6 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
       log.warn({ key, channel: msg.channel }, "Voice media received but voice not enabled");
     }
 
-    // Memory scope: derive from tools
-    const memoryTool = tools.find(t => t.startsWith("memory:"));
-    const memoryScope = memoryTool ? memoryTool.split(":")[1] : null;
-
     // 🧠 reaction (typing stays ON during Claude call — interval keeps refreshing)
     msg.react?.("🧠").catch(() => {});
 
@@ -483,11 +478,6 @@ export async function handleMessage(msg: IncomingMessage): Promise<void> {
 
     // Persist exchange for session continuity across restarts
     recordExchange(key, fullText, response.text);
-
-    // Save conversation to memory using tool-derived scope
-    if (memoryScope) {
-      addMemory(`User: ${msg.text}\nAssistant: ${response.text}`, memoryScope).catch(() => {});
-    }
   } catch (err) {
     stopTyping();
 

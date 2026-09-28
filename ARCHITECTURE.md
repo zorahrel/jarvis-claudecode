@@ -17,7 +17,9 @@ Each channel has routes with per-agent capabilities and scoping.
 |---------|------|---------|------|
 | Router | 3340/3341 | com.jarvis.router (launchd) | `~/.claude/jarvis/router/` |
 | Docs-index | 3342 | com.jarvis.docs-index (launchd) | `scripts/docs-server.py` |
-| OMEGA | 3343 | com.jarvis.omega (launchd) | `scripts/omega-server.py` |
+| Moondream (optional) | 2020 | com.jarvis.moondream (launchd) | `scripts/moondream-env/` |
+
+OMEGA (:3343) retired 2026-09-28, see `memory/tools/memory.md`.
 
 Extra services can be added via a `services:` section in `router/config.yaml`
 (see `router/config.example.yaml`). They show up in the dashboard and can be
@@ -45,7 +47,7 @@ managed by the tray app if they provide a `launchd:` config.
 │   │   │   ├── message-buffer.ts    # Telegram ring buffer (persisted to state/)
 │   │   │   ├── whatsapp-history.ts  # WA per-chat JSONL store fed by Baileys events
 │   │   │   ├── media.ts           # Whisper, vision, file extract
-│   │   │   ├── memory.ts          # docs-index + OMEGA client
+│   │   │   ├── memory.ts          # docs-index client
 │   │   │   ├── router.ts          # Route matching
 │   │   │   ├── services.ts        # Service registry + launchd plist builder
 │   │   │   ├── config-loader.ts
@@ -57,7 +59,8 @@ managed by the tray app if they provide a `launchd:` config.
 │   │       └── message.ts    # IncomingMessage, Media
 │   ├── scripts/
 │   │   ├── docs-server.py    # Docs-index HTTP API (RAG over memory/*.md)
-│   │   └── omega-server.py   # OMEGA HTTP API
+│   │   ├── docs-env/         # Docs-index Python venv
+│   │   └── retired/          # Dismissed services, kept for rollback
 │   ├── config.yaml           # Route config (gitignored)
 │   ├── certs/                # Self-signed TLS
 │   └── wa-auth/              # WhatsApp session
@@ -65,8 +68,7 @@ managed by the tray app if they provide a `launchd:` config.
 ├── memory/                   # Markdown memory (gitignored)
 ├── media/                    # Temp media files (gitignored)
 ├── logs/                     # Service logs (gitignored)
-├── state/                    # docs-index cache + ONNX model (gitignored)
-└── ~/.omega/                  # OMEGA SQLite store (user home, gitignored)
+└── state/                    # docs-index cache + ONNX model (gitignored)
 ```
 
 ## Routing
@@ -135,10 +137,10 @@ Connector receives media
 ```
 
 ## Memory System
-- **Docs-index** (localhost:3342): indexes `.md` files scoped by agent, `all-MiniLM-L6-v2` ONNX locally
-- **OMEGA** (localhost:3343): conversation memory in SQLite + `sqlite-vec` + FTS5 + `bge-small-en-v1.5` ONNX locally
+- **Docs-index** (localhost:3342): the only Jarvis memory service. Indexes `~/.claude/jarvis/memory/**/*.md` scoped by agent, `all-MiniLM-L6-v2` ONNX (`state/models/`), embedding cache in `state/docs-index.db`
+- **Native Claude Code memory**: `CLAUDE.md` / `MEMORY.md`, loaded by each spawned agent
 - **Embeddings**: fully on-device, no external API
-- **Ingestion**: auto-saved after each reply, scope-tagged by session key
+- **Ingestion**: none from chat. The router does not save conversations. Memory is whatever Markdown lives under `memory/`
 
 ## Process Model
 - 1 persistent Claude CLI process per session key
@@ -151,7 +153,7 @@ Connector receives media
 Core (always present) in `~/Library/LaunchAgents/`:
 - `com.jarvis.router` — KeepAlive
 - `com.jarvis.docs-index` — KeepAlive
-- `com.jarvis.omega` — KeepAlive
+- `com.jarvis.moondream` (optional, local vision on :2020)
 - `com.jarvis.tray` — RunAtLoad
 
 User services from `config.yaml` generate their own `com.<user>.<name>.plist`.
@@ -169,7 +171,7 @@ User services from `config.yaml` generate their own `com.<user>.<name>.plist`.
   - `<workspace>/CLAUDE.md` → agent-specific identity (auto-loaded from cwd)
 - MCP servers live in `~/.claude/settings.json` — single source of truth between the interactive CLI and Jarvis
 - MCP only on routes that require it (per-route filter via `mcp:<name>` tool entries, or all via `fullAccess: true`)
-- No Docker — fully native (SQLite + sqlite-vec, ONNX embeddings)
+- No Docker — fully native (SQLite embedding cache, ONNX embeddings)
 - No external API keys required; Claude Code CLI uses OAuth subscription
 - Vision via Claude content blocks
 

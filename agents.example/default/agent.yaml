@@ -33,8 +33,7 @@ tools:
   # - email:myaccount       # Email via gws-mail (account name)
   # - calendar:myaccount    # Calendar via gws-mail
   - fileAccess:readonly     # readonly | full
-  - memory:global           # Memory scope (business, global, custom)
-  # - documents             # Search ChromaDB document index
+  # - documents             # Read documents users attach (PDF, files)
   # - mcp:brave-search      # MCP server (must exist in ~/.claude/settings.json)
   # - mcp:github
   # - mcp:context7

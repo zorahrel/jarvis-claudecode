@@ -73,7 +73,6 @@ const toolIconMap: Record<string, (size: number) => ReactNode> = {
 
 export function ToolIcon({ id, type, size = 16 }: { id: string; type?: string; size?: number }) {
   if (toolIconMap[id]) return <>{toolIconMap[id](size)}</>
-  if (id.startsWith('memory:')) return <Brain size={size} />
   if (id.startsWith('email:')) return <Mail size={size} />
   if (id.startsWith('calendar:')) return <Calendar size={size} />
   if (type === 'mcp') return <Server size={size} />

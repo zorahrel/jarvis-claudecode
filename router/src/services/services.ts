@@ -46,7 +46,7 @@ export function getCoreServices(): ServiceDef[] {
       healthUrl: "http://localhost:3342/health",
       launchd: {
         label: "com.jarvis.docs-index",
-        args: ["scripts/omega-env/bin/python3", "-u", "scripts/docs-server.py"],
+        args: ["scripts/docs-env/bin/python3", "-u", "scripts/docs-server.py"],
         cwd: ROUTER_DIR,
         logName: "docs-index",
       },

@@ -7,7 +7,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=__HOME__/.claude/jarvis/router
-ExecStart=__HOME__/.claude/jarvis/router/scripts/omega-env/bin/python -u scripts/docs-server.py
+ExecStart=__HOME__/.claude/jarvis/router/scripts/docs-env/bin/python -u scripts/docs-server.py
 Restart=always
 RestartSec=2
 StandardOutput=append:__HOME__/.claude/jarvis/logs/docs-index.log

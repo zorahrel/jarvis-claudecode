@@ -95,7 +95,6 @@ probe() { # nome, url
 }
 probe router     "$ROUTER/api/services"
 probe docs-index "http://127.0.0.1:3342/health"
-probe omega      "http://127.0.0.1:3343/health"
 
 # --- cron -------------------------------------------------------------------
 # Il vecchio check guardava solo consecutiveErrors>2: un cron che smette di
@@ -154,7 +153,6 @@ KNOWN_PORTS=$(cat <<'EOF'
 3340 jarvis router http
 3341 jarvis router https
 3342 docs-index
-3343 omega
 3355 claude-usage-tray
 3737 darkroom backend
 5199 vite dev

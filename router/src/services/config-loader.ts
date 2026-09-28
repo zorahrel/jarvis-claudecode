@@ -221,23 +221,13 @@ export function getToolRegistry(): ToolDef[] {
   tools.push(
     { id: "vision", type: "builtin", label: "Vision", icon: "\ud83d\udc41", description: "Analyze images sent in chat" },
     { id: "voice", type: "builtin", label: "Voice", icon: "\ud83c\udfa4", description: "Transcribe voice/audio messages via Whisper" },
-    { id: "documents", type: "builtin", label: "Documents", icon: "\ud83d\udcc4", description: "Search indexed docs via ChromaDB" },
+    { id: "documents", type: "builtin", label: "Documents", icon: "\ud83d\udcc4", description: "Read documents users attach (PDF, files)" },
     { id: "subagents", type: "builtin", label: "Sub-agents", icon: "\ud83e\udd16", description: "Spawn background child agents" },
     { id: "fileAccess:full", type: "builtin", label: "Files (full)", icon: "\ud83d\udcc1", description: "Full read/write file system access" },
     { id: "fileAccess:readonly", type: "builtin", label: "Files (read)", icon: "\ud83d\udcc1", description: "Read-only file system access" },
     { id: "config", type: "builtin", label: "Config", icon: "\u2699\ufe0f", description: "Read/modify router configuration" },
     { id: "launchAgents", type: "builtin", label: "LaunchAgents", icon: "\ud83d\ude80", description: "Start macOS automations" },
   );
-
-  // Memory scopes (from config or default to just "business")
-  const rawCfg = (() => { try { return readRawConfig(); } catch { return {}; } })();
-  const memoryScopes: string[] = rawCfg?.jarvis?.memoryScopes ?? ["business"];
-  for (const scope of memoryScopes) {
-    tools.push({
-      id: `memory:${scope}`, type: "builtin", label: `Memory: ${scope}`, icon: "\ud83e\udde0",
-      description: `Persistent conversation memory (${scope} scope)`,
-    });
-  }
 
   // Email accounts (CLI tools via gws-mail)
   const emailAccounts = getEmailAccounts();

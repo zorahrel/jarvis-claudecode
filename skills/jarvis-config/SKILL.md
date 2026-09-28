@@ -48,7 +48,7 @@ Copy the template and edit:
 cp -r agents.example/default agents/<name>
 ```
 
-Then edit `agents/<name>/agent.yaml` (model, tools, fileAccess, memory scope, MCP servers) and `agents/<name>/CLAUDE.md` (identity, rules, tone, language). Route to it from `config.yaml` with `use: <name>`.
+Then edit `agents/<name>/agent.yaml` (model, tools, fileAccess, MCP servers) and `agents/<name>/CLAUDE.md` (identity, rules, tone, language). Route to it from `config.yaml` with `use: <name>`.
 
 Agent `agent.yaml` essentials:
 
@@ -61,8 +61,7 @@ tools:
   - vision
   - voice
   - fileAccess:readonly        # readonly | full
-  - memory:global              # scope name — business | global | custom
-  - documents                  # ChromaDB doc search
+  - documents                  # read documents users attach (PDF, files)
   - email:personal             # gws-mail account name
   - mcp:context7               # any MCP server in ~/.claude/settings.json
 inheritUserScope: false        # set for external/client agents — don't read ~/.claude/CLAUDE.md
@@ -100,7 +99,7 @@ services:
       cwd: ~/path/to
 ```
 
-Core services (Router, ChromaDB, OMEGA) are automatic — don't list them.
+Core services (Router, docs-index) are automatic — don't list them.
 
 ## Rules
 

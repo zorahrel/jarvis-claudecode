@@ -25,7 +25,10 @@ export const MCP_AVG_TOKENS_PER_SERVER = 1000; // small=400, medium=1200, large=
 export const MCP_TOOL_SEARCH_META_TOKENS = 200;
 export const SKILLS_INDEX_DEFAULT_TOKENS = 3000; // jarvis-marketplace + user + plugin + gsd:* (~2.5k alone)
 export const SUBAGENTS_INDEX_TOKENS = 1000; // 18 GSD * ~50 tokens index entry
-export const HOOKS_MEMORY_AVG_TOKENS = 800; // OMEGA inject 0.5-2k midpoint
+// Nessun hook user-scope inietta più contesto: il recall OMEGA è stato spento il
+// 04/07/2026 e OMEGA dismesso il 28/09/2026. La categoria resta perché la
+// dashboard la mostra, ma a zero finché un hook non torna a scrivere nel prompt.
+export const HOOKS_MEMORY_AVG_TOKENS = 0;
 
 // ─── Public types (signatures EXACT — Plan 05 imports by name) ───────────────
 
@@ -217,7 +220,7 @@ export async function calculateBreakdown(
         category: "hooks_memory",
         tokens: HOOKS_MEMORY_AVG_TOKENS,
         details: {
-          note: "OMEGA auto_capture per UserPromptSubmit + surface_memories per tool call (avg)",
+          note: "no user-scope hook injects context (OMEGA retired 2026-09-28)",
         },
       }
     : {

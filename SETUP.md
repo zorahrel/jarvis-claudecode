@@ -21,6 +21,7 @@ Core (always present, hardcoded):
 |---------|------|-------------|--------|
 | Router | 3340/3341 | com.jarvis.router | `curl localhost:3340/api/stats` |
 | Docs-index | 3342 | com.jarvis.docs-index | `curl localhost:3342/health` |
+| Moondream (optional) | 2020 | com.jarvis.moondream | `moondream --selftest` |
 
 OMEGA (3343) dismesso il 28/09/2026: plist in `LaunchAgents/disabled/`, memorie in `memory/projects/`. Rollback in `memory/tools/memory.md`.
 
@@ -52,15 +53,6 @@ curl localhost:3342/health
 launchctl kickstart -k gui/$(id -u)/com.jarvis.docs-index
 ```
 
-### OMEGA DB locked
-OMEGA uses SQLite; concurrent writers can occasionally leave a stray lock.
-Stop the service and let it restart cleanly:
-```bash
-launchctl stop com.jarvis.omega
-rm -f ~/.omega/omega.db-journal
-launchctl start com.jarvis.omega
-```
-
 ### WhatsApp disconnected (Bad MAC)
 Normal during reconnection. If persistent, delete `wa-auth/` and re-run pairing.
 
@@ -78,9 +70,6 @@ curl localhost:3340/api/services
 
 # Reindex the docs-index
 curl -X POST localhost:3342/reindex
-
-# Search memories
-curl "localhost:3343/search?q=example&user_id=business"
 
 # Search docs
 curl "localhost:3342/search?q=query+terms&scope=business"
@@ -101,9 +90,9 @@ Edit `CLAUDE.md` agents → process auto-reads on next spawn
 Edit dashboard → `npm run build` inside `router/dashboard/` and restart the router
 
 ## OpenAI Key
-Used for: nothing mandatory. Both the docs-index and OMEGA use local ONNX embeddings.
+Used for: nothing mandatory. The docs-index uses local ONNX embeddings.
 Set via env in `.env`: `OPENAI_API_KEY=sk-...`.
-Models (local): `all-MiniLM-L6-v2` (docs-index), `bge-small-en-v1.5` (OMEGA).
+Models (local): `all-MiniLM-L6-v2` ONNX (docs-index, in `state/models/`, venv `router/scripts/docs-env`).
 
 ## Whisper
 - Binary: `/opt/homebrew/bin/whisper-cli`

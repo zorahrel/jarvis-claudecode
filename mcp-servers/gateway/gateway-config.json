@@ -27,15 +27,6 @@
       "autoMount": false
     },
     {
-      "name": "omega",
-      "transport": "stdio",
-      "command": "node",
-      "args": [
-        "${HOME}/.claude/jarvis/mcp-servers/omega-search/index.mjs"
-      ],
-      "autoMount": false
-    },
-    {
       "name": "distilled",
       "transport": "stdio",
       "command": "node",

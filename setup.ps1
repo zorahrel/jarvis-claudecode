@@ -1,6 +1,6 @@
 # Jarvis Claude Code - Windows one-shot setup.
-# Idempotent. Installs deps, builds dashboard, sets up OMEGA + docs-index, and
-# registers scheduled tasks that start the three services at logon.
+# Idempotent. Installs deps, builds dashboard, sets up the docs-index, and
+# registers scheduled tasks that start the services at logon.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File .\setup.ps1
@@ -90,27 +90,28 @@ if (Test-Path $distIndex) {
     Ok 'dashboard built -> router\dashboard\dist'
 }
 
-# --- OMEGA venv + ONNX model ------------------------------------------------
-Step 'Setting up Python memory servers (OMEGA + docs-index)'
-$venv = Join-Path $Scripts 'omega-env'
+# --- docs-index venv + ONNX model -------------------------------------------
+# docs-server.py (:3342) needs only numpy + onnxruntime + tokenizers. Until
+# 2026-09-28 it borrowed the OMEGA venv (omega-env); OMEGA is retired.
+Step 'Setting up the docs-index (document RAG) server'
+$venv = Join-Path $Scripts 'docs-env'
 $venvPython = Join-Path $venv 'Scripts\python.exe'
 if (-not (Test-Path $venv)) {
     & $py.Source -m venv $venv
-    Ok 'venv created at router\scripts\omega-env'
-} else { Skip 'omega-env already exists' }
+    Ok 'venv created at router\scripts\docs-env'
+} else { Skip 'docs-env already exists' }
 
-$hasOmega = $false
-try { & $venvPython -c "import omega" 2>$null; $hasOmega = ($LASTEXITCODE -eq 0) } catch {}
-if (-not $hasOmega) {
-    Info 'installing omega-memory[server] (about 30s)'
+$hasDeps = $false
+try { & $venvPython -c "import numpy, onnxruntime, tokenizers" 2>$null; $hasDeps = ($LASTEXITCODE -eq 0) } catch {}
+if (-not $hasDeps) {
+    Info 'installing numpy + onnxruntime + tokenizers (about 30s)'
     & $venvPython -m pip install --quiet --upgrade pip
-    & $venvPython -m pip install --quiet 'omega-memory[server]'
-    Ok 'omega-memory installed'
-} else { Skip 'omega-memory already installed' }
+    & $venvPython -m pip install --quiet numpy onnxruntime tokenizers
+    Ok 'docs-index deps installed'
+} else { Skip 'docs-index deps already installed' }
 
 # chromadb used to be installed here for chroma-server.py (:3342). Since
-# 2026-07-05 that port is served by docs-server.py, which needs only numpy +
-# onnxruntime + tokenizers - all already pulled in by omega-memory.
+# 2026-07-05 that port is served by docs-server.py.
 $hasDotenv = $false
 try { & $venvPython -c "import dotenv" 2>$null; $hasDotenv = ($LASTEXITCODE -eq 0) } catch {}
 if (-not $hasDotenv) {
@@ -119,13 +120,17 @@ if (-not $hasDotenv) {
     Ok 'python-dotenv installed'
 } else { Skip 'python-dotenv already installed' }
 
-$modelCache = Join-Path $env:USERPROFILE '.cache\omega\models\bge-small-en-v1.5-onnx'
-if (-not (Test-Path $modelCache) -or -not (Get-ChildItem $modelCache -ErrorAction SilentlyContinue)) {
-    Info 'downloading ONNX embedding model (about 90 MB, one-time)'
-    $omegaExe = Join-Path $venv 'Scripts\omega.exe'
-    & $omegaExe setup --download-model --client venv | Out-Null
-    Ok 'ONNX model ready'
-} else { Skip 'ONNX model already present' }
+# Same MiniLM ONNX export Chroma shipped, so vectors match the cached ones.
+$docsModel = Join-Path $RepoRoot 'state\models\all-MiniLM-L6-v2'
+if (-not (Test-Path (Join-Path $docsModel 'model.onnx'))) {
+    Info 'downloading MiniLM ONNX embedding model (about 90 MB, one-time)'
+    New-Item -ItemType Directory -Path $docsModel -Force | Out-Null
+    $tgz = Join-Path $env:TEMP 'all-MiniLM-L6-v2-onnx.tar.gz'
+    Invoke-WebRequest -Uri 'https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz' -OutFile $tgz
+    & tar -xzf $tgz -C $docsModel --strip-components=1
+    Remove-Item $tgz
+    Ok 'MiniLM model ready -> state\models\all-MiniLM-L6-v2'
+} else { Skip 'MiniLM model already present' }
 
 # --- Config files ------------------------------------------------------------
 Step 'Creating config files'
@@ -168,7 +173,7 @@ if ($NoAgents) {
     Step 'Scheduled tasks'
     Skip 'auto-start disabled (-NoAgents)'
 } else {
-    Step 'Registering scheduled tasks (docs-index + omega + router)'
+    Step 'Registering scheduled tasks (docs-index + router)'
     if (-not (Test-Path $LogsDir)) { New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null }
 
     $pythonw = Join-Path $venv 'Scripts\pythonw.exe'
@@ -183,13 +188,6 @@ if ($NoAgents) {
                 -Execute $pythonw `
                 -Argument "`"$(Join-Path $Scripts 'docs-server.py')`"" `
                 -WorkingDirectory $Router
-        },
-        @{
-            Name = 'JarvisOmega'
-            Action = New-ScheduledTaskAction `
-                -Execute $pythonw `
-                -Argument "`"$(Join-Path $Scripts 'omega-server.py')`"" `
-                -WorkingDirectory $Scripts
         },
         @{
             Name = 'JarvisRouter'
@@ -243,7 +241,6 @@ Write-Host ""
 if ($tasksInstalled) {
     Write-Host "All services run in the background and auto-start at logon:" -ForegroundColor White
     Write-Host "  Docs-index (RAG)        :3342"
-    Write-Host "  OMEGA    (conversation) :3343"
     Write-Host "  Router   (bots + web)   :3340 / :3341"
     Write-Host ""
     Write-Host "  Logs:    $LogsDir"
@@ -254,9 +251,8 @@ if ($tasksInstalled) {
     Write-Host ""
     Write-Host "Important: after editing .env / config.yaml, restart the router task." -ForegroundColor Yellow
 } else {
-    Write-Host "Start the stack manually (three terminals):"
+    Write-Host "Start the stack manually (two terminals):"
     Write-Host "  cd router"
-    Write-Host "  scripts\omega-env\Scripts\python.exe scripts\docs-server.py"
-    Write-Host "  scripts\omega-env\Scripts\python.exe scripts\omega-server.py"
+    Write-Host "  scripts\docs-env\Scripts\python.exe scripts\docs-server.py"
     Write-Host "  npm start"
 }

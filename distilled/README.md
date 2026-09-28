@@ -14,9 +14,10 @@ distilled/
 ```
 
 ## Ciclo di vita
-1. Il cron **distiller** (settimanale, agente `agents/distiller`) analizza i
-   `task_completion` di OMEGA (:3343), individua pattern ripetuti (≥3) e
-   scrive un draft in `_drafts/`.
+1. Il cron **distiller** (settimanale, agente `agents/distiller`) legge le note
+   di memoria cambiate dall'ultima run (memoria nativa di Claude Code e
+   `~/.claude/jarvis/memory/`), individua pattern ripetuti (≥3) e scrive un
+   draft in `_drafts/`. Fino al 28/09/2026 leggeva OMEGA (:3343), dismesso.
 2. Attilio approva: `~/.claude/jarvis/mcp-servers/distilled/approve.sh <nome>`
    (scan SkillSpector inclusa). **Mai promuovere in autonomia.**
 3. Remount del child (`gateway_unmount` + `gateway_mount` di `distilled`, o

@@ -63,7 +63,7 @@ export interface AgentConfig {
   /** Absolute workspace path. Injected at load time. */
   workspace: string;
   model?: string;
-  /** Granular tool list: ["vision", "email:myaccount", "mcp:github", "memory:business",
+  /** Granular tool list: ["vision", "email:myaccount", "mcp:github",
    *  "discord", "discord:write", "whatsapp", "whatsapp:write", "telegram", "telegram:write",
    *  "channels"]
    */
@@ -116,24 +116,22 @@ export const TIER_TOOL_WHITELIST: Record<User["type"], RegExp[]> = {
   owner: [/.*/],
   team: [
     // Everything except the most sensitive privileges.
-    /^(?!fileAccess:full$|subagents$|memory:business$|launchAgents$|config$).*/,
+    /^(?!fileAccess:full$|subagents$|launchAgents$|config$).*/,
   ],
   family: [
     /^(vision|voice|documents)$/,
     /^(discord|whatsapp|telegram|channels)(:write)?$/,
     /^email:[^:]+$/,
-    /^memory:(personal|family)$/,
     /^fileAccess:readonly$/,
   ],
   personal: [
     /^(vision|voice|documents)$/,
     /^(discord|whatsapp|telegram|channels)(:write)?$/,
     /^(email|calendar):[^:]+$/,
-    /^memory:(personal|family)$/,
     /^fileAccess:readonly$/,
   ],
   client: [
-    // Messaging only — no email, no MCP, no memory, no file access.
+    // Messaging only — no email, no MCP, no file access.
     /^(discord|whatsapp|telegram|channels)(:write)?$/,
   ],
 };

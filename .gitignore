@@ -72,7 +72,9 @@ Thumbs.db
 *.png
 !docs/images/*.png
 
-# OMEGA venv — not committed (users install locally)
+# Python venvs — not committed (setup.sh creates them). omega-env is the
+# retired OMEGA venv, kept locally only for rollback.
+router/scripts/docs-env/
 router/scripts/omega-env/
 
 # Memory migration artefacts (contain real user data)

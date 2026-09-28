@@ -16,7 +16,7 @@
 
 Jarvis Claude Code is a personal AI gateway. Messages arriving on any chat platform are matched against per-route agents — each with its own identity (`CLAUDE.md`), tool scope, memory, and model. A persistent Claude Code process runs per session key, so conversations retain context across messages.
 
-**Keywords**: Claude Code, Claude Code CLI, Telegram bot, WhatsApp bot, Discord bot, MCP, RAG, OMEGA, multi-channel AI assistant, personal AI agent, macOS menu bar.
+**Keywords**: Claude Code, Claude Code CLI, Telegram bot, WhatsApp bot, Discord bot, MCP, RAG, multi-channel AI assistant, personal AI agent, macOS menu bar.
 
 ---
 
@@ -41,10 +41,10 @@ Jarvis Claude Code is a personal AI gateway. Messages arriving on any chat platf
 The Claude Code CLI is powerful on the desktop — but chat apps are where most real-world requests happen. Jarvis Claude Code exposes that same CLI through the messaging channels you already use, while keeping:
 
 - **One agent per context** — personal DM, work group, and public channel can each run a different agent with different tools, memory, and permissions.
-- **Real conversation memory** — the docs-index indexes your notes, OMEGA extracts and indexes facts from conversation history.
+- **Searchable notes memory** — the docs-index indexes the Markdown files under `memory/` locally. The router does not store conversations: what agents remember is what lives in those files plus Claude Code's own `CLAUDE.md` / `MEMORY.md`.
 - **Media-in, media-out** — voice notes get transcribed, images go to vision, PDFs become text, and Claude's file edits come back as attachments.
 - **Native and local** — no Docker, no cloud router. Services run under the platform's native service manager (`launchd` on macOS, `systemd --user` on Linux, Task Scheduler on Windows). On macOS they're also controllable from a SwiftUI tray app.
-- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Everything else is local: the docs-index document memory runs on-device, OMEGA conversation memory runs on-device, Whisper transcription runs on-device. The router needs no external API key at all. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
+- **Uses your Claude subscription, not API keys** — because the backend is the Claude Code CLI (OAuth-authenticated against your Max / Pro / Team plan), you pay zero per-token costs for the agents. Everything else is local: the docs-index document memory runs on-device, Whisper transcription runs on-device. The router needs no external API key at all. This makes it a compelling alternative to router projects like [OpenClaw][o] that run on metered provider API keys.
 
 ## Use Cases
 
@@ -69,13 +69,13 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 - **Channels**: Telegram, WhatsApp (via Baileys), Discord
 - **Per-route agents**: each agent lives in `agents/<name>/` with its own `agent.yaml` + `CLAUDE.md`
 - **Media pipeline**: voice → Whisper, images → Claude vision, PDFs/docs → text, quoted replies as context
-- **Memory**: docs-index (document RAG) + OMEGA (conversation fact extraction)
+- **Memory**: docs-index (local RAG over the Markdown files in `memory/`)
 - **Dashboard**: React SPA at `http://localhost:3340` — routes, agents, tools, memory, costs, logs
 - **macOS tray app**: SwiftUI menu bar app to start/stop/restart services
 - **Config-driven services**: add extra services to `config.yaml` and they show up in the dashboard and tray
 - **Native service managers**: no Docker, no pm2 — services run under `launchd` (macOS), `systemd --user` (Linux), or Task Scheduler (Windows), registered automatically by `setup.sh` / `setup.ps1`
 - **Spawn discipline**: `--strict-mcp-config`, per-route tool filtering, readonly file access, user-scope inheritance toggle
-- **No external API keys required**: the docs-index and OMEGA run locally with ONNX embeddings; Claude Code CLI is OAuth-authenticated against your subscription
+- **No external API keys required**: the docs-index runs locally with ONNX embeddings; Claude Code CLI is OAuth-authenticated against your subscription
 
 ### Dashboard tour
 
@@ -86,7 +86,7 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 | ![Tools](docs/images/dashboard-tools.png) | ![Analytics](docs/images/dashboard-analytics.png) |
 | **Tools** — per-capability view across vision, voice, docs, email accounts, calendar, memory, system, and MCP. | **Analytics** — token usage and cost over time, broken down by agent / channel / model. |
 | ![Memory](docs/images/dashboard-memory.png) | ![Logs](docs/images/dashboard-logs.png) |
-| **Memory** — indexed docs and OMEGA conversation facts scoped per agent, browsable as grid / list / graph. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
+| **Memory** — documents from the docs-index, browsable as graph / list / grid, with semantic search. | **Logs** — structured log stream with level filtering, search, and auto-scroll. |
 | ![Sessions](docs/images/dashboard-sessions.png) | |
 | **Sessions** — active and past Claude Code CLI sessions, one per `(channel, from)` key, killable from the UI. | |
 
@@ -102,14 +102,14 @@ Because each route maps to an agent folder (`agents/<name>/`) and each agent dec
 ┌──────────────────────────────────────────────────────────────┐
 │                      Router (:3340/:3341)                    │
 │   Route matching  →  Media pipeline  →  Spawn discipline     │
-└──────┬────────────────────────────┬────────────────┬─────────┘
-       │                            │                │
-       ▼                            ▼                ▼
-┌───────────────┐        ┌───────────────┐   ┌───────────────┐
-│ Claude Code   │        │  Docs-index   │   │   OMEGA       │
-│ CLI processes │        │  (:3342)      │   │   (:3343)     │
-│ (1 per key)   │        │  Doc RAG      │   │   Conv. facts │
-└───────────────┘        └───────────────┘   └───────────────┘
+└──────┬────────────────────────────┬──────────────────────────┘
+       │                            │
+       ▼                            ▼
+┌───────────────┐        ┌───────────────┐
+│ Claude Code   │        │  Docs-index   │
+│ CLI processes │        │  (:3342)      │
+│ (1 per key)   │        │  Doc RAG      │
+└───────────────┘        └───────────────┘
        │
        ▼
 ┌──────────────────────────────────────────────────────────────┐
@@ -123,11 +123,11 @@ Full design: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 - **OS**: macOS 13+, Linux (systemd), or Windows 10/11. The SwiftUI tray app is macOS-only; the router, dashboard, and memory services are fully cross-platform.
 - Node.js 20+ and `tsx`
-- Python 3.11+ (for the docs-index and OMEGA servers)
+- Python 3.11+ (for the docs-index server)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 - `ffmpeg`, `whisper-cli` (whisper.cpp), `pdftotext` for media processing (optional — media pipeline features that need them are auto-disabled if missing)
 
-**No required external keys**. Both memory layers run entirely on-device: the docs-index indexes Markdown documents with `all-MiniLM-L6-v2` ONNX, OMEGA stores conversation memory in SQLite + `sqlite-vec` + FTS5 with `bge-small-en-v1.5` ONNX. The only keys the router needs are your channel bot tokens (Telegram, Discord).
+**No required external keys**. Memory runs entirely on-device: the docs-index indexes Markdown documents with `all-MiniLM-L6-v2` ONNX. The only keys the router needs are your channel bot tokens (Telegram, Discord).
 
 ## Quick Start
 
@@ -138,8 +138,9 @@ cd ~/.claude/jarvis
 
 # 2. One-shot setup. Installs deps, builds the dashboard, downloads the ONNX
 #    model, scaffolds .env / config.yaml / agents/default, and registers
-#    the three services (docs-index, OMEGA, router) with the platform's service
-#    manager so they auto-start at login. Idempotent — safe to re-run.
+#    the services (docs-index, router, optional Moondream vision) with the
+#    platform's service manager so they auto-start at login. Idempotent, safe
+#    to re-run.
 #
 #    macOS / Linux:
 ./setup.sh
@@ -163,9 +164,9 @@ Dashboard: <http://localhost:3340>. Logs: `~/.claude/jarvis/logs/`.
 
 | Platform | Service manager | Units installed |
 |----------|-----------------|-----------------|
-| macOS    | `launchd` (LaunchAgents) | `com.jarvis.docs-index`, `com.jarvis.omega`, `com.jarvis.router` |
-| Linux    | `systemd --user` | `jarvis-docs-index.service`, `jarvis-omega.service`, `jarvis-router.service` |
-| Windows  | Task Scheduler (hidden, at-logon) | `JarvisDocsIndex`, `JarvisOmega`, `JarvisRouter` |
+| macOS    | `launchd` (LaunchAgents) | `com.jarvis.docs-index`, `com.jarvis.moondream`, `com.jarvis.router` |
+| Linux    | `systemd --user` | `jarvis-docs-index.service`, `jarvis-moondream.service`, `jarvis-router.service` |
+| Windows  | Task Scheduler (hidden, at-logon) | `JarvisDocsIndex`, `JarvisRouter` |
 
 Pass `--no-agents` (bash) or `-NoAgents` (PowerShell) to skip the service
 registration step if you want to run the stack manually.
@@ -259,7 +260,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 | **Models** | Claude only | Claude only | Multi-provider | Claude only |
 | **Channels** | Telegram, WhatsApp, Discord | Telegram, WhatsApp, Slack | 23+ channels | Telegram, Discord |
 | **Runtime** | Node.js + tsx | Node.js | Node.js (pnpm) | Bun |
-| **Memory** | docs-index + OMEGA | Filesystem + grep | SQLite + FTS5 + sqlite-vec | Claude sessions + CLAUDE.md |
+| **Memory** | docs-index (local RAG over Markdown) | Filesystem + grep | SQLite + FTS5 + sqlite-vec | Claude sessions + CLAUDE.md |
 | **Isolation** | `--strict-mcp-config` + per-route tool deny list | `@anthropic-ai/sandbox-runtime` (kernel) | Docker containers | `--dangerously-skip-permissions` |
 | **Config** | YAML | SQLite + `.env` | Typed config (zod) + wizard | JSON settings |
 | **Dashboard** | React SPA + macOS tray | — (TUI on roadmap) | Control UI + macOS menu bar | Local web UI |
@@ -278,7 +279,7 @@ There are a few excellent projects in the "Claude Code as a bot backend" space. 
 - **Claude Code CLI, not Agent SDK** — keeps the full ecosystem: skills, hooks, slash commands, sub-agents, MCP, settings layering. Agent SDK wrappers re-implement a subset of that.
 - **Two-layer identity that survives `--resume`** — `~/.claude/CLAUDE.md` (user global) + `<workspace>/CLAUDE.md` (agent). No fragile `--append-system-prompt` hacks.
 - **Per-route scoping with real enforcement** — `--strict-mcp-config` + `--disallowed-tools` + `fileAccess: readonly` gate actions at spawn time, per chat context.
-- **Hybrid memory out of the box** — document RAG (docs-index) and conversation fact extraction (OMEGA) as first-class services, both fully local, auto-managed by launchd.
+- **Local memory out of the box** — semantic search over your Markdown notes (docs-index) as a first-class service, fully on-device, auto-managed by the service manager. Conversations are not stored.
 - **End-to-end media pipeline** — voice → Whisper, images → Claude vision content blocks, PDFs → text, quoted replies kept as context, file outputs auto-sent back as attachments.
 - **Native service-manager integration** — `launchd` / `systemd --user` / Task Scheduler units are registered automatically by the setup script, with restart-on-failure. On macOS there's also a SwiftUI tray app for start/stop/health. No Docker daemon required.
 
@@ -299,7 +300,7 @@ Use Jarvis Claude Code if you want a personal, Claude-Code-native, config-driven
 ├── router/               # TypeScript router (entry point, channels, dashboard API)
 │   ├── src/              # Router source
 │   ├── dashboard/        # React SPA (Vite)
-│   ├── scripts/          # docs-index + OMEGA Python servers
+│   ├── scripts/          # docs-index Python server (retired/ keeps dismissed services)
 │   └── config.example.yaml
 ├── agents.example/       # Agent template — copy to agents/<name>/
 ├── ARCHITECTURE.md       # System design

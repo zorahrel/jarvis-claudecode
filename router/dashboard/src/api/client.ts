@@ -477,7 +477,6 @@ export interface CostEntry {
 
 export interface MemoryStats {
   docs: Record<string, unknown>
-  memories: Record<string, unknown>
 }
 
 export interface MemorySearchResult {
@@ -659,13 +658,6 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  // Config: Memory scopes
-  addMemoryScope: (scope: string) =>
-    request<{ ok: boolean; scopes: string[] }>('/api/config/memory-scopes', {
-      method: 'POST',
-      body: JSON.stringify({ scope }),
-    }),
-
   // Agents: CLAUDE.md
   getAgentClaudeMd: (name: string) =>
     request<{ content: string }>(`/api/agents/${encodeURIComponent(name)}/claude-md`),
@@ -738,15 +730,6 @@ export const api = {
       { method: 'DELETE' },
     ),
   memoryGraph: () => request<MemoryGraphData>('/api/memory/graph'),
-  memoryMemories: (scope?: string) =>
-    request<{ memories: Array<Record<string, unknown>> }>(
-      `/api/memory/memories${scope ? `?scope=${encodeURIComponent(scope)}` : ''}`,
-    ),
-  deleteMemory: (id: string) =>
-    requestConfirm<{ ok: boolean; id: string }>(
-      `/api/memory/${encodeURIComponent(id)}`,
-      { method: 'DELETE' },
-    ),
   reindexMemory: () =>
     request<{ indexed: number }>('/api/memory/reindex', { method: 'POST' }),
 
