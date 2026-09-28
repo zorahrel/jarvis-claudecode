@@ -1,13 +1,15 @@
 /**
- * Memory service - bridges to the two local Python HTTP servers:
+ * Memory service - bridges to the local Python HTTP servers:
  *   - ChromaDB on :3342 — document memory over memory/*.md
- *   - OMEGA    on :3343 — conversation memory (SQLite + sqlite-vec + ONNX)
+ *   - OMEGA    on :3343 — dismesso il 28/09/2026. Le funzioni sotto restano
+ *     per compatibilità del dashboard e rispondono vuoto senza fare rete,
+ *     a meno che MEMORY_URL sia impostato (rollback: vedi memory/tools/memory.md).
  *
  * Both run entirely on-device. No external APIs.
  */
 
 const CHROMA_URL = "http://localhost:3342";
-const MEMORY_URL = process.env.MEMORY_URL || "http://localhost:3343";
+const MEMORY_URL = process.env.MEMORY_URL || "";
 
 export interface DocResult {
   id: string;
@@ -73,6 +75,7 @@ export async function searchMemories(query: string, userId?: string, limit = 5):
 
 /** Search with timeout signal. When userId is omitted, search across all scopes. */
 export async function searchMemoriesDetailed(query: string, userId?: string, limit = 5): Promise<{ results: MemoryResult[]; timedOut: boolean }> {
+  if (!MEMORY_URL) return { results: [], timedOut: false };
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   if (userId) params.set("user_id", userId);
   const { data, timedOut } = await fetchJsonTimed<{ results: MemoryResult[] }>(`${MEMORY_URL}/search?${params}`);
@@ -81,6 +84,7 @@ export async function searchMemoriesDetailed(query: string, userId?: string, lim
 
 /** Add a memory */
 export async function addMemory(text: string, userId = "business", metadata?: Record<string, string>): Promise<void> {
+  if (!MEMORY_URL) return;
   await fetchJson(`${MEMORY_URL}/add`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,7 +96,7 @@ export async function addMemory(text: string, userId = "business", metadata?: Re
 export async function getMemoryStats(): Promise<{ docs: any; memories: any }> {
   const [docs, memories] = await Promise.all([
     fetchJson(`${CHROMA_URL}/stats`),
-    fetchJson(`${MEMORY_URL}/stats`),
+    MEMORY_URL ? fetchJson(`${MEMORY_URL}/stats`) : Promise.resolve(null),
   ]);
   return { docs, memories };
 }
@@ -106,6 +110,7 @@ export async function getDocuments(scope?: string): Promise<any[]> {
 
 /** Get all memories */
 export async function getMemories(userId?: string): Promise<MemoryResult[]> {
+  if (!MEMORY_URL) return [];
   const params = userId ? `?user_id=${userId}` : "";
   const data = await fetchJson(`${MEMORY_URL}/memories${params}`);
   return data?.memories ?? [];
@@ -113,6 +118,7 @@ export async function getMemories(userId?: string): Promise<MemoryResult[]> {
 
 /** Delete a memory */
 export async function deleteMemory(id: string): Promise<boolean> {
+  if (!MEMORY_URL) return false;
   const data = await fetchJson(`${MEMORY_URL}/memory/${id}`, { method: "DELETE" });
   return data?.ok ?? false;
 }

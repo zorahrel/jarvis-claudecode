@@ -51,17 +51,8 @@ export function getCoreServices(): ServiceDef[] {
         logName: "docs-index",
       },
     },
-    {
-      name: "OMEGA",
-      port: 3343,
-      healthUrl: "http://localhost:3343/health",
-      launchd: {
-        label: "com.jarvis.omega",
-        args: ["scripts/omega-env/bin/python3", "-u", "scripts/omega-server.py"],
-        cwd: ROUTER_DIR,
-        logName: "omega",
-      },
-    },
+    // OMEGA (:3343) dismesso il 28/09/2026: plist in LaunchAgents/disabled/,
+    // memorie migrate in memory/projects. Vedi memory/tools/memory.md.
     ...(useCloudVision ? [] : [{
       // Local vision (Moondream Station, MLX-native on Apple Silicon).
       // Only supervised when MOONDREAM_API_KEY is NOT set. With the key,

@@ -4,7 +4,7 @@ Multi-channel AI router: Telegram, WhatsApp, Discord → Claude Code CLI.
 Dashboard: http://localhost:3340 | Config: `router/config.yaml`
 
 ## Ports
-3340: Router HTTP | 3341: Router HTTPS | 3342: docs-index | 3343: OMEGA
+3340: Router HTTP | 3341: Router HTTPS | 3342: docs-index | (3343: OMEGA, dismesso 28/09)
 
 ## Operations
 - Restart: `launchctl kickstart -k gui/$(id -u)/com.jarvis.router`

@@ -8,10 +8,9 @@
 
 ## Quick Start
 ```bash
-# Start core services via launchctl (Router, docs-index, OMEGA)
+# Start core services via launchctl (Router, docs-index)
 launchctl load ~/Library/LaunchAgents/com.jarvis.router.plist
 launchctl load ~/Library/LaunchAgents/com.jarvis.docs-index.plist
-launchctl load ~/Library/LaunchAgents/com.jarvis.omega.plist
 ```
 
 ## Services
@@ -22,7 +21,8 @@ Core (always present, hardcoded):
 |---------|------|-------------|--------|
 | Router | 3340/3341 | com.jarvis.router | `curl localhost:3340/api/stats` |
 | Docs-index | 3342 | com.jarvis.docs-index | `curl localhost:3342/health` |
-| OMEGA | 3343 | com.jarvis.omega | `curl localhost:3343/health` |
+
+OMEGA (3343) dismesso il 28/09/2026: plist in `LaunchAgents/disabled/`, memorie in `memory/projects/`. Rollback in `memory/tools/memory.md`.
 
 Extra services: add a `services:` section in `router/config.yaml` (see `config.example.yaml`).
 They appear in the dashboard.
@@ -45,12 +45,10 @@ tail -30 ~/.claude/jarvis/logs/router.log
 launchctl kickstart -k gui/$(id -u)/com.jarvis.router
 ```
 
-### Docs-index/OMEGA down
+### Docs-index down
 ```bash
 curl localhost:3342/health
-curl localhost:3343/health
 # Restart:
-launchctl kickstart -k gui/$(id -u)/com.jarvis.omega
 launchctl kickstart -k gui/$(id -u)/com.jarvis.docs-index
 ```
 
