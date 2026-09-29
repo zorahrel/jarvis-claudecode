@@ -970,17 +970,15 @@ def lever_state(P):
         P(f"- tokenjuice in openclaw.json: {'sì ' + str(hit) if tj else 'no'}")
     except Exception:
         P('- openclaw.json non leggibile')
-    # tool MCP di OpenClaw: 'alwaysLoad: true' fisso nel dist = schemi caricati sempre
+    # tool MCP di OpenClaw: senza la patch openclaw-mcp-lazy gli schemi viaggiano in ogni chiamata.
+    # Il daemon (skill_workshop, un tool solo) resta alwaysLoad apposta: non conta.
     try:
-        oc = os.path.realpath(subprocess.run(['which', 'openclaw'], capture_output=True, text=True).stdout.strip())
-        dist_ = os.path.join(os.path.dirname(oc), 'dist')
-        n = 0
-        for f in glob.glob(os.path.join(dist_, 'mcp-http.loopback-runtime-*.mjs')) + glob.glob(os.path.join(dist_, 'daemon-*.mjs')):
-            n += open(f, errors='replace').read().count('alwaysLoad: true')
+        chk = os.path.expanduser('~/.claude/jarvis/scripts/openclaw-mcp-lazy/openclaw-mcp-lazy.py')
+        r = subprocess.run([chk, 'check'], capture_output=True, text=True, timeout=30)
         ver = subprocess.run(['openclaw', '--version'], capture_output=True, text=True, timeout=20).stdout.strip().splitlines()
-        P(f"- OpenClaw {ver[0] if ver else '?'}: 'alwaysLoad: true' nel dist {n} volte (0 = tool MCP a richiesta, patch attiva)")
+        P(f"- {ver[0] if ver else 'OpenClaw ?'}: {(r.stdout or r.stderr).strip()}")
     except Exception as e:
-        P(f'- OpenClaw dist non leggibile: {e}')
+        P(f'- OpenClaw: stato della patch openclaw-mcp-lazy non leggibile: {e}')
     P('')
 
 
