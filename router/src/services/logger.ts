@@ -1,4 +1,5 @@
 import pino from "pino";
+import { redactSecrets } from "./redact-secrets";
 
 // Dashboard log buffer hook — set by dashboard/server.ts after import
 let dashboardHook: ((level: string, module: string, msg: string, extra?: Record<string, unknown>) => void) | null = null;
@@ -33,7 +34,10 @@ export const logger = pino({
     censor: "[REDACTED]",
   },
   hooks: {
-    logMethod(inputArgs, method, level) {
+    logMethod(rawArgs, method, level) {
+      // Redazione prima di tutto: sia router.log (pino) sia router*.jsonl
+      // (dashboard) ricevono solo gli argomenti già ripuliti.
+      const inputArgs = rawArgs.map((arg) => redactSecrets(arg)) as typeof rawArgs;
       // Forward to dashboard log buffer
       if (dashboardHook && level >= 30) {
         try {
