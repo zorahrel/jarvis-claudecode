@@ -100,11 +100,12 @@ probe docs-index "http://127.0.0.1:3342/health"
 # Il vecchio check guardava solo consecutiveErrors>2: un cron che smette di
 # partire ha errori a zero e lastRun vecchio, quindi era invisibile. Qui la
 # staleness si misura contro il periodo dedotto dallo schedule.
+# Dal 29/09/2026 i cron stanno in OpenClaw: il router e' solo dashboard.
 section "Cron"
-cron_out=$(curl -sf --max-time 5 "$ROUTER/api/crons" 2>/dev/null | python3 "$HERE/health/cron.py" 2>&1)
+cron_out=$(perl -e 'alarm 30; exec @ARGV' openclaw cron list --json 2>/dev/null | python3 "$HERE/health/cron.py" 2>&1)
 
 if [[ -z "$cron_out" ]]; then
-  fail cron "il router non ha risposto su /api/crons"
+  fail cron "OpenClaw non ha risposto a 'openclaw cron list --json'"
 else
   while IFS='|' read -r state name msg; do
     case "$state" in
