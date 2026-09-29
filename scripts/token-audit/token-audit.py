@@ -88,6 +88,11 @@ def med(v):
     return st.median(v) if v else 0
 
 
+def medm(v):
+    # per le metriche salvate: senza campioni è «n/d», non 0 (0 si leggerebbe −100%)
+    return st.median(v) if v else None
+
+
 # ---------------------------------------------------------------- scansione Claude Code
 
 def pts(ts):
@@ -393,9 +398,9 @@ def analyze_cc(recs, P, M, day):
     for k in sorted(set(s['klass'] for s in sess)):
         v = [s['first_ctx'] for s in sess if s['klass'] == k and s['first_ctx']]
         P(f"- {k}: {dist(v)}")
-        M[f"first_ctx_p50[{k}]"] = med(v)
+        M[f"first_ctx_p50[{k}]"] = medm(v)
     v = [s['first_ctx'] for s in sess if s['first_ctx'] and s['klass'] != 'subagent']
-    P(f"- TUTTE le principali: {dist(v)}"); M['first_ctx_p50[principali]'] = med(v)
+    P(f"- TUTTE le principali: {dist(v)}"); M['first_ctx_p50[principali]'] = medm(v)
     bd = defaultdict(list)
     for s in sess:
         if s['first_ctx'] and s['klass'] != 'subagent': bd[day(s['calls'][0]['ts'])].append(s['first_ctx'])
@@ -464,8 +469,8 @@ def analyze_cc(recs, P, M, day):
     pre1m = [p for p in pre if p > 250e3]  # finestre da 1M: prima scattavano a ~667k, con autoCompactWindow 433000 a ~413k
     P(f"- compattazioni: {len(comp)} ({dict(trig)}) · preTokens {dist(pre)} · per classe {dict(Counter(klass(r) for _, r in comp.values()))}")
     P(f"- compattazioni su finestre da 1M (preTokens > 250k): {dist(pre1m)}")
-    M.update(compactions=len(comp), compactions_auto=trig.get('auto', 0), compact_pre_p50=med(pre),
-             compactions_1m=len(pre1m), compact_pre_1m_p50=med(pre1m))
+    M.update(compactions=len(comp), compactions_auto=trig.get('auto', 0), compact_pre_p50=medm(pre),
+             compactions_1m=len(pre1m), compact_pre_1m_p50=medm(pre1m))
     errs = Counter()
     for r in recs: errs.update(r['errors'])
     P(f"- errori della CLI nella finestra: thrashing della compattazione {errs['thrashing']} · prompt troppo lungo {errs['prompt_too_long']} · altri {errs['altro']}")
@@ -613,7 +618,7 @@ def deep_cc(recs, cc, P, M):
         ncalls = [len(byfile[f]) for f in fs]; mx = [max(c['ctx'] for c in byfile[f]) for f in fs]
         us = [sum(cost(c) for c in byfile[f]) for f in fs]; fc = [byfile[f][0]['ctx'] for f in fs if byfile[f][0]['idx'] == 0]
         P(f"- {at}: run {len(fs)} · chiamate/run med {med(ncalls):.0f} p90 {q(ncalls,.9)} · maxctx med {fmt(med(mx))} p90 {fmt(q(mx,.9))} · >200k {sum(1 for m in mx if m > 200e3)} · $/run med {med(us):.2f} p90 {q(us,.9):.2f} · primo turno med {fmt(med(fc))} · modello {Counter(byfile[f][0]['model'] for f in fs).most_common(2)}")
-        M[f'sub_first_ctx_p50[{at}]'] = med(fc); M[f'sub_runs[{at}]'] = len(fs); M[f'sub_usd_per_run_p50[{at}]'] = med(us)
+        M[f'sub_first_ctx_p50[{at}]'] = medm(fc); M[f'sub_runs[{at}]'] = len(fs); M[f'sub_usd_per_run_p50[{at}]'] = medm(us)
     h = defaultdict(Counter)
     for c in calls: h[klass(c['rec'])]['cc'] += c['cc']; h[klass(c['rec'])]['h'] += c['cc1h']
     P('quota write 1h per classe: ' + str({k: f"{a['h']/max(1,a['cc']):.0%}" for k, a in h.items()}))
@@ -642,7 +647,7 @@ def deep_cc(recs, cc, P, M):
     M['agents_md_carried_tokens'] = sum(a['agents_carried'] for a in agg.values())
     vr = [sum(n for _, n in (r['instr_files'] or [])) for r in recs if r['is_sub'] and r['agent_type'] == 'verifier' and byfile.get(r['path'])]
     P(f"- verifier: caratteri di istruzioni per run {dist(vr)}")
-    M['verifier_instr_chars_p50'] = med(vr)
+    M['verifier_instr_chars_p50'] = medm(vr)
     P('')
 
     # ---- one-shot di Topics (sdk-cli dalla home, poche chiamate): la memoria automatica e' spenta?
@@ -657,7 +662,7 @@ def deep_cc(recs, cc, P, M):
     P(f"- sessioni {len(one)} · con l'indice MEMORY.md {len(withmem)} · primo turno {dist(fc)} · ${sum(cost(c) for _, cs in one for c in cs):.0f}")
     kinds = Counter((r['queue_prompt'] or r['first_user_text'] or '')[:50].replace('\n', ' ') for r, _ in one)
     P('- prompt più frequenti: ' + ' | '.join(f"{n}× {t}" for t, n in kinds.most_common(5)))
-    M.update(oneshot_sessions=len(one), oneshot_with_memory=len(withmem), oneshot_first_ctx_p50=med(fc))
+    M.update(oneshot_sessions=len(one), oneshot_with_memory=len(withmem), oneshot_first_ctx_p50=medm(fc))
     P('')
 
     # ---- OpenClaw per tipo di prompt
@@ -796,7 +801,7 @@ def analyze_workflows(recs, cc, P, M):
         P(f"  - {k}: {runs[k]} run · FAIL {fails[k]} · difetti segnalati {issues[k]}")
     P(f"  - da r2: escalation (il fix ha rotto qualcosa) {esc} · note fuori claim {oos} · $/run verifier da r2 mediana {med(usd_r2):.2f}")
     M.update(chains=len(chains), chains_r2=sum(1 for m in maxr if m >= 2), chains_r3=sum(1 for m in maxr if m >= 3),
-             escalations=esc, out_of_scope_notes=oos, verifier_r2plus_usd_p50=med(usd_r2))
+             escalations=esc, out_of_scope_notes=oos, verifier_r2plus_usd_p50=medm(usd_r2))
     for k in ('r1', 'r2', 'r3+'):
         M[f'chain_runs[{k}]'] = runs[k]; M[f'chain_fail[{k}]'] = fails[k]; M[f'chain_defects[{k}]'] = issues[k]
     long_ = [(k, lst) for k, lst in chains.items() if max(x['round'] for x in lst) >= 3]
@@ -880,7 +885,7 @@ def analyze_jcode(start_iso, end_iso, start_epoch, P, M, t_from, t_to):
                 sm = re.search(r'ses:session_([a-z]+)', l); hard.append((t, sm.group(1) if sm else '?', l.strip()[-120:]))
     P(f"- compattazioni (log): {len(comp)} · pre_tokens {dist([c[1] for c in comp])} · d'emergenza (hard compact) {len(hard)}")
     for t, sname, tail in hard[:10]: P(f"  - hard {t:%m-%d %H:%M} {sname}: {tail}")
-    M.update(jcode_compactions=len(comp), jcode_compact_pre_p50=med([c[1] for c in comp]), jcode_hard_compactions=len(hard))
+    M.update(jcode_compactions=len(comp), jcode_compact_pre_p50=medm([c[1] for c in comp]), jcode_hard_compactions=len(hard))
     P('')
 
 
