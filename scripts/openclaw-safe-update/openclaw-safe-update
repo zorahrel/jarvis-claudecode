@@ -632,22 +632,25 @@ def build_refs():
 
 
 def open_under(dirs):
-    """Le cartelle sotto cui un processo ha un file aperto (o la cwd). Un lsof che non risponde o
-    esce storto le conta tutte come aperte: nel dubbio si tiene."""
-    used = set()
+    """(aperte, ignote): le cartelle sotto cui un processo ha un file aperto (o la cwd), e quelle
+    di un lotto su cui lsof non ha dato una risposta leggibile. Le une e le altre si tengono."""
+    used, unknown = set(), set()
     for i in range(0, len(dirs), LSOF_BATCH):
         batch = dirs[i:i + LSOF_BATCH]
         args = [x for d in batch for x in ("+D", str(d))]  # +D non segue i link simbolici
-        rc, out, _ = run(["lsof", "-w", "-F", "n", *args], 60)
-        if rc not in (0, 1):
-            used.update(batch)
+        rc, out, err = run(["lsof", "-w", "-F", "n", *args], 60)
+        # lsof 4.91 esce 1 sia con file trovati, sia senza, sia per errore (es. un +D sparito nel
+        # frattempo: stampa l'usage e rifiuta tutto il lotto). Con -w l'unico segno d'errore e'
+        # stderr: se non e' vuoto, o l'rc e' altro (timeout 124, lsof assente 127), il lotto e' ignoto.
+        if rc not in (0, 1) or err.strip():
+            unknown.update(batch)
             continue
         names = [ln[1:] for ln in out.splitlines() if ln.startswith("n")]
         for d in batch:
             roots = {str(d), os.path.realpath(d)}
             if any(n == r or n.startswith(r + "/") for n in names for r in roots):
                 used.add(d)
-    return used
+    return used, unknown
 
 
 def clean_build_tmp(dry):
@@ -677,9 +680,10 @@ def clean_build_tmp(dry):
             if p.name in refs:
                 kept.setdefault("nominate da un plugin", []).append(p)
         old = [p for p in old if p.name not in refs]
-        used = open_under(old)
+        used, unknown = open_under(old)
         kept.setdefault("con file aperti", []).extend(p for p in old if p in used)
-        gone = [p for p in old if p not in used]
+        kept.setdefault("con lsof in errore", []).extend(p for p in old if p in unknown)
+        gone = [p for p in old if p not in used and p not in unknown]
     freed, errors = 0, []
     for p in gone:
         size = tree_bytes(p)

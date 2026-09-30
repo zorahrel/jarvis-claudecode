@@ -70,11 +70,15 @@ if name == "trash":
     sys.exit(0)
 
 if name == "lsof":
-    # un file aperto sotto ogni cartella +D il cui nome e' in open_dirs; exit 1 = niente, come lsof
+    # come lsof 4.91 del Mac: exit 1 con o senza file trovati; un +D che non esiste fa rifiutare
+    # tutto il lotto (usage su stderr, stdout vuoto, sempre exit 1). lsof_rc forza l'uscita (124 = timeout)
     dirs = [args[i + 1] for i, x in enumerate(args) if x == "+D"]
-    hit = [d for d in dirs if os.path.basename(d) in st.get("open_dirs", [])]
-    for d in hit: print(f"p4242\nn{d}/package-0/index.js")
-    sys.exit(0 if hit else 1)
+    if "lsof_rc" in st: sys.exit(st["lsof_rc"])
+    if not all(os.path.isdir(d) for d in dirs):
+        print("lsof 4.91\n usage: [-?abhKlnNoOPRtUvVX] [+|-c c] [+|-d s] [+D D]", file=sys.stderr); sys.exit(1)
+    for d in dirs:
+        if os.path.basename(d) in st.get("open_dirs", []): print(f"p4242\nn{d}/package-0/index.js")
+    sys.exit(1)
 
 if name == "npm":
     if args[0] == "view" and "versions" in args:
@@ -138,6 +142,8 @@ if args[:2] == ["gateway", "status"]:
     out({"rpc": {"ok": not down(), "server": {"version": st["version"]}}}); sys.exit(0)
 if args[:2] == ["plugins", "list"]:
     if st.get("plugins_list_fail"): print("gateway closed", file=sys.stderr); sys.exit(1)
+    for d in st.get("plugins_list_rm", []):  # qualcun altro toglie una build mentre lo script lavora
+        import shutil; shutil.rmtree(os.path.join(os.environ["HOME"], ".openclaw/tmp", d), ignore_errors=True)
     out({"plugins": [{"id": p, "version": v, "origin": "global",
                       "trust": {"installSpec": f"@openclaw/{p}" + (f"@{v}" if p in PINNED else "")},
                       **({"source": st["plugin_source"]} if p == "whatsapp" and st.get("plugin_source") else {})}
@@ -417,6 +423,31 @@ setup '{"latest":"2026.9.5","plugins_list_fail":true}'; arm; buildtmp
 go >/dev/null
 there "vecchia tenuta" openclaw-plugin-build-vecchia
 has   "lo dice" "plugins list non risponde" "$T/out.log"
+
+echo "== 22. lsof in timeout: non si sa chi le usa, non si cancella niente"
+setup '{"latest":"2026.9.5","lsof_rc":124}'; arm; buildtmp
+go >/dev/null
+there "vecchia tenuta" openclaw-plugin-build-vecchia
+has   "lo dice" "con lsof in errore" "$T/out.log"
+
+echo "== 23. una build sparisce prima di lsof: lsof rifiuta il lotto, la build aperta resta"
+setup '{"latest":"2026.9.5","open_dirs":["openclaw-plugin-build-aperta"],"plugins_list_rm":["openclaw-plugin-build-vecchia"]}'; arm; buildtmp
+go >/dev/null
+there "aperta tenuta" openclaw-plugin-build-aperta
+has   "lo dice" "con lsof in errore" "$T/out.log"
+
+echo "== 24. piu' di 20 build vecchie: lsof a lotti, anche il secondo lotto e' controllato"
+setup '{"latest":"2026.9.5","open_dirs":["openclaw-plugin-build-n23"]}'; arm; B="$HOME/.openclaw/tmp"
+for i in $(seq -w 1 25); do mkdir -p "$B/openclaw-plugin-build-n$i"; done
+python3 -c "import os,sys,time
+t=time.time()-7*3600
+for p in sys.argv[1:]: os.utime(p,(t,t))" "$B"/openclaw-plugin-build-n*
+go >/dev/null
+gone  "primo lotto: cancellata" openclaw-plugin-build-n01
+gone  "secondo lotto: cancellata" openclaw-plugin-build-n25
+there "secondo lotto, aperta: tenuta" openclaw-plugin-build-n23
+check "due chiamate a lsof" "$(grep -c '^lsof ' "$T/calls.log")" 2
+has   "log" "cancellate 24 cartelle" "$T/out.log"
 
 echo
 echo "$PASS ok, $FAIL FAIL"
