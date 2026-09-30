@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.openclaw-safe-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/zorahrel/.claude/jarvis/scripts/openclaw-safe-update/openclaw-safe-update</string>
+  </array>
+  <!-- 04:20 ora di Roma: dopo Memory Dreaming (03:00), prima del brief (07:30).
+       L'attesa di OpenClaw fermo dura al massimo 45 min, l'update ~15, il rollback altri ~15:
+       finisce comunque prima delle 06:00. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>20</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- node e openclaw da /opt/homebrew, agents-doctor da ~/bin, trash da /usr/bin -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/Users/zorahrel/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/zorahrel</string>
+  </dict>
+  <!-- lo script scrive da se' logs/openclaw-safe-update.log; qui finiscono solo i traceback -->
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zorahrel/.claude/jarvis/logs/openclaw-safe-update.err.log</string>
+</dict>
+</plist>
