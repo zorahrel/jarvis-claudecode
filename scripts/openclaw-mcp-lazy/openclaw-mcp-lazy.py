@@ -9,10 +9,17 @@ subito (vedi KEEP). Un update di OpenClaw riscrive dist/ e la patch sparisce: `c
   openclaw-mcp-lazy.py check    exit 0 = patch attiva su disco E nel gateway in esecuzione
   openclaw-mcp-lazy.py apply    idempotente; poi: launchctl kickstart -k gui/$UID/ai.openclaw.gateway
   openclaw-mcp-lazy.py revert   toglie la patch (stesso riavvio dopo)
+  openclaw-mcp-lazy.py upstream exit 0 = questa versione ha gia' il fix ufficiale (PR #161392)
 
-OPENCLAW_DIST=<dir> punta a una copia di dist/ (serve a provare il check su una copia).
-Issue upstream: openclaw/openclaw#139477.
+Col fix ufficiale la patch non serve e non si applica: OpenClaw differisce i tool da solo, ma
+solo se `tools.toolSearch` e' scritto in config. Allora `check` guarda quello e `apply` esce 2
+col comando da dare (openclaw config set tools.toolSearch true, si ricarica a caldo).
+
+OPENCLAW_DIST=<dir> punta a una copia di dist/, OPENCLAW_CONFIG_PATH a una copia di
+openclaw.json (servono a provare il check su una copia).
+Issue upstream: openclaw/openclaw#139477, fix in openclaw/openclaw#161392.
 """
+import json
 import glob
 import os
 import re
@@ -61,6 +68,22 @@ def state():
     return loop, schema, lt, st, (MARK in lt and "alwaysLoad: true" not in lt), (MARK in st and RET_NEW in st)
 
 
+def upstream_fix(lt, st):
+    """Il fix ufficiale si riconosce dal codice, non dalla versione: il loopback sa differire
+    (`deferTools`) e lo schema mette da solo il `_meta` per tool."""
+    return MARK not in lt and "deferTools" in lt and "anthropic/alwaysLoad" in st
+
+
+def tool_search_opt_in():
+    """True se `tools.toolSearch` e' scritto in config e acceso: e' l'interruttore del fix ufficiale."""
+    cfg = os.environ.get("OPENCLAW_CONFIG_PATH") or os.path.expanduser("~/.openclaw/openclaw.json")
+    try:
+        v = json.load(open(cfg)).get("tools", {}).get("toolSearch")
+    except (OSError, ValueError):
+        return False
+    return v is True or (isinstance(v, dict) and v.get("enabled", True) is not False)
+
+
 def gateway_started_after(paths):
     """True se il gateway in esecuzione è partito dopo l'ultima modifica dei file patchati."""
     if os.environ.get("OPENCLAW_DIST"):
@@ -82,6 +105,16 @@ def gateway_started_after(paths):
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
     loop, schema, lt, st, lok, sok = state()
+    if cmd == "upstream":
+        up = upstream_fix(lt, st)
+        print("fix upstream presente" if up else "fix upstream assente: serve la patch locale")
+        return 0 if up else 1
+    if upstream_fix(lt, st) and cmd in ("check", "apply"):
+        if tool_search_opt_in():
+            print("ok   fix upstream presente e tools.toolSearch attivo: la patch locale non serve")
+            return 0
+        print("FAIL fix upstream presente ma tools.toolSearch non e' in config: openclaw config set tools.toolSearch true")
+        return 1 if cmd == "check" else 2
     if cmd == "check":
         if lok and sok:
             if gateway_started_after([loop, schema]):
