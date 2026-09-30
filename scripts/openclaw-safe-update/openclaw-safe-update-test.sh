@@ -29,7 +29,8 @@ S = os.environ["FAKE_STATE"]
 st = json.load(open(S))
 name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
 with open(os.environ["FAKE_CALLS"], "a") as f:
-    f.write(" ".join([name] + args) + "\n")
+    pol = os.environ.get("OPENCLAW_SERVICE_REPAIR_POLICY")
+    f.write(" ".join([name] + args) + (f" [policy={pol}]" if pol else "") + "\n")
 def save(): json.dump(st, open(S, "w"))
 def out(o): print(json.dumps(o))
 def healthy(): return st["version"] != st.get("bad_version")
@@ -92,9 +93,12 @@ def phase(ph, secs, late):
     """Una fase dell'update che dura `secs`. SIGINT prima dell'attivazione = interruzione pulita;
     dopo (late) = installazione a meta', che lo script non deve mai provocare."""
     global st
-    st["active_run"] = {"phase": ph}; save()
+    st["active_run"] = {"phase": ph, "status": "running", "runId": "run-" + ph}; save()
     def onint(*_):
-        s = json.load(open(S)); s.pop("active_run", None)
+        s = json.load(open(S))
+        if s.get("sigint_stale"):  # SIGINT prima che OpenClaw installi il gestore: la riga resta running
+            sys.exit(130)
+        s.pop("active_run", None)
         s["last_run"] = {"status": "failed", "reason": "interrupted"}
         if late: s["interrupted_late"] = True
         json.dump(s, open(S, "w")); out({"run": s["last_run"]}); sys.exit(130)
@@ -110,6 +114,19 @@ if args[:2] == ["update", "status"]:
          "availability": {"latestVersion": st["latest"]}, "lastRun": st.get("last_run", {})}
     if st.get("active_run"): r["activeRun"] = st["active_run"]
     out(r); sys.exit(0)
+if args[:2] == ["update", "repair"]:
+    ar = st.get("active_run")
+    if ar and ar.get("phase") in ("requested", "staging", "validating", "repairing") and not st.get("repair_finalize"):
+        # come OpenClaw 2026.9.5: gateway sano + driver morto = riga chiusa, niente Doctor ne' riavvio
+        st.pop("active_run"); st["last_run"] = {"status": "failed", "reason": "abandoned"}; save()
+        out({"status": "ok", "mode": "repair", "restart": False, "reconciledRuns": [ar.get("runId")],
+             "message": "Gateway is healthy. Reconciled 1 abandoned update run. No maintenance or service restart was needed."})
+        sys.exit(0)
+    # finalizzazione completa: il Doctor ferma il gateway, a meno che il servizio sia esterno
+    if os.environ.get("OPENCLAW_SERVICE_REPAIR_POLICY") == "external":
+        print("Gateway state is owned by a running Gateway; stop it through its supervisor", file=sys.stderr); sys.exit(1)
+    st["pid"] += 1; st.pop("active_run", None); save()
+    out({"status": "ok", "mode": "repair", "restart": True}); sys.exit(0)
 if args[0] == "update":
     tag = args[args.index("--tag") + 1]
     fail = st.get("update_fail")
@@ -119,6 +136,14 @@ if args[0] == "update":
                           "failureFacts": [{"message": "This command is running inside the gateway process tree (gateway PID 42)."}]}]}
         st["last_run"] = run; save(); out({"run": run}); sys.exit(1)
     if st.get("busy_during_validation"): st["tasks_running"] = 1; save()
+    if st.get("stage"):  # come OpenClaw: lo stage accanto al pacchetto, lasciato se l'update e' interrotto
+        stage = os.path.join(os.path.dirname(os.environ["FAKE_ROOT"]), f".openclaw.update-stage-{os.getpid()}")
+        os.makedirs(os.path.join(stage, "lib"), exist_ok=True); st["stage_dir"] = stage; save()
+    if st.get("spawn_worker"):  # figlio detached, come update-candidate-state.worker.js
+        import subprocess
+        w = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "update-candidate-state.worker.js"],
+                             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        st["worker_pid"] = w.pid; save()
     phase("validating", st.get("validate_s", 0), False)
     st["version"] = tag; st["patched"] = st["patch_live"] = False; st["pid"] += 1
     for p in st["plugins"]:
@@ -225,6 +250,21 @@ setup; arm; P="$HOME/.claude/projects/$(printf %s "$HOME" | sed 's/[^A-Za-z0-9]/
 mkdir -p "$P" && touch "$P/s.jsonl"
 go >/dev/null
 hasnt "un transcript di 0 s fa basta a fermarlo" "update --yes" "$T/calls.log"
+# jl <file> <eta' in s dell'evento>... : righe con timestamp, poi la contabilita' che claude-cli scrive
+# senza timestamp quando OpenClaw parcheggia la sessione (mtime = adesso)
+jl() { f=$1; shift; python3 -c "import json,sys,datetime as d
+n=d.datetime.now(d.timezone.utc)
+for a in sys.argv[1:]: print(json.dumps({'type':'user','timestamp':(n-d.timedelta(seconds=int(a))).isoformat().replace('+00:00','Z')}))
+print(json.dumps({'type':'last-prompt','lastPrompt':'x'})); print(json.dumps({'type':'cost-state','totalCostUSD':0.2}))" "$@" > "$f"; }
+setup; arm; P="$HOME/.claude/projects/$(printf %s "$HOME" | sed 's/[^A-Za-z0-9]/-/g')--openclaw"
+mkdir -p "$P" && jl "$P/hb.jsonl" 900 600
+go >/dev/null
+has "contabilita' senza timestamp scritta adesso, ultimo evento 10 min fa: non ferma l'update" "update --yes" "$T/calls.log"
+setup; arm; P="$HOME/.claude/projects/$(printf %s "$HOME" | sed 's/[^A-Za-z0-9]/-/g')--openclaw"
+mkdir -p "$P" && jl "$P/hb.jsonl" 900 5
+go >/dev/null
+hasnt "evento vero di 5 s fa, poi contabilita': lo ferma" "update --yes" "$T/calls.log"
+has "dice perche'" "transcript scritto" "$T/out.log"
 
 echo "== 3. update ok: plugin fissati allineati, patch rimessa, un riavvio, health ok, notifica"
 setup; arm
@@ -448,6 +488,47 @@ gone  "secondo lotto: cancellata" openclaw-plugin-build-n25
 there "secondo lotto, aperta: tenuta" openclaw-plugin-build-n23
 check "due chiamate a lsof" "$(grep -c '^lsof ' "$T/calls.log")" 2
 has   "log" "cancellate 24 cartelle" "$T/out.log"
+
+stages() { ls -d "$T"/.openclaw.update-stage-* 2>/dev/null | wc -l | tr -d ' '; }
+alive() { kill -0 "$1" 2>/dev/null && echo vivo || echo morto; }
+STALE='{"busy_during_validation":true,"validate_s":5,"sigint_stale":true,"spawn_worker":true,"stage":true}'
+
+echo "== 25. SIGINT prima del gestore di OpenClaw (01/10 00:18): figlio orfano, run appeso, stage lasciato"
+setup "$STALE"; arm; rm -rf "$T"/.openclaw.update-stage-*
+mkdir -p "$T/.openclaw.update-stage-vecchio"; touch -t 202609010000 "$T/.openclaw.update-stage-vecchio"
+check "exit 0" "$(go)" 0
+check "resta 9.5" "$(sget version)" 2026.9.5
+check "gateway mai riavviato" "$(sget pid)" 1000
+W=$(sget worker_pid)
+check "il worker del run interrotto non resta vivo" "$(alive "$W")" morto
+has "lo dice" "figlio dell'update interrotto ancora vivo, SIGTERM: pid $W" "$T/out.log"
+has "run chiuso con update repair, servizio esterno" "update repair --yes --json \[policy=external\]" "$T/calls.log"
+check "nessun run attivo nello storico" "$(sget active_run)" None
+has "lo dice" "chiuso con update repair" "$T/out.log"
+check "stage del run cancellato, quello vecchio no" "$(stages)" 1
+check "quello rimasto e' il vecchio" "$(ls -d "$T"/.openclaw.update-stage-*)" "$T/.openclaw.update-stage-vecchio"
+check "stato: interrotto" "$(last result)" interrupted
+check "nessuna notifica" "$(wc -l < "$T/msgs.log" | tr -d ' ')" 0
+kill "$W" 2>/dev/null  # su una copia mutata resterebbe vivo
+
+echo "== 26. update repair ripiegherebbe sul Doctor (ferma il gateway): rifiutato, nessun riavvio, stage tenuto"
+setup "${STALE%\}},\"repair_finalize\":true}"; arm; rm -rf "$T"/.openclaw.update-stage-*
+check "exit 0" "$(go)" 0
+check "gateway mai fermato ne' riavviato" "$(sget pid)" 1000
+check "run ancora attivo" "$(sget active_run.phase)" validating
+has "lo dice" "resta attivo, update repair exit 1" "$T/out.log"
+check "stage tenuto finche' il run e' aperto" "$(stages)" 1
+kill "$(sget worker_pid)" 2>/dev/null
+
+echo "== 27. run appeso trovato all'avvio: chiuso prima dell'update; in dry-run non si tocca"
+setup '{"active_run":{"phase":"validating","status":"running","runId":"run-vecchio"}}'; arm
+check "dry-run: exit 0" "$(go --dry-run)" 0
+hasnt "dry-run: niente update repair" "update repair" "$T/calls.log"
+has "dry-run: lo dice" "ancora running in fase validating (dry-run" "$T/out.log"
+fresh
+check "exit 0" "$(go)" 0
+check "repair prima dell'update" "$(grep -n -e 'update repair' -e 'update --yes' "$T/calls.log" | head -1 | grep -c 'update repair')" 1
+check "aggiornato" "$(sget version)" 2026.9.7
 
 echo
 echo "$PASS ok, $FAIL FAIL"

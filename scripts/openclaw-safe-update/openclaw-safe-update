@@ -29,7 +29,9 @@ Un giro (launchd com.jarvis.openclaw-safe-update, 04:20):
      verifica e lascerebbe il gateway vecchio a girare su un dist/ gia' sostituito.
      Durante la validazione lo script guarda ogni 20 s: se OpenClaw si mette a lavorare, interrompe
      l'update con SIGINT PRIMA dell'attivazione (run `failed/interrupted`, gateway non toccato) e
-     riprova la notte dopo. Dalla fase `activating` in poi non interrompe piu'.
+     riprova la notte dopo. Dalla fase `activating` in poi non interrompe piu'. Dopo il SIGINT:
+     termina i figli dell'update rimasti vivi, chiude nello storico un run rimasto `running`
+     (`openclaw update repair`, mai con riavvio) e cancella gli stage che l'update ha lasciato.
   5-7. plugin fissati (whatsapp, tokenjuice: OpenClaw tiene i pin esatti) alla versione del core e
      patch MCP, poi un solo kickstart -k, solo a OpenClaw fermo. Se non si ferma in 20 min: niente
      riavvio, la versione nuova resta (gia' verificata da OpenClaw) e plugin e patch li sistema il
@@ -91,6 +93,7 @@ PLUGIN = "whatsapp"
 MCP_DOCTOR = "openclaw-mcp-lazy"  # la riga di agents-doctor che controlla la patch
 PRE_ACTIVATION = {"requested", "staging", "validating", "repairing"}  # il gateway vecchio serve ancora
 QUIET_S = 120                # nessun transcript da 2 minuti = nessun turno in corso
+JSONL_TAIL = 256 * 1024      # coda di un transcript .jsonl letta per trovare l'ultimo evento
 KEEP_BACKUPS = 3
 FAILED_RESULTS = {"rolled-back", "rollback-failed", "rollback-pending"}
 # Solo la suite li abbassa: in produzione nessuno li passa.
@@ -126,9 +129,9 @@ def log(msg):
         pass
 
 
-def run(cmd, timeout=120):
+def run(cmd, timeout=120, env=None):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -249,8 +252,33 @@ def mcp_lazy(cmd):
     return rc, tail(out or err)
 
 
+def jsonl_last_ts(path):
+    """Epoch dell'ultima riga della coda che ha un 'timestamp'; None se nella coda non ce n'e'.
+    Le righe senza timestamp sono contabilita' (last-prompt, cost-state), non lavoro."""
+    try:
+        with open(path, "rb") as f:
+            size = f.seek(0, 2)
+            f.seek(max(0, size - JSONL_TAIL))
+            lines = f.read().split(b"\n")
+    except OSError:
+        return None
+    if size > JSONL_TAIL:
+        lines = lines[1:]  # la prima riga della coda e' tagliata a meta'
+    for ln in reversed(lines):
+        try:
+            ts = json.loads(ln).get("timestamp")
+            return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError, TypeError):
+            continue
+    return None
+
+
 def transcript_age():
-    """Secondi dall'ultima scrittura di un transcript di OpenClaw: SQLite, claude-cli, codex."""
+    """Secondi dall'ultimo evento di un transcript di OpenClaw: SQLite, claude-cli, codex.
+    Per i .jsonl conta l'ultima riga con timestamp, non l'mtime: una sessione claude-cli
+    parcheggiata da OpenClaw riceve righe di contabilita' senza timestamp ~10 min dopo il suo turno,
+    quando OpenClaw la chiude (01/10 00:15, sessione dell'heartbeat), e con l'mtime quella chiusura
+    sembrava lavoro e ha interrotto un update vero. L'mtime resta solo se la coda non ha timestamp."""
     newest = 0.0
     for db in glob.glob(str(OC_HOME / "agents/*/agent/openclaw-agent.sqlite")):
         try:
@@ -261,13 +289,20 @@ def transcript_age():
         except sqlite3.Error:
             pass
     slug = re.sub(r"[^A-Za-z0-9]", "-", str(HOME))  # come Claude Code nomina ~/.claude/projects
+    files = []
     for pat in (HOME / ".claude/projects" / f"{slug}--openclaw*" / "*.jsonl",
                 OC_HOME / "agents/*/agent/codex-home/sessions/*/*/*/*.jsonl"):
         for f in glob.glob(str(pat)):
             try:
-                newest = max(newest, os.path.getmtime(f))
+                files.append((os.path.getmtime(f), f))
             except OSError:
                 pass
+    # l'ultimo evento non e' mai dopo l'ultima scrittura: si leggono solo le code che possono vincere
+    for mtime, f in sorted(files, reverse=True):
+        if mtime <= newest:
+            break
+        ts = jsonl_last_ts(f)
+        newest = max(newest, mtime if ts is None else ts)
     return time.time() - newest
 
 
@@ -504,6 +539,110 @@ def health_gate(expected, rec, deferred=False):
     return problems
 
 
+def process_table():
+    """{pid: (ppid, (avvio, comando))}: l'avvio distingue un pid riusato da quello visto prima."""
+    _, out, _ = run(["ps", "-A", "-o", "pid=,ppid=,lstart=,command="], 30)
+    table = {}
+    for ln in out.splitlines():
+        f = ln.split(None, 7)  # pid, ppid, lstart (5 campi), comando
+        if len(f) == 8 and f[0].isdigit() and f[1].isdigit():
+            table[int(f[0])] = (int(f[1]), (" ".join(f[2:7]), f[7]))
+    return table
+
+
+def descendants(pid):
+    table, found, todo = process_table(), {}, [pid]
+    while todo:
+        parent = todo.pop()
+        for child, (ppid, ident) in table.items():
+            if ppid == parent and child not in found:
+                found[child] = ident
+                todo.append(child)
+    return found
+
+
+def kill_orphans(children):
+    """Termina i figli dell'update interrotto che gli sono sopravvissuti (il 01/10 un
+    update-candidate-state.worker.js era ancora vivo dopo il SIGINT). Solo i pid visti come suoi
+    figli, con lo stesso avvio: il run che li possedeva e' morto."""
+    end = time.time() + min(POLL_S, 10)  # tempo per uscire da soli
+    while True:
+        table = process_table()
+        alive = {p: i for p, i in children.items() if (table.get(p) or (0, None))[1] == i}
+        if not alive or time.time() >= end:
+            break
+        time.sleep(min(POLL_S, 1))
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for p, ident in alive.items():
+            log(f"figlio dell'update interrotto ancora vivo, {sig.name}: pid {p} {ident[1][:120]}")
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+        end = time.time() + 5
+        while alive and time.time() < end:
+            time.sleep(0.2)
+            table = process_table()
+            alive = {p: i for p, i in alive.items() if (table.get(p) or (0, None))[1] == i}
+        if not alive:
+            return
+
+
+def reconcile_ledger():
+    """Chiude nello storico di OpenClaw un run rimasto `running` col driver morto: un SIGINT arrivato
+    prima che l'update installi il suo gestore (01/10 00:18, 32 s dopo l'avvio) lo lascia li', e un
+    run attivo blocca il prossimo update e le scritture di config finche' qualcuno non lo chiude.
+    Si usa `openclaw update repair` (docs cli/update/repair-and-recovery.md), solo su un run prima
+    dell'attivazione: col gateway sano e il driver morto chiude la riga come `failed/abandoned`
+    senza Doctor ne' riavvii; un driver vivo lo rifiuta. In ogni altro caso repair ripiega sulla
+    finalizzazione completa, che ferma il gateway per il Doctor: OPENCLAW_SERVICE_REPAIR_POLICY=
+    external la fa fallire invece di fermarlo (doctor-maintenance salta lo stop del servizio).
+    Ritorna True se nessun run resta attivo."""
+    st = oc_json(["update", "status", "--json"], 60) or {}
+    a = st.get("activeRun")
+    if not a:
+        return True
+    rid = str(a.get("runId") or "?")[:8]
+    if a.get("phase") not in PRE_ACTIVATION:
+        log(f"run {rid} ancora attivo in fase {a.get('phase')}: non lo tocco")
+        return False
+    env = dict(os.environ, OPENCLAW_SERVICE_REPAIR_POLICY="external")
+    rc, out, err = run(["openclaw", "update", "repair", "--yes", "--json"], 300, env)
+    d = parse_json(out)
+    d = d if isinstance(d, dict) else {}
+    if rc == 0 and not (oc_json(["update", "status", "--json"], 60) or {}).get("activeRun"):
+        log(f"storico update: run {rid} chiuso con update repair: {tail(d.get('message') or out)}")
+        return True
+    log(f"storico update: run {rid} resta attivo, update repair exit {rc}: {tail(err or out)}")
+    return False
+
+
+def clean_update_stages(root, since):
+    """Le cartelle .openclaw.update-stage-* che l'update interrotto lascia accanto al pacchetto
+    (~730 MB l'una, due il 01/10: OpenClaw non le riprende mai). Solo quelle nate durante questo
+    update, e solo dopo che nessun run e' piu' attivo e i suoi figli sono morti."""
+    if not root:
+        return
+    for p in sorted(Path(root).parent.glob(".openclaw.update-stage-*")):
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode) or st.st_mtime < since:
+                continue
+            size = tree_bytes(p)
+            shutil.rmtree(p)
+            log(f"cancellata {p.name} lasciata dall'update interrotto ({size / 1e6:.0f} MB)")
+        except OSError as e:
+            log(f"{p.name}: non cancellata ({e.strerror or e})")
+
+
+def after_interrupt(children, started):
+    """Dopo il SIGINT: niente figli orfani, niente run appeso nello storico, niente stage."""
+    kill_orphans(children)
+    if reconcile_ledger():
+        root = ((oc_json(["update", "status", "--json"], 60) or {}).get("update") or {}).get("root")
+        clean_update_stages(root, started - 5)
+
+
 def run_update(target, down_ok=False):
     """`openclaw update` verso target. Ritorna (exit, record del run, stderr, interrotto).
     interrotto = perche' OpenClaw si e' svegliato durante la validazione e l'update e' stato fermato
@@ -512,9 +651,10 @@ def run_update(target, down_ok=False):
     `activating` il gateway e' gia' fermo e interrompere lascerebbe un'installazione a meta'."""
     log(f"openclaw update --yes --json --tag {target}")
     cmd = ["openclaw", "update", "--yes", "--json", "--tag", target, "--timeout", "1800"]
+    started = time.time()
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as errf:
         p = subprocess.Popen(cmd, stdout=out, stderr=errf, stdin=subprocess.DEVNULL, text=True)
-        busy, end = [], time.time() + 3 * 3600
+        busy, end, children = [], time.time() + 3 * 3600, {}
         while p.poll() is None:
             if time.time() > end:
                 p.kill()
@@ -527,8 +667,13 @@ def run_update(target, down_ok=False):
                 busy = why
                 log("OpenClaw si e' messo a lavorare durante la validazione (" + ", ".join(why)
                     + "): interrompo l'update prima dell'attivazione")
+                # i figli dell'update partono detached (update-execution.runtime: setsid): chi sono
+                # si vede solo adesso, finche' sono ancora figli suoi
+                children = descendants(p.pid)
                 p.send_signal(signal.SIGINT)
         rc = p.wait()
+        if busy:
+            after_interrupt(children, started)
         out.seek(0)
         errf.seek(0)
         stdout, stderr = out.read(), errf.read()
@@ -812,6 +957,12 @@ def main():
     root = (st.get("update") or {}).get("root")
     latest = (st.get("availability") or {}).get("latestVersion")
     last = state.get("last") or {}
+    if st.get("activeRun"):
+        ar = st["activeRun"]
+        log(f"storico update: run {str(ar.get('runId'))[:8]} ancora {ar.get('status')} in fase {ar.get('phase')}"
+            + (" (dry-run: non lo tocco)" if dry else ""))
+        if not dry:
+            reconcile_ledger()
 
     if last.get("result") == "rollback-pending" and cur == last.get("to"):
         log(f"rollback a {last.get('from')} in sospeso dal giro {last.get('started')}: {last.get('why')}")
