@@ -13,6 +13,9 @@ ExitTimeOut=20 s del plist di launchd), poi lo interrompe. Unica eccezione: un g
 risponde, dove non c'e' lavoro da salvare.
 
 Un giro (launchd com.jarvis.openclaw-safe-update, 04:20):
+  0. pulizia di ~/.openclaw/tmp/openclaw-plugin-build-* (avanzi di build dei plugin che OpenClaw non
+     cancella mai): solo cartelle vere, piu' vecchie di 6 ore, non nominate da nessun plugin
+     installato e senza file aperti (lsof). Gira anche senza update e anche da non armato.
   1. `openclaw update status --json`: niente di nuovo -> esce 0 in silenzio (se patch MCP o plugin
      fissati non sono a posto, li sistema a OpenClaw fermo). Una versione che e' gia' tornata
      indietro non si riprova da sola: serve --force-version.
@@ -62,6 +65,7 @@ import re
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -98,6 +102,12 @@ POST_IDLE_MIN = float(os.environ.get("OSU_POST_IDLE_MIN", 20))
 ROLLBACK_IDLE_MIN = float(os.environ.get("OSU_ROLLBACK_IDLE_MIN", 20))
 # snapshot di validazione ~2 GB + pacchetto + backup SQLite, col disco al 99% (9 GB liberi il 30/09)
 MIN_FREE_GB = float(os.environ.get("OSU_MIN_FREE_GB", 8))
+# OpenClaw lascia in tmp una copia di build (~110 MB) a ogni install/update di plugin e non la
+# cancella mai: il 30/09 erano 376, 41 GB, e hanno bloccato l'update per disco pieno.
+BUILD_TMP = OC_HOME / "tmp"
+BUILD_GLOB = "openclaw-plugin-build-*"
+BUILD_MIN_AGE_S = 6 * 3600
+LSOF_BATCH = 20              # ~50k file in 13 cartelle = 2 s di lsof: 20 per volta stanno sotto il timeout
 
 VER_RE = r"\d{4}\.\d+\.\d+(?:-\d+)?"
 
@@ -592,6 +602,104 @@ def notify(text):
     log(f"notifica {'inviata' if rc == 0 else 'NON inviata (' + tail(err or out) + ')'}: {text}")
 
 
+# ---------------------------------------------------------------- pulizia di tmp
+
+def tree_bytes(path):
+    # come du: blocchi occupati, senza mai seguire i link (os.walk non li segue di default)
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for n in dirs + files:
+            try:
+                total += os.lstat(os.path.join(root, n)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def build_refs():
+    """Testo in cui un plugin installato nominerebbe la sua cartella sorgente: plugins list,
+    openclaw.json, npm/projects/*/package.json. None = plugin non leggibili: non si cancella niente."""
+    rc, out, _ = oc(["plugins", "list", "--json"], 180)
+    if rc or not isinstance(parse_json(out), dict):
+        return None
+    texts = [out]
+    for f in [CONFIG, *glob.glob(str(OC_HOME / "npm/projects/*/package.json"))]:
+        try:
+            texts.append(Path(f).read_text(errors="replace"))
+        except OSError:
+            pass
+    return "\n".join(texts)
+
+
+def open_under(dirs):
+    """Le cartelle sotto cui un processo ha un file aperto (o la cwd). Un lsof che non risponde o
+    esce storto le conta tutte come aperte: nel dubbio si tiene."""
+    used = set()
+    for i in range(0, len(dirs), LSOF_BATCH):
+        batch = dirs[i:i + LSOF_BATCH]
+        args = [x for d in batch for x in ("+D", str(d))]  # +D non segue i link simbolici
+        rc, out, _ = run(["lsof", "-w", "-F", "n", *args], 60)
+        if rc not in (0, 1):
+            used.update(batch)
+            continue
+        names = [ln[1:] for ln in out.splitlines() if ln.startswith("n")]
+        for d in batch:
+            roots = {str(d), os.path.realpath(d)}
+            if any(n == r or n.startswith(r + "/") for n in names for r in roots):
+                used.add(d)
+    return used
+
+
+def clean_build_tmp(dry):
+    """Cancella le cartelle openclaw-plugin-build-* di ~/.openclaw/tmp piu' vecchie di 6 ore, solo
+    se nessun plugin le nomina e nessun processo ci ha file aperti. Mai un link, mai altro in tmp."""
+    now, kept, old = time.time(), {}, []
+    for p in sorted(BUILD_TMP.glob(BUILD_GLOB)):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode):  # un link simbolico non e' una cartella: non si segue
+            kept.setdefault("non cartelle", []).append(p)
+        elif now - st.st_mtime < BUILD_MIN_AGE_S:
+            kept.setdefault("recenti", []).append(p)
+        else:
+            old.append(p)
+    if not (old or kept):
+        return
+    gone = []
+    if old:
+        refs = build_refs()
+        if refs is None:
+            log(f"pulizia tmp: plugins list non risponde, non cancello le {len(old)} cartelle di build vecchie")
+            return
+        for p in old:
+            if p.name in refs:
+                kept.setdefault("nominate da un plugin", []).append(p)
+        old = [p for p in old if p.name not in refs]
+        used = open_under(old)
+        kept.setdefault("con file aperti", []).extend(p for p in old if p in used)
+        gone = [p for p in old if p not in used]
+    freed, errors = 0, []
+    for p in gone:
+        size = tree_bytes(p)
+        if dry:
+            freed += size
+            continue
+        try:
+            if stat.S_ISLNK(os.lstat(p).st_mode):  # sostituita da un link dopo il controllo
+                continue
+            shutil.rmtree(p)  # i link dentro li toglie, non li segue
+            freed += size
+        except OSError as e:
+            errors.append(f"{p.name}: {e.strerror or e}")
+    done = len(gone) - len(errors)
+    why = ", ".join(f"{len(v)} {k}" for k, v in kept.items() if v)
+    log(f"pulizia tmp{' [dry-run]' if dry else ''}: {'cancellerei' if dry else 'cancellate'} {done} cartelle "
+        f"{BUILD_GLOB}, {freed / 1e9:.1f} GB {'da liberare' if dry else 'liberati'}"
+        + (f"; tenute {why}" if why else "") + (f"; errori {'; '.join(errors)[:200]}" if errors else ""))
+
+
 # ---------------------------------------------------------------- il giro
 
 def rollback(old, rec):
@@ -684,6 +792,10 @@ def main():
         # dall'albero del gateway `openclaw update` non puo' fermare il gateway che lo contiene
         log(f"rifiuto: giro dentro il gateway di OpenClaw (pid {gw}); va lanciato da launchd o da un terminale")
         return 4
+
+    # ogni notte, anche senza update, e prima del controllo del disco: gli avanzi di build da soli
+    # bastavano a bloccare l'update. Solo --dry-run si limita a dire cosa cancellerebbe.
+    clean_build_tmp(a.dry_run)
 
     state = load_state()
     armed = bool(state.get("armed"))

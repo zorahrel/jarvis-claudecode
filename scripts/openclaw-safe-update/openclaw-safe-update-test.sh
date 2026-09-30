@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Suite di openclaw-safe-update. `openclaw`, `npm`, `launchctl`, `agents-doctor`, `trash` e la
-# patch MCP sono finti, in testa al PATH, e HOME e' una cartella temporanea: la suite non tocca
+# Suite di openclaw-safe-update. `openclaw`, `npm`, `launchctl`, `agents-doctor`, `trash`, `lsof` e
+# la patch MCP sono finti, in testa al PATH, e HOME e' una cartella temporanea: la suite non tocca
 # mai l'OpenClaw vero (ne' ~/.openclaw ne' lo stato in ~/.claude/jarvis/state).
 #
 # Il finto tiene lo stato in un JSON (versione installata, plugin, patch, pid del gateway, fase
@@ -69,6 +69,13 @@ if name == "agents-doctor":
 if name == "trash":
     sys.exit(0)
 
+if name == "lsof":
+    # un file aperto sotto ogni cartella +D il cui nome e' in open_dirs; exit 1 = niente, come lsof
+    dirs = [args[i + 1] for i, x in enumerate(args) if x == "+D"]
+    hit = [d for d in dirs if os.path.basename(d) in st.get("open_dirs", [])]
+    for d in hit: print(f"p4242\nn{d}/package-0/index.js")
+    sys.exit(0 if hit else 1)
+
 if name == "npm":
     if args[0] == "view" and "versions" in args:
         out(["2026.9.5", "2026.9.6", "2026.9.7"]); sys.exit(0)
@@ -130,8 +137,10 @@ if args[:2] == ["channels", "status"]:
 if args[:2] == ["gateway", "status"]:
     out({"rpc": {"ok": not down(), "server": {"version": st["version"]}}}); sys.exit(0)
 if args[:2] == ["plugins", "list"]:
+    if st.get("plugins_list_fail"): print("gateway closed", file=sys.stderr); sys.exit(1)
     out({"plugins": [{"id": p, "version": v, "origin": "global",
-                      "trust": {"installSpec": f"@openclaw/{p}" + (f"@{v}" if p in PINNED else "")}}
+                      "trust": {"installSpec": f"@openclaw/{p}" + (f"@{v}" if p in PINNED else "")},
+                      **({"source": st["plugin_source"]} if p == "whatsapp" and st.get("plugin_source") else {})}
                      for p, v in st["plugins"].items()]}); sys.exit(0)
 if args[:2] == ["plugins", "install"]:
     if st.get("plugin_fail"): print("Plugin replacement failed", file=sys.stderr); sys.exit(1)
@@ -162,7 +171,7 @@ print("fake openclaw: comando non previsto: " + a, file=sys.stderr); sys.exit(2)
 PY
 chmod +x "$T/bin/fake.py"
 # il nome del finto e' quello vero: fake.py smista su argv[0]
-for n in openclaw npm launchctl agents-doctor trash mcp-lazy; do ln -s "$T/bin/fake.py" "$T/bin/$n"; done
+for n in openclaw npm launchctl agents-doctor trash lsof mcp-lazy; do ln -s "$T/bin/fake.py" "$T/bin/$n"; done
 
 # setup <json di stato> : HOME nuova, root finta di OpenClaw, log vuoti
 setup() {
@@ -351,6 +360,63 @@ check "exit 1" "$(go)" 1
 has "rollback" "update --yes --json --tag 2026.9.5" "$T/calls.log"
 check "tornato a 9.5" "$(sget version)" 2026.9.5
 has "notifica" "tornato a 9.5" "$T/msgs.log"
+
+# buildtmp : in ~/.openclaw/tmp una cartella di build per ogni caso, piu' un vicino che non e' di build
+B=; buildtmp() {
+  B="$HOME/.openclaw/tmp"; rm -rf "$T/fuori"; mkdir -p "$T/fuori/dentro" "$T/fuori/sopra"
+  echo tieni > "$T/fuori/dentro/keep.txt"; echo tieni > "$T/fuori/sopra/keep.txt"
+  for n in vecchia recente plugin progetto aperta; do
+    mkdir -p "$B/openclaw-plugin-build-$n/package-0"; head -c 300000 /dev/zero > "$B/openclaw-plugin-build-$n/package-0/index.js"
+  done
+  ln -s "$T/fuori/dentro" "$B/openclaw-plugin-build-vecchia/package-0/link"   # link dentro: non va seguito
+  ln -s "$T/fuori/sopra" "$B/openclaw-plugin-build-link"                       # la voce stessa e' un link
+  mkdir -p "$B/agent-bin-XYZ" "$HOME/.openclaw/npm/projects/p"
+  echo '{"dependencies":{"x":"file:../../../tmp/openclaw-plugin-build-progetto/package-0"}}' > "$HOME/.openclaw/npm/projects/p/package.json"
+  python3 -c "import os,sys,time
+t=time.time()-7*3600
+for p in sys.argv[1:]: os.utime(p,(t,t),follow_symlinks=False)
+t=time.time()-3600; os.utime(sys.argv[1].replace('vecchia','recente'),(t,t))" \
+    "$B/openclaw-plugin-build-vecchia" "$B/openclaw-plugin-build-plugin" "$B/openclaw-plugin-build-progetto" \
+    "$B/openclaw-plugin-build-aperta" "$B/openclaw-plugin-build-link" "$B/agent-bin-XYZ" \
+    "$T/fuori/sopra" "$T/fuori/dentro"   # vecchi anche i bersagli: seguire il link li renderebbe candidati
+}
+there() { if [ -e "$B/$2" ] || [ -L "$B/$2" ]; then ok "$1"; else bad "$1 ($2 cancellata)"; fi; }
+gone()  { if [ -e "$B/$2" ] || [ -L "$B/$2" ]; then bad "$1 ($2 ancora li')"; else ok "$1"; fi; }
+TMPSTATE='{"latest":"2026.9.5","open_dirs":["openclaw-plugin-build-aperta"],"plugin_source":"/x/.openclaw/tmp/openclaw-plugin-build-plugin/package-0"}'
+
+echo "== 18. pulizia tmp, anche senza update: via solo le build vecchie, non nominate e senza file aperti"
+setup "$TMPSTATE"; arm; buildtmp
+check "exit 0" "$(go)" 0
+gone  "vecchia e inutilizzata: cancellata" openclaw-plugin-build-vecchia
+there "recente (1 h): tenuta" openclaw-plugin-build-recente
+there "nominata da plugins list: tenuta" openclaw-plugin-build-plugin
+there "nominata da npm/projects/*/package.json: tenuta" openclaw-plugin-build-progetto
+there "con un file aperto (lsof): tenuta" openclaw-plugin-build-aperta
+has   "lsof sulle cartelle candidate" "lsof -w -F n +D $B/openclaw-plugin-build-aperta" "$T/calls.log"
+there "voce che e' un link: tenuta" openclaw-plugin-build-link
+check "link in cima non seguito" "$(cat "$T/fuori/sopra/keep.txt" 2>/dev/null)" tieni
+check "link dentro non seguito" "$(cat "$T/fuori/dentro/keep.txt" 2>/dev/null)" tieni
+there "il resto di tmp non si tocca" agent-bin-XYZ
+has   "log: quante e quanti GB" "cancellate 1 cartelle openclaw-plugin-build-\*, 0.0 GB liberati; tenute" "$T/out.log"
+hasnt "nessun update" "update --yes" "$T/calls.log"
+
+echo "== 19. pulizia tmp con --dry-run: dice cosa cancellerebbe, non cancella niente"
+setup "$TMPSTATE"; arm; buildtmp
+check "exit 0" "$(go --dry-run)" 0
+there "vecchia ancora li'" openclaw-plugin-build-vecchia
+has   "lo dice" "cancellerei 1 cartelle" "$T/out.log"
+
+echo "== 20. pulizia tmp prima del controllo del disco: col disco pieno l'update e' rifiutato, gli avanzi no"
+setup '{"open_dirs":[]}'; arm; buildtmp
+check "exit 4 (disco)" "$(OSU_MIN_FREE_GB=1000000 go)" 4
+has   "rifiutato per il disco" "GB liberi sul Mac" "$T/out.log"
+gone  "avanzi cancellati comunque" openclaw-plugin-build-vecchia
+
+echo "== 21. plugins list non risponde: non si sa chi le nomina, non si cancella niente"
+setup '{"latest":"2026.9.5","plugins_list_fail":true}'; arm; buildtmp
+go >/dev/null
+there "vecchia tenuta" openclaw-plugin-build-vecchia
+has   "lo dice" "plugins list non risponde" "$T/out.log"
 
 echo
 echo "$PASS ok, $FAIL FAIL"
