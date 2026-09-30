@@ -64,6 +64,7 @@ def main() -> int:
         schedule = job.get("schedule") or {}
         last = (job.get("lastRunAtMs") or state.get("lastRunAtMs") or 0) / 1000
         delivery_error = job.get("lastDeliveryError") or state.get("lastDeliveryError")
+        run_end = last + (state.get("lastDurationMs") or 0) / 1000
 
         if schedule.get("kind") == "at":
             # One-shot: prima della data e' solo in attesa, dopo deve aver girato.
@@ -78,6 +79,18 @@ def main() -> int:
         elif period and (now - last) > period * 86400 * 2:
             days = int((now - last) / 86400)
             print(f"WARN|{name}|fermo da {days}g, atteso ogni {period:g}g")
+        elif delivery_error and (job.get("updatedAtMs") or 0) / 1000 > run_end + 600:
+            # L'errore e' di un run fatto con la config di prima: il job e' stato
+            # corretto dopo, quindi lo dira' il prossimo run, non questo. updatedAtMs
+            # si sposta anche a fine run (e fino a un minuto dopo, col recupero della
+            # consegna): conta come modifica solo oltre 10 minuti dalla fine.
+            print(f"OK|{name}|non consegnato all'ultimo run, ma il job e' stato modificato dopo")
+        elif delivery_error and "No active WhatsApp Web listener" in delivery_error:
+            # Il testo dell'errore suggerisce `openclaw channels login`, ma il socket
+            # e' su: e' il bug OpenClaw #153453 dei job agentTurn (il run cerca il
+            # listener in un altro registry). Il recupero di solito consegna dopo
+            # qualche minuto; i job con payload command consegnano al primo colpo.
+            print(f"WARN|{name}|consegna WhatsApp fallita al primo tentativo: bug OpenClaw #153453 dei job agentTurn, non un login da rifare. Rimedio: payload command")
         elif delivery_error:
             print(f"WARN|{name}|ha girato ma non ha consegnato: {delivery_error[:120]}")
         else:
