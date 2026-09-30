@@ -1,26 +1,40 @@
 #!/usr/bin/env python3
-"""openclaw-safe-update: aggiorna OpenClaw di notte, solo a OpenClaw fermo, e torna indietro se non va.
+"""openclaw-safe-update: aggiorna OpenClaw di notte, riavvia il gateway solo a OpenClaw fermo, e
+torna indietro se la versione nuova non passa i controlli.
 
 Perche' esiste. L'auto-update interno di OpenClaw falliva ogni notte a `managed-service-preflight`
 (4 volte fino al 30/09: l'helper girava dentro l'albero di processi del gateway). Due volte in due
 giorni (29/09 12:55, 30/09 09:44) un'operazione sui plugin a OpenClaw acceso ha lasciato tutti i
 canali giu' per 3-8 minuti. E ogni update riscrive dist/ e cancella la patch openclaw-mcp-lazy.
 
+La regola che tiene insieme tutto: nessun riavvio del gateway mentre OpenClaw lavora. Allo stop il
+gateway concede al lavoro in corso solo 5 s (log: "shutdown budget ... drain=5000ms", da
+ExitTimeOut=20 s del plist di launchd), poi lo interrompe. Unica eccezione: un gateway che non
+risponde, dove non c'e' lavoro da salvare.
+
 Un giro (launchd com.jarvis.openclaw-safe-update, 04:20):
   1. `openclaw update status --json`: niente di nuovo -> esce 0 in silenzio (se patch MCP o plugin
-     WhatsApp non sono a posto, li sistema a OpenClaw fermo).
+     fissati non sono a posto, li sistema a OpenClaw fermo). Una versione che e' gia' tornata
+     indietro non si riprova da sola: serve --force-version.
   2. aspetta OpenClaw fermo (0 task, 0 run sui canali, nessun transcript da 120 s) fino a
      --idle-wait minuti; se non si ferma esce 0 e riprova la notte dopo.
   3. fotografa versione, sha256 dei file dist patchati, openclaw.json, plugin, FAIL di
      agents-doctor e problemi gia' presenti; salva i database SQLite e openclaw.json.
   4. `openclaw update --yes --json --tag <v>`: OpenClaw valida la versione nuova su una copia dello
-     stato, ferma, sostituisce, riavvia, verifica e se la verifica fallisce torna indietro da solo.
-     Senza --no-restart apposta: salterebbe proprio quella verifica e quel rollback, e lascerebbe
-     il gateway vecchio a girare su un dist/ gia' sostituito (docs cli/update/how-updates-run.md).
-  5-7. plugin WhatsApp alla versione del core e patch MCP, poi un solo kickstart a OpenClaw fermo.
+     stato (~11-15 min) col gateway vecchio acceso, poi ferma, sostituisce, riavvia e verifica, e
+     se la verifica fallisce torna indietro da solo. Senza --no-restart apposta: salterebbe quella
+     verifica e lascerebbe il gateway vecchio a girare su un dist/ gia' sostituito.
+     Durante la validazione lo script guarda ogni 20 s: se OpenClaw si mette a lavorare, interrompe
+     l'update con SIGINT PRIMA dell'attivazione (run `failed/interrupted`, gateway non toccato) e
+     riprova la notte dopo. Dalla fase `activating` in poi non interrompe piu'.
+  5-7. plugin fissati (whatsapp, tokenjuice: OpenClaw tiene i pin esatti) alla versione del core e
+     patch MCP, poi un solo kickstart -k, solo a OpenClaw fermo. Se non si ferma in 20 min: niente
+     riavvio, la versione nuova resta (gia' verificata da OpenClaw) e plugin e patch li sistema il
+     giro dopo.
   8. health gate: gateway sulla versione giusta, canali su, WhatsApp healthy, un heartbeat vero
      andato a buon fine, patch MCP attiva, nessun FAIL nuovo in agents-doctor.
-  9. se qualcosa dopo il 4 va storto: rollback alla versione di prima e di nuovo health gate.
+  9. se qualcosa dopo il 4 va storto: rollback con `openclaw update --tag <vecchia>`, anche lui solo
+     a OpenClaw fermo; se non si ferma in 20 min resta in sospeso e lo riprende il giro dopo.
  10. una riga su WhatsApp ad Attilio, solo se e' cambiato o fallito qualcosa (destinatario letto
      dal cron del brief mattutino, mai scritto qui: il repo e' pubblico).
 
@@ -33,8 +47,9 @@ Uso:
   openclaw-safe-update --force-version 2026.9.7 giro supervisionato verso quella versione
   --idle-wait MIN                               attesa massima di OpenClaw fermo (45)
 
-Exit: 0 niente da fare o fatto · 1 fallito ma tornato indietro · 2 fallito e rollback non
-riuscito · 3 un altro giro in corso · 4 rifiutato (dentro il gateway, disco, versione).
+Exit: 0 niente da fare, fatto, o rimandato a OpenClaw fermo · 1 fallito ma tornato indietro ·
+2 fallito e rollback non riuscito o in sospeso · 3 un altro giro in corso · 4 rifiutato (dentro
+il gateway, disco, versione).
 """
 import argparse
 import datetime
@@ -45,9 +60,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -67,13 +84,19 @@ BRIEF_CRON = "c34dcc15-c2c1-4c5c-8ffa-51b9054827f1"  # brief-mattutino: il suo d
 HEARTBEAT = "heartbeat-main"
 KNOWN_DELIVERY_BUG = "No active WhatsApp Web listener"
 PLUGIN = "whatsapp"
+MCP_DOCTOR = "openclaw-mcp-lazy"  # la riga di agents-doctor che controlla la patch
+PRE_ACTIVATION = {"requested", "staging", "validating", "repairing"}  # il gateway vecchio serve ancora
 QUIET_S = 120                # nessun transcript da 2 minuti = nessun turno in corso
 KEEP_BACKUPS = 3
+FAILED_RESULTS = {"rolled-back", "rollback-failed", "rollback-pending"}
 # Solo la suite li abbassa: in produzione nessuno li passa.
 POLL_S = float(os.environ.get("OSU_POLL_S", 30))
+WATCH_S = min(POLL_S, 20)    # sguardo durante la validazione dell'update
 SETTLE_S = float(os.environ.get("OSU_SETTLE_S", 300))  # tempo concesso ai canali per tornare su
+KICK_S = float(os.environ.get("OSU_KICK_S", 180))      # tempo concesso al gateway dopo un kickstart
 POST_IDLE_MIN = float(os.environ.get("OSU_POST_IDLE_MIN", 20))
-# snapshot di validazione ~2 GB + pacchetto + backup SQLite, col disco al 99% (13 GB liberi il 30/09)
+ROLLBACK_IDLE_MIN = float(os.environ.get("OSU_ROLLBACK_IDLE_MIN", 20))
+# snapshot di validazione ~2 GB + pacchetto + backup SQLite, col disco al 99% (9 GB liberi il 30/09)
 MIN_FREE_GB = float(os.environ.get("OSU_MIN_FREE_GB", 8))
 
 VER_RE = r"\d{4}\.\d+\.\d+(?:-\d+)?"
@@ -172,6 +195,10 @@ def gateway_pid():
     return int(m.group(1)) if m else None
 
 
+def gateway_up():
+    return bool(((oc_json(["gateway", "status", "--json"], 90) or {}).get("rpc") or {}).get("ok"))
+
+
 def ancestors():
     pids, pid = set(), os.getpid()
     while pid > 1 and pid not in pids:
@@ -181,14 +208,30 @@ def ancestors():
     return pids
 
 
-def plugin_state():
+def plugin_list():
     d = oc_json(["plugins", "list", "--json"], 180) or {}
-    return next((p for p in d.get("plugins") or [] if p.get("id") == PLUGIN), None)
+    return {p.get("id"): p for p in d.get("plugins") or []}
+
+
+def pinned(spec):
+    m = re.search(rf"(?<=.)@({VER_RE})$", spec or "")
+    return m.group(1) if m else None
 
 
 def plugin_ok(pv, core):
     # un core di correzione (2026.9.7-2) usa i plugin della sua coorte (2026.9.7): docs updating.md
     return pv in (core, base(core))
+
+
+def misaligned(plugins, core):
+    """{id: pacchetto} dei plugin che vanno riallineati a `core` a mano: whatsapp e ogni plugin
+    globale con un pin esatto (OpenClaw allinea da solo quelli non fissati, tiene i pin esatti)."""
+    todo = {}
+    for pid, p in sorted(plugins.items()):
+        spec = (p.get("trust") or {}).get("installSpec") or ""
+        if (pid == PLUGIN or (p.get("origin") == "global" and pinned(spec))) and not plugin_ok(p.get("version"), core):
+            todo[pid] = re.sub(r"(?<=.)@[^@/]*$", "", spec) or f"@openclaw/{pid}"
+    return todo
 
 
 def mcp_lazy(cmd):
@@ -218,8 +261,16 @@ def transcript_age():
     return time.time() - newest
 
 
-def busy_reasons():
-    """Lista vuota = OpenClaw fermo. Altrimenti perche' non lo e'."""
+def busy_reasons(down_ok=False):
+    """Lista vuota = OpenClaw fermo. Altrimenti perche' non lo e'.
+    down_ok: un gateway che non risponde conta come fermo. Vale solo dopo un update: non c'e' lavoro
+    da interrompere, e aspettare non lo riporta su."""
+    h = oc_json(["health", "--json"], 90)
+    if not isinstance(h, dict):
+        if down_ok and not gateway_up():
+            log("il gateway non risponde: nessun lavoro da interrompere")
+            return []
+        return ["health non risponde"]
     why, n = [], 0
     for st in ("running", "queued"):
         d = oc_json(["tasks", "list", "--json", "--status", st], 90)
@@ -229,30 +280,30 @@ def busy_reasons():
         n += len(d.get("tasks") or [])
     if n:
         why.append(f"{n} task attivi")
-    h = oc_json(["health", "--json"], 90)
-    if not isinstance(h, dict):
-        why.append("health non risponde")
-    else:
-        runs = sum(int(a.get("activeRuns") or 0) for c in (h.get("channels") or {}).values()
-                   for a in (c.get("accounts") or {}).values())
-        if runs:
-            why.append(f"{runs} run in corso sui canali")
+    runs = sum(int(a.get("activeRuns") or 0) for c in (h.get("channels") or {}).values()
+               for a in (c.get("accounts") or {}).values())
+    if runs:
+        why.append(f"{runs} run in corso sui canali")
     age = transcript_age()
     if age < QUIET_S:
         why.append(f"transcript scritto {int(age)} s fa")
     return why
 
 
-def wait_idle(minutes):
+def wait_idle(minutes, down_ok=False):
     end, polls = time.time() + minutes * 60, 0
     while True:
-        why = busy_reasons()
+        why = busy_reasons(down_ok)
         if not why or time.time() >= end:
             return why
         if polls % 10 == 0:
             log("OpenClaw occupato: " + ", ".join(why))
         polls += 1
         time.sleep(POLL_S)
+
+
+def update_phase():
+    return ((oc_json(["update", "status", "--json"], 60) or {}).get("activeRun") or {}).get("phase")
 
 
 def live_problems(expected):
@@ -302,14 +353,14 @@ def kickstart():
     rc, _, err = run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"], 60)
     if rc:
         return f"kickstart: {tail(err)}"
-    end = time.time() + 180
+    end = time.time() + KICK_S
     while time.time() < end:
         time.sleep(min(POLL_S, 5))
         pid = gateway_pid()
-        if pid and pid != old and ((oc_json(["gateway", "status", "--json"], 60) or {}).get("rpc") or {}).get("ok"):
+        if pid and pid != old and gateway_up():
             log(f"gateway riavviato (pid {old} -> {pid})")
             return None
-    return "il gateway non e' tornato su entro 180 s dal kickstart"
+    return f"il gateway non e' tornato su entro {KICK_S:g} s dal kickstart"
 
 
 def pick_plugin_version(pkg, core):
@@ -335,46 +386,46 @@ def ensure_auto_off(notes):
         notes.append("auto-update interno rispento" if rc == 0 else f"auto-update: config set fallito ({tail(err)})")
 
 
-def converge(core, idle_minutes, must_restart=False):
-    """Plugin WhatsApp e patch MCP a posto per `core`, con al massimo un riavvio a OpenClaw fermo.
-    Ritorna (problemi, note). must_restart: riavvia anche se OpenClaw non si ferma (rollback)."""
+def converge(core, idle_minutes):
+    """Plugin fissati e patch MCP a posto per `core`, con un solo riavvio e solo a OpenClaw fermo.
+    Ritorna (problemi, note, rimandato). rimandato = serviva un riavvio ma OpenClaw non si e' mai
+    fermato: niente riavvio, plugin e patch restano come sono e li sistema il giro dopo."""
     notes = []
     ensure_auto_off(notes)
-    p = plugin_state()
-    if not p:
-        return ["plugin whatsapp non trovato"], notes
-    install = None
-    if not plugin_ok(p.get("version"), core):
-        spec = (p.get("trust") or {}).get("installSpec") or "@openclaw/whatsapp"
-        pkg = re.sub(r"(?<=.)@[^@/]*$", "", spec)
+    plugins = plugin_list()
+    if PLUGIN not in plugins:
+        return ["plugin whatsapp non trovato"], notes, False
+    installs = {}
+    for pid, pkg in misaligned(plugins, core).items():
         v, note = pick_plugin_version(pkg, core)
         if note:
             notes.append(note)
         if not v:
-            return [note], notes
-        install = f"{pkg}@{v}"
-    patch_rc, patch_msg = mcp_lazy("check")
+            return [note], notes, False
+        installs[pid] = f"{pkg}@{v}"
     patch = None
-    if patch_rc:
+    if mcp_lazy("check")[0]:
         if mcp_lazy("upstream")[0] == 0:
             # fix ufficiale nel codice: niente patch su dist, basta l'opt-in (si ricarica a caldo)
             rc, _, err = oc(["config", "set", "tools.toolSearch", "true"], 60)
             notes.append("fix MCP upstream: tools.toolSearch acceso" if rc == 0 else f"tools.toolSearch: {tail(err)}")
         else:
             patch = "apply"
-    if not (install or patch or must_restart):
-        return [], notes
-    busy = wait_idle(idle_minutes)
-    if busy and not must_restart:
-        return [f"OpenClaw mai fermo in {idle_minutes:g} min ({', '.join(busy)})"], notes
+    if not (installs or patch):
+        return [], notes, False
+    busy = wait_idle(idle_minutes, down_ok=True)
+    if busy:
+        why = f"OpenClaw mai fermo in {idle_minutes:g} min ({', '.join(busy)})"
+        log(f"niente riavvio: {why}; plugin e patch MCP li sistema il giro dopo")
+        return [], notes + [f"plugin/patch MCP rimandati: {why}"], True
     problems = []
-    if install:
-        log(f"plugin: openclaw plugins install {install} --force --pin")
-        rc, out, err = oc(["plugins", "install", install, "--force", "--pin"], 300)
+    for spec in installs.values():
+        log(f"plugin: openclaw plugins install {spec} --force --pin")
+        rc, out, err = oc(["plugins", "install", spec, "--force", "--pin"], 300)
         # l'install a caldo puo' lasciare i canali fermi anche quando esce 1 (30/09 09:44):
         # il kickstart qui sotto parte comunque, subito
         if rc:
-            problems.append(f"plugins install {install}: exit {rc} {tail(err or out)}")
+            problems.append(f"plugins install {spec}: exit {rc} {tail(err or out)}")
     if patch:
         rc, msg = mcp_lazy("apply")
         if rc:
@@ -382,12 +433,14 @@ def converge(core, idle_minutes, must_restart=False):
     err = kickstart()
     if err:
         problems.append(err)
-    p = plugin_state() or {}
-    if not plugin_ok(p.get("version"), core) and not (install and p.get("version") == install.rsplit("@", 1)[1]):
-        problems.append(f"plugin whatsapp {p.get('version')}, atteso {core}")
-    if install and not problems:
-        notes.append(f"plugin whatsapp -> {install.rsplit('@', 1)[1]}")
-    return problems, notes
+    after = plugin_list()
+    for pid, spec in installs.items():
+        got, want = (after.get(pid) or {}).get("version"), spec.rsplit("@", 1)[1]
+        if got != want:
+            problems.append(f"plugin {pid} {got}, atteso {want}")
+    if installs and not problems:
+        notes.append("plugin -> " + ", ".join(f"{k} {v.rsplit('@', 1)[1]}" for k, v in installs.items()))
+    return problems, notes, False
 
 
 def heartbeat():
@@ -414,8 +467,9 @@ def heartbeat():
     return None
 
 
-def health_gate(expected, rec):
-    """Problemi NUOVI rispetto alla fotografia di prima: uno gia' rotto non e' colpa dell'update."""
+def health_gate(expected, rec, deferred=False):
+    """Problemi NUOVI rispetto alla fotografia di prima: uno gia' rotto non e' colpa dell'update.
+    deferred: la patch MCP e' rimandata al giro dopo, quindi la sua assenza e' attesa."""
     before = set(rec.get("problems") or [])
     end = time.time() + SETTLE_S
     while True:
@@ -425,23 +479,50 @@ def health_gate(expected, rec):
         time.sleep(min(POLL_S, 10))
     if problems:
         return problems
-    rc, msg = mcp_lazy("check")
-    if rc:
-        problems.append(f"patch MCP: {msg}")
+    if not deferred:
+        rc, msg = mcp_lazy("check")
+        if rc:
+            problems.append(f"patch MCP: {msg}")
     hb = heartbeat()
     if hb:
         problems.append(hb)
     new = sorted(set(doctor_fails()) - set(rec.get("doctor") or []))
+    if deferred:
+        new = [x for x in new if MCP_DOCTOR not in x]
     if new:
         problems.append("agents-doctor: " + "; ".join(new)[:240])
     return problems
 
 
-def run_update(target):
-    """`openclaw update` verso target. Ritorna (exit, record del run, stderr)."""
+def run_update(target, down_ok=False):
+    """`openclaw update` verso target. Ritorna (exit, record del run, stderr, interrotto).
+    interrotto = perche' OpenClaw si e' svegliato durante la validazione e l'update e' stato fermato
+    con SIGINT prima dell'attivazione (docs cli/update/how-updates-run.md: run `failed/interrupted`,
+    gateway vecchio intatto). La fase si rilegge per ultima, subito prima del segnale: dopo
+    `activating` il gateway e' gia' fermo e interrompere lascerebbe un'installazione a meta'."""
     log(f"openclaw update --yes --json --tag {target}")
-    rc, out, err = oc(["update", "--yes", "--json", "--tag", target, "--timeout", "1800"], 3 * 3600)
-    res = parse_json(out) or {}
+    cmd = ["openclaw", "update", "--yes", "--json", "--tag", target, "--timeout", "1800"]
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as errf:
+        p = subprocess.Popen(cmd, stdout=out, stderr=errf, stdin=subprocess.DEVNULL, text=True)
+        busy, end = [], time.time() + 3 * 3600
+        while p.poll() is None:
+            if time.time() > end:
+                p.kill()
+                break
+            time.sleep(WATCH_S)
+            if busy or p.poll() is not None:
+                continue
+            why = busy_reasons(down_ok)
+            if why and update_phase() in PRE_ACTIVATION:
+                busy = why
+                log("OpenClaw si e' messo a lavorare durante la validazione (" + ", ".join(why)
+                    + "): interrompo l'update prima dell'attivazione")
+                p.send_signal(signal.SIGINT)
+        rc = p.wait()
+        out.seek(0)
+        errf.seek(0)
+        stdout, stderr = out.read(), errf.read()
+    res = parse_json(stdout) or {}
     if rc == 75:
         # consegnato a un helper gestito: l'esito vero arriva nello storico
         end = time.time() + 3600
@@ -451,7 +532,7 @@ def run_update(target):
     if rec is None or rc == 75:
         rec = (oc_json(["update", "status", "--json"], 60) or {}).get("lastRun") or {}
     log(f"update: exit {rc}, stato {rec.get('status')} {rec.get('reason') or ''}".rstrip())
-    return rc, rec, err
+    return rc, rec, stderr, busy
 
 
 def run_reason(rec, err=""):
@@ -467,15 +548,15 @@ def run_reason(rec, err=""):
 def record(cur, root):
     dist = Path(root or "") / "dist"
     files = sorted(glob.glob(str(dist / "mcp-http.loopback-runtime-*.mjs")) + glob.glob(str(dist / "mcp-http.schema-*.mjs")))
-    plugins = (oc_json(["plugins", "list", "--json"], 180) or {}).get("plugins") or []
+    plugins = plugin_list()
     return {
         "ts": datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
         "version": cur,
         "root": root,
         "config_sha256": sha(CONFIG) if CONFIG.exists() else None,
         "dist_sha256": {Path(f).name: sha(f) for f in files},
-        "plugins": {p["id"]: {"version": p.get("version"), "spec": (p.get("trust") or {}).get("installSpec")}
-                    for p in plugins if p.get("origin") == "global"},
+        "plugins": {k: {"version": p.get("version"), "spec": (p.get("trust") or {}).get("installSpec")}
+                    for k, p in plugins.items() if p.get("origin") == "global"},
         "doctor": doctor_fails(),
         "problems": live_problems(cur),
     }
@@ -514,34 +595,52 @@ def notify(text):
 # ---------------------------------------------------------------- il giro
 
 def rollback(old, rec):
-    """Torna a `old`: prima la strada di OpenClaw (update --tag, con verifica), poi npm."""
+    """Torna a `old` con `openclaw update --tag` (compatibilita' di schema, riavvio e verifica di
+    OpenClaw), solo a OpenClaw fermo. Mai `npm i -g`: salterebbe il rifiuto di uno schema o di una
+    config piu' nuovi, che le docs dicono di non aggirare (install/updating/rollback-and-recovery.md).
+    Ritorna (problemi, in sospeso): in sospeso = OpenClaw mai fermo, nessun riavvio fatto."""
     log(f"rollback a {old}")
-    if wait_idle(min(POST_IDLE_MIN, 10)):
-        log("rollback anche se OpenClaw non e' fermo: la versione nuova non ha passato i controlli")
-    rc, run_rec, err = run_update(old)
-    must = False
-    if installed_version() != old:
-        log(f"update --tag {old} non basta ({run_reason(run_rec, err)}): npm i -g openclaw@{old}")
-        rc, out, err = run(["npm", "i", "-g", f"openclaw@{old}", "--allow-scripts=openclaw"], 1200)
-        must = True  # il gateway in memoria e' ancora quello nuovo
+    busy = wait_idle(ROLLBACK_IDLE_MIN, down_ok=True)
+    if busy:
+        return [f"OpenClaw mai fermo in {ROLLBACK_IDLE_MIN:g} min ({', '.join(busy)})"], True
+    rc, run_rec, err, busy = run_update(old, down_ok=True)
     now = installed_version()
+    if busy and now != old:
+        return [f"OpenClaw si e' messo a lavorare durante la validazione ({', '.join(busy)})"], True
     if now != old:
-        return [f"rollback: installata {now}, attesa {old}"]
-    problems, notes = converge(old, min(POST_IDLE_MIN, 10), must_restart=must)
-    problems = problems or health_gate(old, rec)
+        return [f"OpenClaw non torna a {old} ({run_reason(run_rec, err)}): installata {now}"], False
+    problems, notes, deferred = converge(old, ROLLBACK_IDLE_MIN)
+    problems = problems or health_gate(old, rec, deferred)
     root = (oc_json(["update", "status", "--json"], 60) or {}).get("update", {}).get("root") or rec.get("root")
     same = {Path(f).name: sha(f) for f in glob.glob(str(Path(root or "") / "dist/mcp-http.*.mjs"))
             if Path(f).name in rec.get("dist_sha256", {})} == rec.get("dist_sha256")
     log(f"rollback: dist patchato {'identico' if same else 'diverso'} da prima dell'update")
-    return problems
+    return problems, False
+
+
+def finish_rollback(state, rec, why):
+    last = state["last"]
+    old, new = last["from"], last["to"]
+    problems, pending = rollback(old, rec)
+    last.update(why=why, after=problems,
+                result="rollback-pending" if pending else "rollback-failed" if problems else "rolled-back")
+    save_state(state)
+    if pending:
+        notify(f"OpenClaw {short(new)} non passa i controlli ({why}); rollback a {short(old)} rimandato, "
+               f"{problems[0]}: riprovo al prossimo giro o a mano con openclaw-safe-update"[:300])
+        return 2
+    if problems:
+        notify(f"aggiornamento OpenClaw fallito ({why}), rollback NON riuscito: {short(installed_version())} "
+               f"installata, {'; '.join(problems)}"[:300])
+        return 2
+    notify(f"aggiornamento OpenClaw fallito, tornato a {short(old)}: {why}"[:300])
+    return 1
 
 
 def maintain(cur, root, dry, idle):
-    """Nessuna versione nuova: patch MCP e plugin devono comunque essere a posto."""
-    todo = []
-    p = plugin_state()
-    if p and not plugin_ok(p.get("version"), cur):
-        todo.append(f"plugin whatsapp {p.get('version')} (core {cur})")
+    """Nessuna versione nuova: patch MCP e plugin fissati devono comunque essere a posto."""
+    plugins = plugin_list()
+    todo = [f"plugin {k} {plugins[k].get('version')} (core {cur})" for k in misaligned(plugins, cur)]
     rc, msg = mcp_lazy("check")
     if rc:
         todo.append(f"patch MCP: {msg}")
@@ -552,9 +651,9 @@ def maintain(cur, root, dry, idle):
         log("dry-run: non tocco niente")
         return 0
     rec = record(cur, root)
-    problems, notes = converge(cur, idle)
-    if problems and problems[0].startswith("OpenClaw mai fermo"):
-        log(problems[0] + ": riprovo la notte prossima")
+    problems, notes, deferred = converge(cur, idle)
+    if deferred:
+        log("riprovo la notte prossima")
         return 0
     problems = problems or health_gate(cur, rec)
     if problems:
@@ -596,6 +695,19 @@ def main():
         return 1
     root = (st.get("update") or {}).get("root")
     latest = (st.get("availability") or {}).get("latestVersion")
+    last = state.get("last") or {}
+
+    if last.get("result") == "rollback-pending" and cur == last.get("to"):
+        log(f"rollback a {last.get('from')} in sospeso dal giro {last.get('started')}: {last.get('why')}")
+        if a.dry_run:
+            log("dry-run: non tocco niente")
+            return 0
+        try:
+            rec = json.loads((BACKUPS / last["started"] / "record.json").read_text())
+        except (OSError, ValueError, KeyError):
+            rec = {}
+        return finish_rollback(state, rec, last.get("why"))
+
     target = a.force_version or latest
     if a.force_version and not re.fullmatch(VER_RE, target):
         log(f"--force-version {target}: non e' una versione")
@@ -605,6 +717,12 @@ def main():
             log(f"--force-version {target} e' piu' vecchia di {cur}: per tornare indietro openclaw update --tag")
             return 4
         log(f"OpenClaw {cur}: nessuna versione nuova (ultima {latest})")
+        return maintain(cur, root, dry, a.idle_wait)
+    if not a.force_version and last.get("to") == target and (
+            last.get("result") in FAILED_RESULTS or last.get("run_status") == "rolled-back"):
+        # riprovarla ogni notte vorrebbe dire un'interruzione dei canali ogni notte
+        log(f"salto {target}: il giro {last.get('started')} e' tornato indietro ({last.get('why')}); "
+            f"per riprovarla --force-version {target}")
         return maintain(cur, root, dry, a.idle_wait)
 
     why_dry = " [dry-run]" if a.dry_run else " [non armato: il primo giro vero e' quello supervisionato]" if dry else ""
@@ -620,13 +738,15 @@ def main():
         + " | plugin " + ", ".join(f"{k} {v['version']}" for k, v in sorted(rec["plugins"].items()))
         + f" | agents-doctor FAIL {len(rec['doctor'])} | problemi gia' presenti {rec['problems'] or 'nessuno'}")
     if dry:
-        wa = rec["plugins"].get(PLUGIN, {}).get("version")
+        pins = sorted(k for k, v in rec["plugins"].items() if k == PLUGIN or pinned(v.get("spec")))
         for step in (f"backup SQLite (global + agenti) e openclaw.json in {BACKUPS}/<ts>",
-                     f"openclaw update --yes --json --tag {target} (validazione, riavvio e verifica di OpenClaw)",
-                     f"plugin whatsapp {wa} -> {target} (se OpenClaw non lo allinea: plugins install --force --pin)",
+                     f"openclaw update --yes --json --tag {target} (validazione, riavvio e verifica di OpenClaw);"
+                     " se OpenClaw si mette a lavorare durante la validazione, SIGINT prima dell'attivazione",
+                     f"plugin fissati {', '.join(pins)} -> {target} (plugins install --force --pin)",
                      "patch MCP: saltata se il fix upstream e' nel codice nuovo, se no openclaw-mcp-lazy.py apply",
-                     "un kickstart -k a OpenClaw fermo, health gate (canali, WhatsApp, heartbeat, patch, agents-doctor)",
-                     f"se qualcosa fallisce: rollback a {cur} e health gate; una riga su WhatsApp ad Attilio"):
+                     "un kickstart -k solo a OpenClaw fermo (se no rimandato), health gate (canali, WhatsApp,"
+                     " heartbeat, patch, agents-doctor)",
+                     f"se qualcosa fallisce: rollback a {cur} a OpenClaw fermo e health gate; una riga su WhatsApp ad Attilio"):
             log("piano: " + step)
         return 0
 
@@ -645,11 +765,16 @@ def main():
 
     state["last"] = {"started": rec["ts"], "from": cur, "to": target}
     save_state(state)
-    rc, run_rec, err = run_update(target)
+    rc, run_rec, err, busy = run_update(target)
     now = installed_version()
+    if busy and now == cur:
+        state["last"].update(result="interrupted", why=", ".join(busy))
+        save_state(state)
+        log(f"update interrotto prima dell'attivazione: {cur} resta, riprovo la notte prossima")
+        return 0
     if rc == 0 and now == target:
-        problems, notes = converge(target, POST_IDLE_MIN)
-        problems = problems or health_gate(target, rec)
+        problems, notes, deferred = converge(target, POST_IDLE_MIN)
+        problems = problems or health_gate(target, rec, deferred)
         if not problems:
             state["last"].update(result="ok", notes=notes)
             if a.force_version and not armed:
@@ -657,16 +782,17 @@ def main():
                 log("armato: da domani il giro notturno aggiorna da solo")
             save_state(state)
             log(f"aggiornato {cur} -> {target}, tutto verde {notes or ''}".rstrip())
-            notify(f"OpenClaw aggiornato {short(cur)}→{short(target)}, tutto verde")
+            later = "; plugin e patch MCP al prossimo giro (OpenClaw mai fermo)" if deferred else ""
+            notify(f"OpenClaw aggiornato {short(cur)}→{short(target)}, tutto verde{later}")
             return 0
         why = "; ".join(problems)
     elif now == cur:
         # OpenClaw non ha attivato la versione nuova, o e' tornato indietro da solo
         why = run_reason(run_rec, err)
         log(f"update non attivato ({run_rec.get('status')}): {why}")
-        problems, _ = converge(cur, POST_IDLE_MIN)
-        problems = problems or health_gate(cur, rec)
-        state["last"].update(result="failed", why=why, after=problems)
+        problems, _, deferred = converge(cur, POST_IDLE_MIN)
+        problems = problems or health_gate(cur, rec, deferred)
+        state["last"].update(result="failed", why=why, after=problems, run_status=run_rec.get("status"))
         save_state(state)
         if problems:
             notify(f"aggiornamento OpenClaw fallito ({why}) e {short(cur)} non e' sana: {'; '.join(problems)}"[:300])
@@ -676,16 +802,7 @@ def main():
     else:
         why = run_reason(run_rec, err) if rc else f"installata {now}, attesa {target}"
     log(f"fallito dopo l'update: {why}")
-    problems = rollback(cur, rec)
-    state["last"].update(result="rolled-back" if not problems else "rollback-failed", why=why, after=problems)
-    save_state(state)
-    if problems:
-        now = installed_version()
-        notify(f"aggiornamento OpenClaw fallito ({why}), rollback NON riuscito: {short(now)} installata, "
-               f"{'; '.join(problems)}"[:300])
-        return 2
-    notify(f"aggiornamento OpenClaw fallito, tornato a {short(cur)}: {why}"[:300])
-    return 1
+    return finish_rollback(state, rec, why)
 
 
 if __name__ == "__main__":
