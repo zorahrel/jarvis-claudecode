@@ -21,7 +21,8 @@ python3 "$HOME/.claude/jarvis/router/scripts/prune_chrome_temp.py" 2>&1 | sed 's
 npm cache clean --force >/dev/null 2>&1 && log "  npm cache cleaned"
 python3 -m pip cache purge >/dev/null 2>&1 && log "  pip cache purged"
 go clean -cache >/dev/null 2>&1 && log "  go build cache cleaned"
-uv cache prune 2>&1 | tail -1 | sed 's/^/  uv: /'
+# uvx MCP servers (fli-mcp) hold the cache lock for days: don't wait 300s for nothing.
+UV_LOCK_TIMEOUT=10 uv cache prune 2>&1 | tail -1 | sed 's/^/  uv: /'
 command -v brew >/dev/null && brew cleanup --prune=30 2>&1 | tail -1 | sed 's/^/  brew: /'
 
 # 4. MCP debug logs from Claude Code (pure noise, several GB/month).
@@ -52,5 +53,32 @@ for x in os.listdir(d) if os.path.isdir(d) else []:
 print(f"removed {n} entries older than 30d, {freed/1e9:.2f} GB")
 PY
 
+# 6. OpenClaw tmp: model-catalog, update-canary, plugin-build dirs are never
+#    deleted by OpenClaw itself (24 GB on 03/10/2026). Keep 3 days.
+python3 "$HOME/.claude/jarvis/router/scripts/prune_stale.py" "$HOME/.openclaw/tmp" 3 2>&1 | sed 's/^/  openclaw-tmp: /'
+
+# 7. bun + pnpm caches. bun refuses `pm cache rm` outside a project, hence the stub dir.
+stub=$(mktemp -d) && echo '{}' > "$stub/package.json" \
+  && (cd "$stub" && "$HOME/.bun/bin/bun" pm cache rm 2>&1 | tail -1 | sed 's/^/  bun: /')
+rm -rf "$stub" "$HOME/Library/Caches/bun"
+pnpm store prune >/dev/null 2>&1 && log "  pnpm store pruned"
+
+# 8. Spotify streaming cache (8.9 GB on 03/10/2026). Only when Spotify is closed.
+if ! pgrep -xq Spotify; then
+  rm -rf "$HOME/Library/Caches/com.spotify.client/Data" && log "  spotify cache cleared"
+fi
+
+# 9. Build output left behind in projects nobody built for 14 days.
+find "$HOME/Projects" "$HOME/Sites" -maxdepth 3 -type d \( -name .next -o -name .turbo \) -mtime +14 -prune 2>/dev/null \
+  | while read -r d; do rm -rf "$d" && log "  build: $d"; done
+
 after=$(df -m / | awk 'NR==2{print $4}')
 log "done, ${after} MB free (freed $((after - before)) MB)"
+
+# 10. Alert: last time the disk went from 210 to 75 GB free in one week
+#     unnoticed. Below 60 GB, say so where Attilio sees it.
+if [ "$after" -lt 61440 ]; then
+  msg="Disco: solo $((after / 1024)) GB liberi. Guarda ~/Library/Logs/jarvis-disk-hygiene.log"
+  osascript -e "display notification \"$msg\" with title \"Jarvis disk-hygiene\" sound name \"Basso\"" 2>/dev/null
+  log "  ALERT: $msg"
+fi
