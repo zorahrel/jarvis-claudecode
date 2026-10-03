@@ -73,6 +73,10 @@ fi
 find "$HOME/Projects" "$HOME/Sites" -maxdepth 3 -type d \( -name .next -o -name .turbo \) -mtime +14 -prune 2>/dev/null \
   | while read -r d; do rm -rf "$d" && log "  build: $d"; done
 
+# 9b. Claude Code session temp in /private/tmp/claude-501: dead sessions untouched
+#     for 24h (7 GB on 03/10/2026). Live sessions are never touched.
+python3 "$HOME/.claude/jarvis/router/scripts/prune_claude_tmp.py" 24 2>&1 | sed 's/^/  claude-tmp: /'
+
 after=$(df -m / | awk 'NR==2{print $4}')
 log "done, ${after} MB free (freed $((after - before)) MB)"
 
