@@ -61,7 +61,8 @@ python3 "$HOME/.claude/jarvis/router/scripts/prune_stale.py" "$HOME/.openclaw/tm
 stub=$(mktemp -d) && echo '{}' > "$stub/package.json" \
   && (cd "$stub" && "$HOME/.bun/bin/bun" pm cache rm 2>&1 | tail -1 | sed 's/^/  bun: /')
 rm -rf "$stub" "$HOME/Library/Caches/bun"
-pnpm store prune >/dev/null 2>&1 && log "  pnpm store pruned"
+# launchd starts in /, where pnpm exits 226 without a word: run it from $HOME.
+(cd "$HOME" && pnpm store prune 2>&1 | tail -1 | sed 's/^/  pnpm: /')
 
 # 8. Spotify streaming cache (8.9 GB on 03/10/2026). Only when Spotify is closed.
 if ! pgrep -xq Spotify; then
