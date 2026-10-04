@@ -40,7 +40,8 @@ if [[ $quota == esaurita* ]]; then
   log "salto claude: $reason"
 else
   if [[ -z ${BRIEF_FORCE_FALLBACK:-} ]]; then
-    limit "$CLAUDE_MAX" claude -p --model opus --effort medium --permission-mode bypassPermissions \
+    # sonnet e non opus dal 05/10: il brief è riassunto e triage, Opus costava ~5x per lo stesso testo
+    limit "$CLAUDE_MAX" claude -p --model sonnet --effort medium --permission-mode bypassPermissions \
       --append-system-prompt "$SYSTEM" < "$work/prompt" > "$work/out" 2>> "$ERRLOG"
     rc=$?
     if [[ $rc -eq 0 && -s $work/out ]]; then
