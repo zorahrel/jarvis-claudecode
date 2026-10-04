@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Una riga in italiano semplice sullo stato di OpenClaw, per il brief mattutino.
+
+Versione installata + cosa ha fatto stanotte openclaw-safe-update (launchd 04:20), letto dal suo
+log di oggi. Non aggiorna niente e non lancia `openclaw update`: legge e basta. Sta in uno script e
+non nel prompt del brief perche' un modello che interpreta il log a mano sbaglia in silenzio.
+"""
+import datetime
+import json
+import re
+import subprocess
+from pathlib import Path
+
+JARVIS = Path.home() / ".claude/jarvis"
+LOG = JARVIS / "logs/openclaw-safe-update.log"
+ERR = JARVIS / "logs/openclaw-safe-update.err.log"
+STATE = JARVIS / "state/openclaw-safe-update.json"
+
+
+def installed():
+    try:
+        out = subprocess.run(["openclaw", "--version"], capture_output=True, text=True, timeout=30).stdout
+        m = re.search(r"\d{4}\.\d+\.\d+", out)
+        return m.group(0) if m else None
+    except Exception:
+        return None
+
+
+def tonight():
+    today = datetime.date.today().isoformat()
+    try:
+        lines = LOG.read_text().splitlines()
+    except OSError:
+        return []
+    # «piano:» descrive cosa farebbe (anche «rollback a ...»), non cosa e' successo
+    return [l[20:] for l in lines if l.startswith(today) and not l[20:].startswith(("piano:", "fotografia:"))]
+
+
+def main():
+    ver = installed()
+    head = f"OpenClaw {ver}" if ver else "OpenClaw: versione non leggibile (openclaw --version non risponde)"
+    lines = tonight()
+    text = "\n".join(lines)
+
+    def find(pat):
+        for l in lines:
+            m = re.search(pat, l)
+            if m:
+                return m
+        return None
+
+    if not lines:
+        err = ""
+        try:
+            err = ERR.read_text().strip().splitlines()[-1][:120]
+        except (OSError, IndexError):
+            pass
+        why = f" (ultimo errore: {err})" if err else ""
+        print(f"{head}: stanotte l'aggiornamento automatico non ha girato{why}.")
+        return
+
+    if m := find(r"aggiornato (\S+) -> (\S+)"):
+        print(f"{head}: aggiornato stanotte da {m.group(1)} a {m.group(2)}, tutto a posto.")
+        return
+    if m := find(r"rollback a (\S+)"):
+        why = find(r"(?:fallito dopo l'update|update non attivato \([^)]*\)): (.*)")
+        detail = f" ({why.group(1)[:100]})" if why else ""
+        ok = "riuscito" if "rollback: dist patchato" in text else "da controllare"
+        print(f"{head}: stanotte l'aggiornamento non è andato{detail}, è tornato alla {m.group(1)} (rollback {ok}).")
+        return
+    if find(r"update interrotto prima dell'attivazione"):
+        print(f"{head}: stanotte l'aggiornamento si è fermato da solo perché OpenClaw si è messo a lavorare, riprova stanotte. Niente rollback.")
+        return
+    if m := find(r"nessuna versione nuova"):
+        print(f"{head}: è l'ultima, stanotte niente da aggiornare.")
+        return
+    if m := find(r"salto (\S+): "):
+        print(f"{head}: la {m.group(1)} non si riprova da sola perché un tentativo precedente era tornato indietro.")
+        return
+    if m := find(r"OpenClaw \S+ -> (\S+)(.*)"):
+        new, rest = m.group(1), m.group(2)
+        if "non armato" in rest:
+            last = {}
+            try:
+                last = json.loads(STATE.read_text()).get("last") or {}
+            except (OSError, ValueError):
+                pass
+            prev = ""
+            if last.get("result") == "interrupted":
+                d = last.get("started", "")[:8]
+                when = f"{d[6:8]}/{d[4:6]}" if len(d) == 8 else "l'ultima volta"
+                prev = f" (la prova fatta il {when} si era fermata perché OpenClaw stava lavorando)"
+            print(f"{head}, è uscita la {new}: stanotte non aggiornato, l'aggiornamento automatico resta "
+                  f"spento finché non ne facciamo uno insieme{prev}. Niente rollback.")
+            return
+        if find(r"OpenClaw non e' fermo"):
+            print(f"{head}, è uscita la {new}: stanotte non aggiornato perché OpenClaw era al lavoro, riprova stanotte.")
+            return
+        print(f"{head}, è uscita la {new}: il giro di stanotte non ha concluso, guarda {LOG}.")
+        return
+    if find(r"un altro giro e' in corso"):
+        print(f"{head}: stanotte saltato, c'era già un altro aggiornamento in corso.")
+        return
+    print(f"{head}: stanotte il giro ha scritto solo «{lines[-1][:100]}».")
+
+
+if __name__ == "__main__":
+    main()

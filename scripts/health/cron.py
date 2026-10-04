@@ -11,6 +11,7 @@ non consegna (es. «No active WhatsApp Web listener», settembre 2026) era
 altrettanto invisibile: l'errore di consegna ora e' un WARN.
 """
 import json
+import subprocess
 import sys
 import time
 
@@ -39,6 +40,21 @@ def period_days(schedule: dict) -> float | None:
     return None
 
 
+def last_run_error(job_id: str | None) -> str:
+    """Errore dell'ultimo run fallito, dallo storico (`openclaw cron runs`)."""
+    if not job_id:
+        return "nessun dettaglio"
+    try:
+        out = subprocess.run(["openclaw", "cron", "runs", job_id, "--json", "--limit", "10"],
+                             capture_output=True, text=True, timeout=30).stdout
+        for run in json.loads(out[out.find("{"):]).get("entries", []):
+            if run.get("status") == "error" and run.get("error"):
+                return run["error"]
+    except Exception:
+        pass
+    return "nessun dettaglio nello storico dei run"
+
+
 def main() -> int:
     try:
         jobs = json.load(sys.stdin)["jobs"]
@@ -57,8 +73,14 @@ def main() -> int:
 
         errors = state.get("consecutiveErrors") or 0
         if errors > 2:
-            detail = (state.get("lastError") or job.get("lastError") or "nessun dettaglio")[:160]
-            print(f"FAIL|{name}|{errors} errori consecutivi: {detail}")
+            # A run partito OpenClaw azzera lastError ma tiene il conteggio: il brief
+            # che controlla se stesso leggeva «nessun dettaglio» (04/10). Il motivo
+            # vero sta nello storico dei run.
+            detail = state.get("lastError") or job.get("lastError") or last_run_error(job.get("id"))
+            if state.get("runningAtMs"):
+                print(f"WARN|{name}|in corso adesso; i {errors} giri prima sono falliti: {detail[:160]}")
+            else:
+                print(f"FAIL|{name}|{errors} errori consecutivi: {detail[:160]}")
             continue
 
         schedule = job.get("schedule") or {}
