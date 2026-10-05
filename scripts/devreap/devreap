@@ -63,7 +63,10 @@ DEV_PATTERNS = [
     r"node_modules/\.bin/vite\b",
     r"\bvite\b.*\b(dev|preview)\b",
 ]
-ALLOWED_ROOTS = [str(HOME / "Projects")]   # fuori di qui non si opera
+# Fuori di qui non si opera. /private/tmp perche' i cloni usa e getta degli
+# agenti (quadra, 120 cartelle `q-*` il 05/10) ci lanciano i loro `next dev`:
+# uno orfano dalle 03:14 e' arrivato a 51 GB e ha portato lo swap al 98%.
+ALLOWED_ROOTS = [str(HOME / "Projects"), "/private/tmp/", "/tmp/"]
 
 # Recinto della suite. Quando la suite abbassa le soglie lo fa per TUTTA la
 # macchina, e il 21/09 questo ha ucciso un `next dev` vero su :3200 mentre
@@ -130,14 +133,28 @@ def parse_etime(e):
     return days * 86400 + bits[0] * 3600 + bits[1] * 60 + bits[2]
 
 
-def is_dev_server(cmd):
-    if ONLY_PATH and ONLY_PATH not in cmd:
-        return False                     # recinto della suite: vedi ONLY_PATH
+def cwd_of(pid):
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+    return next((l[1:] for l in out.splitlines() if l.startswith("n")), "")
+
+
+def is_dev_server(cmd, pid=None):
     if any(p in cmd for p in PROTECTED):
         return False
-    if not any(root in cmd for root in ALLOWED_ROOTS):
+    if not any(re.search(p, cmd) for p in DEV_PATTERNS):
         return False
-    return any(re.search(p, cmd) for p in DEV_PATTERNS)
+    # Il path puo' non stare nel comando: `node node_modules/.bin/../next dev`
+    # lanciato dalla cartella del progetto non ne nomina nessuno, e il 05/10
+    # cosi' e' sfuggito il next dev da 51 GB. Allora conta la cwd. La si legge
+    # solo qui, dopo i pattern, per non chiamare lsof su ogni processo.
+    where = cmd if pid is None else cmd + "\n" + cwd_of(pid)
+    if ONLY_PATH and ONLY_PATH not in where:
+        return False                     # recinto della suite: vedi ONLY_PATH
+    return any(root in where for root in ALLOWED_ROOTS)
 
 
 def footprint_mb(pid):
@@ -225,7 +242,7 @@ def survey(procs):
     """Un record per albero dev: porte, connessioni, footprint, eta'."""
     roots = {}
     for pid, info in procs.items():
-        if is_dev_server(info["cmd"]):
+        if is_dev_server(info["cmd"], pid):
             roots.setdefault(group_root(pid, procs), None)
     # Se una radice e' discendente di un'altra, tieni solo la piu' alta.
     tops = []

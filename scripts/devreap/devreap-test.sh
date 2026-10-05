@@ -19,6 +19,9 @@ cleanup() {
   # I PID noti non bastano: devreap puo' averne gia' ucciso il padre lasciando
   # figli, e un test che lascia in giro 700 MB di finti e' peggio del bug.
   pkill -9 -f "Projects/.devreap-test" 2>/dev/null
+  # Il finto della prova 9 gira con path relativo e il pkill sopra non lo vede:
+  # lo si prende per porta, che e' sua per costruzione.
+  lsof -nP -iTCP:39101-39104 -sTCP:LISTEN -t 2>/dev/null | xargs kill -9 2>/dev/null
   sleep 1
   rm -rf "$HOME/Projects/.devreap-test"
   [ -f "$STATE_BAK" ] && mv "$STATE_BAK" "$STATE" || rm -f "$STATE"
@@ -131,6 +134,19 @@ check "col recinto attivo vede solo i finti" "$REAL" "0"
 OUT_NOFENCE=$(DEVREAP_ONLY_PATH= "$REAP" --list | grep -c "porte=" || true)
 [ "$OUT_NOFENCE" -gt 0 ] && ok "senza recinto vede la macchina vera (il recinto conta)" \
                          || bad "senza recinto non vede nulla: il test 8 non prova niente"
+
+echo
+echo "== 9. il caso del 05/10: lanciato con path RELATIVO, lo si riconosce dalla cwd"
+# Un `next dev` di un clone di quadra in /private/tmp girava come
+# `node node_modules/.bin/../next/dist/bin/next dev`: nessun path assoluto nel
+# comando, quindi nessuna radice ammessa da trovare, e 51 GB di footprint per
+# sette ore senza che devreap lo censisse. La radice va cercata anche nella cwd.
+# Il gruppo `{ … & }` e non `( … & )`: un sottoguscio in background terrebbe
+# aperta la pipe di `$( )` finche' vive il finto, e la suite resterebbe appesa.
+REL=$(cd "$SANDBOX/../.." && { python3 node_modules/.bin/next 39104 50 >/dev/null 2>&1 & echo $!; }); PIDS+=("$REL")
+sleep 3
+"$REAP" --list | grep -q "39104" && ok "vede il dev server lanciato con path relativo" \
+                                  || bad "non vede il dev server lanciato con path relativo"
 
 echo
 echo "passati $PASS, falliti $FAIL"
