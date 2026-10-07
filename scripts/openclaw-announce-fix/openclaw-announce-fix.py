@@ -7,11 +7,14 @@ unavailable]`. Due difetti di OpenClaw, ancora presenti nel 2026.9.8:
 
   1. runner claude-cli: salva la risposta senza l'id del run (`__openclaw.runId`), quindi
      l'annuncio non la ritrova e ripiega sul testo del figlio col prefisso. Fix: passare il runId,
-     come fanno gli altri percorsi che scrivono nel transcript.
+     come fanno gli altri percorsi che scrivono nel transcript. E' il fix ufficiale
+     (openclaw/openclaw#162843, su main dal 01/10, non nel 2026.9.8): quando arriva in una
+     release questo punto risulta gia' fatto e non si tocca.
   2. consegna: in chat privata la fine di un sottoagente vuole lo strumento `message`. Jarvis su
      claude-cli risponde in testo, OpenClaw scarta quella risposta e manda il testo grezzo del
      figlio; se Attilio sta scrivendo (turno "steered") non manda proprio niente. Fix: in privato
      come nei canali Discord, dove la risposta finale di Jarvis si consegna da sola.
+     Upstream: openclaw/openclaw#90840, aperta.
 
   openclaw-announce-fix.py check    exit 0 = patch attiva su disco E nel gateway in esecuzione
   openclaw-announce-fix.py apply    idempotente; poi: launchctl kickstart -k gui/$UID/ai.openclaw.gateway
@@ -33,6 +36,7 @@ RUN_ID_ORIG = ("\t\tconst idempotencyKey = `cli-assistant:${runParams.runId}`;\n
                "\t\tconst result = await appendExactAssistantMessageToSessionTranscript({\n"
                "\t\t\tsessionKey: runParams.sessionKey,\n")
 RUN_ID_NEW = RUN_ID_ORIG + f"\t\t\trunId: runParams.runId, // {MARK}: senza, l'annuncio non trova la risposta\n"
+RUN_ID_UPSTREAM = "\t\t\tidempotencyKey,\n\t\t\trunId: runParams.runId,\n"  # la riga di openclaw#162843
 DM_ORIG = ("\t\tconst subagentDirectMessageCompletionRequiresMessageTool = params.expectsCompletionMessage"
            " && isSubagentCompletion && deliveryTarget.deliver"
            " && isDirectMessageDeliveryTarget(deliveryTarget, canonicalRequesterSessionKey);\n")
@@ -89,6 +93,7 @@ def main():
     todo = edits()
     texts = {path: open(path).read() for path, _, _ in todo}
     done = [new in texts[path] for path, _, new in todo]
+    done[0] = done[0] or RUN_ID_UPSTREAM in texts[todo[0][0]]
     if cmd == "check":
         if all(done):
             if gateway_started_after([p for p, _, _ in todo]):
