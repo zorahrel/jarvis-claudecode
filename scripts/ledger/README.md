@@ -4,8 +4,13 @@ Una riga per sessione di Claude Code, Codex, Muse e jcode (`scan`), lo scheletro
 senza output dei tool (`skeleton <id>`), il contesto compatto per riprenderla su un altro harness
 (`handoff <id>`), e il giro automatico: ogni sessione di lavoro morta su quota o errore API diventa
 una card «Ripresa» sulla board Topics del suo repo (`sweep`), o su `inbox` se nata in ~ senza repo.
+Lo stesso giro apre una card «Senza risposta» (e una notifica sul Mac) quando un messaggio di Attilio a Jarvis
+in chat diretta resta senza risposta oltre 20 minuti: `unanswered [--hours N] [--at 'YYYY-MM-DD HH:MM']`, esce 1 se ce n'e'.
 
 - Barra: `python3 ledger.py check --days 7` esce 1 se una sessione morta su limite/errore non ha la sua card viva.
+- Barra del rilevatore: `python3 test_unanswered.py` (fixture ricalcata su OpenClaw). Rigiocato sui 7 giorni al 07/10
+  avrebbe aperto 2 card, entrambe vere: «ci sei?» del 05/10 dopo 47 min invece di 10 h 57, «Cerca bene» del 06/10.
+- Messaggio di Attilio = owner con `senderId`: le prove da jcode entrano come owner ma senza, e non contano.
 - Launchd: `com.jarvis.ledger-sweep` ogni 30 min (`com.jarvis.ledger-sweep.plist.example`), log in `logs/ledger-sweep.*.log`.
 - Stato (`carded.json`) e output in `state/ledger/` (gitignorata: dentro ci sono prompt e nomi di progetto).
 - Le card nascono in backlog: senza status esplicito Topics le mette in todo e l'auto-dispatch lancia un agente.

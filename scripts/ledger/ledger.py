@@ -423,6 +423,27 @@ def sweep(days, dry):
         state[key] = {'card': t.get('id'), 'board': b['projectId'], 'at': datetime.now(ROME).isoformat()}
         made += 1
         print(f'card {str(t.get("id"))[:8]} su {b["projectId"]}: {title}')
+    # messaggi di Attilio rimasti senza risposta consegnata: card + notifica sul Mac (canale indipendente da Jarvis)
+    if os.path.exists(OPENCLAW_DB):
+        oc = (next((b for b in boards if b['path'].rstrip('/') == OPENCLAW_DIR), None)
+              or next((b for b in boards if b['path'].rstrip('/') == INBOX), None))
+        for u in unanswered(hours=days * 24):
+            key = f"openclaw:{u['session']}:{u['seq']}"
+            if key in state: continue
+            when = datetime.fromtimestamp(u['at'] / 1000, ROME).strftime('%d/%m %H:%M')
+            title = 'Senza risposta: ' + clip(u['text'], 70)
+            desc = (f"Jarvis non ha risposto a {u['count']} messaggi di Attilio dal {when} "
+                    f"(sessione OpenClaw {u['session']}). Primo: «{clip(u['text'], 300)}». Ultimo: «{clip(u['last'], 300)}».\n\n"
+                    "Come si verifica: Attilio ha la risposta (o il lavoro fatto) e questa card va in done con la prova.")
+            if dry or not oc:
+                print(f'[{"dry" if dry else "nessuna board"}] {title}'); continue
+            # prima l'avviso: e' il pezzo che conta, e deve arrivare anche se Topics e' giu'
+            notify_mac('Jarvis non ha risposto', f"{when}: {clip(u['text'], 120)}")
+            t = topics('POST', f"/api/boards/{oc['projectId']}/tasks",
+                       {'text': title, 'description': desc, 'priority': 4, 'status': 'backlog'})
+            state[key] = {'card': t.get('id'), 'board': oc['projectId'], 'at': datetime.now(ROME).isoformat()}
+            made += 1
+            print(f'card {str(t.get("id"))[:8]} su {oc["projectId"]}: {title}')
     if not dry:
         os.makedirs(STATE, exist_ok=True)
         tmp = os.path.join(STATE, 'carded.json.tmp')
@@ -455,6 +476,58 @@ def check(days):
     return 1 if bad else 0
 
 
+OPENCLAW_DB = os.environ.get('OPENCLAW_DB', HOME + '/.openclaw/agents/main/agent/openclaw-agent.sqlite')
+OPENCLAW_DIR = HOME + '/.openclaw'
+
+
+SILENT_RE = re.compile(r'^\s*(NO_REPLY|HEARTBEAT_OK)\s*$')
+
+
+def oc_text(content):
+    if isinstance(content, str): return content
+    if isinstance(content, list):
+        return ' '.join(x.get('text', '') for x in content if isinstance(x, dict) and x.get('type') == 'text')
+    return ''
+
+
+def unanswered(hours=24, grace_min=20, db=None, now=None):
+    """Messaggi di Attilio in chat diretta con Jarvis (WhatsApp, Telegram) rimasti senza risposta per piu' di grace_min.
+    Il 05/10 Jarvis ha risposto NO_REPLY a «ci sei?» per 10 h 57 (modello giu', nessun fallback).
+    Risposta = testo assistant che non e' un token muto; le consegne col tool message (anche dei cron) hanno
+    sempre il testo (1.042 su 1.042 al 07/10), quindi un cron che scrive nella chat chiude l'attesa: limite accettato.
+    Le prove da jcode entrano come owner ma senza senderId: non sono messaggi di Attilio.
+    now (ms) rigioca la storia: --at nella CLI."""
+    import sqlite3, time
+    con = sqlite3.connect(f'file:{db or OPENCLAW_DB}?mode=ro', uri=True, timeout=10)
+    now = now or time.time() * 1000
+    since = now - hours * 3600 * 1000
+    direct = {r[0] for r in con.execute("select session_id from session_windows where chat_type = 'direct'")}
+    pending, out = {}, []
+    for sid, seq, at, ej in con.execute(
+            'select session_id, seq, created_at, event_json from transcript_events '
+            'where created_at > ? and created_at <= ? order by session_id, seq', (since, now)):
+        if sid not in direct: continue
+        try: m = (json.loads(ej).get('message') or {})
+        except Exception: continue
+        oc = m.get('__openclaw') or {}
+        if m.get('role') == 'user' and oc.get('senderIsOwner') and oc.get('senderId'):
+            pending.setdefault(sid, []).append((seq, at, oc_text(m.get('content'))))
+        elif m.get('role') == 'assistant':
+            t = oc_text(m.get('content'))
+            if t.strip() and not SILENT_RE.match(t) and not m.get('errorMessage'):
+                pending.pop(sid, None)
+    for sid, msgs in pending.items():
+        old = [x for x in msgs if now - x[1] > grace_min * 60 * 1000]
+        if old: out.append({'session': sid, 'seq': old[0][0], 'at': old[0][1], 'count': len(old), 'text': old[0][2], 'last': old[-1][2]})
+    return out
+
+
+def notify_mac(title, text):
+    import subprocess
+    t = text.replace('"', "'")[:180]
+    subprocess.run(['osascript', '-e', f'display notification "{t}" with title "{title}"'], capture_output=True)
+
+
 def handoff(sid):
     """Contesto compatto (<~2k token) per riprendere su un altro harness quello che una sessione stava facendo."""
     p = find_session(sid)
@@ -479,6 +552,16 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] in ('skeleton', 'handoff'):
         if sys.argv[1] == 'handoff': sys.exit(handoff(sys.argv[2]))
         sys.exit(skeleton(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 400))
+    if len(sys.argv) > 1 and sys.argv[1] == 'unanswered':
+        ap = argparse.ArgumentParser()
+        ap.add_argument('cmd'); ap.add_argument('--hours', type=float, default=24)
+        ap.add_argument('--at', help="rigioca la storia: 'YYYY-MM-DD HH:MM', ora di Roma")
+        a = ap.parse_args()
+        at = datetime.fromisoformat(a.at).replace(tzinfo=ROME).timestamp() * 1000 if a.at else None
+        out = unanswered(hours=a.hours, now=at)
+        for u in out:
+            print(datetime.fromtimestamp(u['at'] / 1000, ROME).strftime('%d/%m %H:%M'), f"x{u['count']}", u['session'], clip(u['text'], 100))
+        sys.exit(1 if out else 0)
     if len(sys.argv) > 1 and sys.argv[1] in ('sweep', 'check'):
         ap = argparse.ArgumentParser()
         ap.add_argument('cmd'); ap.add_argument('--days', type=float, default=3); ap.add_argument('--dry-run', action='store_true')
