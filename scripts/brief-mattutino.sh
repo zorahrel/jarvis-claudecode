@@ -5,11 +5,14 @@
 # una riga di output: entrambi gli account Claude avevano la quota finita fino alle 13:00 e il proxy
 # account-switcher (127.0.0.1:3336, usageCapHoldMin 1440) trattiene le richieste invece di
 # rifiutarle, quindi `claude -p` riprovava in silenzio finche' OpenClaw lo uccideva.
-# Qui: se la quota e' finita si salta Claude, se Claude non chiude entro CLAUDE_MAX si passa a
-# codex, e se fallisce anche quello esce comunque un messaggio che dice il perche'.
+# Qui (06/10: default muse, tutto OpenClaw su muse per scelta di Attilio): prima muse,
+# se non chiude entro MUSE_MAX si passa a Claude (saltato se la quota e' finita, tornera'
+# buono per i sottoagenti quando c'e' usage), poi a codex, e se fallisce tutto esce
+# comunque un messaggio che dice il perche'.
 set -u
 export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+MUSE_MAX=${BRIEF_MUSE_MAX:-600}
 CLAUDE_MAX=${BRIEF_CLAUDE_MAX:-600}   # un giro normale dura 60-120 s
 CODEX_MAX=${BRIEF_CODEX_MAX:-480}
 BRIEF_FILE=${BRIEF_FILE:-$HOME/.openclaw/privato/brief-mattutino.md}  # override solo per le prove
@@ -34,11 +37,24 @@ try:
 except Exception:
     print("ignota")' 2>/dev/null)
 
-if [[ $quota == esaurita* ]]; then
+# muse non ha --append-system-prompt: il SYSTEM va in testa al prompt
+{ echo "$SYSTEM"; echo; cat "$work/prompt"; } > "$work/prompt-muse"
+# --model esplicito: il default di Muse e' contributor, che addestra sui prompt; qui passano dati Armonia (NDA)
+limit "$MUSE_MAX" muse exec --model muse-spark-1.3 --workspace "$PWD" --reasoning-effort medium --disable-sandbox \
+  --prompt-file "$work/prompt-muse" > "$work/out" 2>> "$ERRLOG"
+rc=$?
+if [[ $rc -eq 0 && -s $work/out ]]; then
+  used=muse
+else
+  reason=$([[ $rc -eq 142 ]] && echo "Muse non ha risposto entro $((MUSE_MAX / 60)) minuti" || echo "Muse è uscito con errore $rc")
+  log "muse fallito: $reason"
+fi
+
+if [[ -z ${used:-} && $quota == esaurita* ]]; then
   reset=${quota#esaurita }
   reason="quota Claude finita su entrambi gli account$([[ $reset != unknown ]] && echo ", torna alle $reset")"
   log "salto claude: $reason"
-else
+elif [[ -z ${used:-} ]]; then
   if [[ -z ${BRIEF_FORCE_FALLBACK:-} ]]; then
     # sonnet e non opus dal 05/10: il brief è riassunto e triage, Opus costava ~5x per lo stesso testo
     limit "$CLAUDE_MAX" claude -p --model sonnet --effort medium --permission-mode bypassPermissions \
@@ -71,12 +87,13 @@ if [[ -z ${used:-} ]]; then
 fi
 
 if [[ -z ${used:-} ]]; then
-  msg="⚠️ Brief di stamattina non generato: $reason; anche il piano B (ChatGPT/codex) non ha risposto. Riprovo domani alle 7:30."
+  msg="⚠️ Brief di stamattina non generato: $reason; neanche i piani B (Claude/codex) hanno risposto. Riprovo domani alle 7:30."
   echo "$msg"
   printf '%s\n' "$msg" > "$BRIEF_FILE"
   exit 0
 fi
 
+[[ $used == claude ]] && printf '_(brief fatto con Claude: %s)_\n\n' "$reason"
 [[ $used == codex ]] && printf '_(brief fatto con ChatGPT: %s)_\n\n' "$reason"
 cat "$work/out"
 # Il prompt chiede al modello di scrivere il file per «vai archivio»; se non l'ha fatto, almeno il
