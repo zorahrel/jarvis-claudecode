@@ -1,6 +1,6 @@
 # Jarvis Router
 
-Multi-channel AI router: Telegram, WhatsApp, Discord → Claude Code CLI.
+Router Jarvis: solo dashboard (parcheggio MCP, sessioni). Canali e cron stanno in OpenClaw dal 29/09 (TOOLS.md, «Jarvis infra»).
 Dashboard: http://localhost:3340 | Config: `router/config.yaml`
 
 ## Ports
