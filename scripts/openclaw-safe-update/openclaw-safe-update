@@ -32,8 +32,9 @@ Un giro (launchd com.jarvis.openclaw-safe-update, 04:20):
      riprova la notte dopo. Dalla fase `activating` in poi non interrompe piu'. Dopo il SIGINT:
      termina i figli dell'update rimasti vivi, chiude nello storico un run rimasto `running`
      (`openclaw update repair`, mai con riavvio) e cancella gli stage che l'update ha lasciato.
-  5-7. plugin fissati (whatsapp, tokenjuice: OpenClaw tiene i pin esatti) alla versione del core e
-     patch MCP, poi un solo kickstart -k, solo a OpenClaw fermo. Se non si ferma in 20 min: niente
+  5-7. plugin fissati (whatsapp, tokenjuice: OpenClaw tiene i pin esatti) alla versione del core,
+     patch MCP e patch annunci (openclaw-announce-fix: se non entra lo annota e basta, la versione
+     vecchia ha lo stesso difetto), poi un solo kickstart -k, solo a OpenClaw fermo. Se non si ferma in 20 min: niente
      riavvio, la versione nuova resta (gia' verificata da OpenClaw) e plugin e patch li sistema il
      giro dopo.
   8. health gate: gateway sulla versione giusta, canali su, WhatsApp healthy, un heartbeat vero
@@ -84,6 +85,11 @@ OC_HOME = HOME / ".openclaw"
 CONFIG = Path(os.environ.get("OPENCLAW_CONFIG_PATH") or OC_HOME / "openclaw.json")
 MCP_LAZY = os.environ.get("OSU_MCP_LAZY") or str(
     Path(__file__).resolve().parent.parent / "openclaw-mcp-lazy/openclaw-mcp-lazy.py")
+# Seconda patch su dist/: fine dei sottoagenti in chat privata. Se non entra, l'update resta:
+# la versione vecchia ha lo stesso difetto, quindi tornare indietro non lo ripara.
+ANNOUNCE_FIX = os.environ.get("OSU_ANNOUNCE_FIX") or str(
+    Path(__file__).resolve().parent.parent / "openclaw-announce-fix/openclaw-announce-fix.py")
+ANNOUNCE_DOCTOR = "openclaw-announce-fix"  # la riga di agents-doctor che la controlla
 
 LABEL = "ai.openclaw.gateway"
 BRIEF_CRON = "c34dcc15-c2c1-4c5c-8ffa-51b9054827f1"  # brief-mattutino: il suo delivery e' Attilio
@@ -249,6 +255,11 @@ def misaligned(plugins, core):
 
 def mcp_lazy(cmd):
     rc, out, err = run([MCP_LAZY, cmd], 120)
+    return rc, tail(out or err)
+
+
+def announce_fix(cmd):
+    rc, out, err = run([ANNOUNCE_FIX, cmd], 120)
     return rc, tail(out or err)
 
 
@@ -456,7 +467,8 @@ def converge(core, idle_minutes):
             notes.append("fix MCP upstream: tools.toolSearch acceso" if rc == 0 else f"tools.toolSearch: {tail(err)}")
         else:
             patch = "apply"
-    if not (installs or patch):
+    announce = announce_fix("check")[0] != 0
+    if not (installs or patch or announce):
         return [], notes, False
     busy = wait_idle(idle_minutes, down_ok=True)
     if busy:
@@ -475,6 +487,9 @@ def converge(core, idle_minutes):
         rc, msg = mcp_lazy("apply")
         if rc:
             problems.append(f"patch MCP: {msg}")
+    if announce:
+        rc, msg = announce_fix("apply")
+        notes.append(f"patch annunci non applicata: {msg}" if rc else "patch annunci applicata")
     err = kickstart()
     if err:
         problems.append(err)
@@ -534,6 +549,7 @@ def health_gate(expected, rec, deferred=False):
     new = sorted(set(doctor_fails()) - set(rec.get("doctor") or []))
     if deferred:
         new = [x for x in new if MCP_DOCTOR not in x]
+    new = [x for x in new if ANNOUNCE_DOCTOR not in x]  # mai un rollback per lei: vedi ANNOUNCE_FIX
     if new:
         problems.append("agents-doctor: " + "; ".join(new)[:240])
     return problems
@@ -901,6 +917,9 @@ def maintain(cur, root, dry, idle):
     rc, msg = mcp_lazy("check")
     if rc:
         todo.append(f"patch MCP: {msg}")
+    rc, msg = announce_fix("check")
+    if rc:
+        todo.append(f"patch annunci: {msg}")
     if not todo:
         return 0
     log("da sistemare: " + "; ".join(todo))
@@ -912,7 +931,7 @@ def maintain(cur, root, dry, idle):
     if deferred:
         log("riprovo la notte prossima")
         return 0
-    problems = problems or health_gate(cur, rec)
+    problems = (problems or health_gate(cur, rec)) + [n for n in notes if n.startswith("patch annunci non")]
     if problems:
         notify(f"OpenClaw {short(cur)}: non riesco a sistemare {'; '.join(todo)}: {'; '.join(problems)}"[:300])
         return 1
@@ -1011,6 +1030,7 @@ def main():
                      " se OpenClaw si mette a lavorare durante la validazione, SIGINT prima dell'attivazione",
                      f"plugin fissati {', '.join(pins)} -> {target} (plugins install --force --pin)",
                      "patch MCP: saltata se il fix upstream e' nel codice nuovo, se no openclaw-mcp-lazy.py apply",
+                     "patch annunci: openclaw-announce-fix.py apply (se non entra lo annota, niente rollback)",
                      "un kickstart -k solo a OpenClaw fermo (se no rimandato), health gate (canali, WhatsApp,"
                      " heartbeat, patch, agents-doctor)",
                      f"se qualcosa fallisce: rollback a {cur} a OpenClaw fermo e health gate; una riga su WhatsApp ad Attilio"):
@@ -1050,7 +1070,8 @@ def main():
             save_state(state)
             log(f"aggiornato {cur} -> {target}, tutto verde {notes or ''}".rstrip())
             later = "; plugin e patch MCP al prossimo giro (OpenClaw mai fermo)" if deferred else ""
-            notify(f"OpenClaw aggiornato {short(cur)}→{short(target)}, tutto verde{later}")
+            later += "".join(f"; {n}" for n in notes if n.startswith("patch annunci non"))
+            notify(f"OpenClaw aggiornato {short(cur)}→{short(target)}, tutto verde{later}"[:300])
             return 0
         why = "; ".join(problems)
     elif now == cur:

@@ -46,6 +46,7 @@ if name == "launchctl":
     elif args[0] == "kickstart":
         st["pid"] += 1
         st["patch_live"] = st["patched"]
+        st["ann_live"] = st["ann_patched"]
         save()
     sys.exit(0)
 
@@ -59,11 +60,23 @@ if name == "mcp-lazy":
     if args[0] == "apply":
         st["patched"] = True; save(); print("patch applicata"); sys.exit(0)
 
+if name == "announce-fix":
+    if args[0] == "check":
+        ok = st["ann_patched"] and st["ann_live"]
+        print("ok   patch attiva" if ok else "FAIL patch openclaw-announce-fix assente")
+        sys.exit(0 if ok else 1)
+    if args[0] == "apply":
+        if st.get("ann_fail"):
+            print("ERRORE: forma cambiata", file=sys.stderr); sys.exit(1)
+        st["ann_patched"] = True; save(); print("patch applicata"); sys.exit(0)
+
 if name == "agents-doctor":
     print("ok   qualcosa")
     fails = list(st.get("doctor_fails", []))
     if not (st["patched"] and st["patch_live"]):
         fails.append("OpenClaw: tool MCP a richiesta (openclaw-mcp-lazy.py check)")
+    if not (st["ann_patched"] and st["ann_live"]):
+        fails.append("OpenClaw: fine sottoagenti in privato (openclaw-announce-fix.py check)")
     for x in fails: print("FAIL " + x)
     sys.exit(1 if fails else 0)
 
@@ -145,7 +158,7 @@ if args[0] == "update":
                              start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         st["worker_pid"] = w.pid; save()
     phase("validating", st.get("validate_s", 0), False)
-    st["version"] = tag; st["patched"] = st["patch_live"] = False; st["pid"] += 1
+    st["version"] = tag; st["patched"] = st["patch_live"] = st["ann_patched"] = st["ann_live"] = False; st["pid"] += 1
     for p in st["plugins"]:
         if p not in PINNED: st["plugins"][p] = tag
     if st.get("busy_after_update"): st["tasks_running"] = 1
@@ -202,12 +215,13 @@ print("fake openclaw: comando non previsto: " + a, file=sys.stderr); sys.exit(2)
 PY
 chmod +x "$T/bin/fake.py"
 # il nome del finto e' quello vero: fake.py smista su argv[0]
-for n in openclaw npm launchctl agents-doctor trash lsof mcp-lazy; do ln -s "$T/bin/fake.py" "$T/bin/$n"; done
+for n in openclaw npm launchctl agents-doctor trash lsof mcp-lazy announce-fix; do ln -s "$T/bin/fake.py" "$T/bin/$n"; done
 
 # setup <json di stato> : HOME nuova, root finta di OpenClaw, log vuoti
 setup() {
   export HOME="$T/home-$RANDOM" FAKE_STATE="$T/state.json" FAKE_CALLS="$T/calls.log" FAKE_MSGS="$T/msgs.log"
   export FAKE_ROOT="$T/root" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" OSU_MCP_LAZY="$T/bin/mcp-lazy"
+  export OSU_ANNOUNCE_FIX="$T/bin/announce-fix"
   export OSU_POLL_S=0.1 OSU_SETTLE_S=1 OSU_KICK_S=1 OSU_POST_IDLE_MIN=0.01 OSU_ROLLBACK_IDLE_MIN=0.01 OSU_MIN_FREE_GB=0
   unset OPENCLAW_GATEWAY_SERVICE_PID OPENCLAW_CONFIG_PATH
   mkdir -p "$HOME/.claude/jarvis/state" "$HOME/.openclaw" "$FAKE_ROOT/dist"
@@ -216,7 +230,7 @@ setup() {
   : > "$FAKE_CALLS"; : > "$FAKE_MSGS"
   python3 -c "
 import json,sys
-st={'version':'2026.9.5','latest':'2026.9.7','pid':1000,'patched':True,'patch_live':True,
+st={'version':'2026.9.5','latest':'2026.9.7','pid':1000,'patched':True,'patch_live':True,'ann_patched':True,'ann_live':True,
     'plugins':{'whatsapp':'2026.9.5','tokenjuice':'2026.9.5','codex':'2026.9.5'}}
 st.update(json.loads(sys.argv[1])); json.dump(st,open('$FAKE_STATE','w'))" "${1:-{\}}"
 }
@@ -276,6 +290,8 @@ has "whatsapp reinstallato alla versione del core, fissato" "plugins install @op
 hasnt "codex non fissato: lo allinea OpenClaw" "plugins install @openclaw/codex" "$T/calls.log"
 has "patch MCP riapplicata" "mcp-lazy apply" "$T/calls.log"
 check "patch viva dopo il riavvio" "$(sget patch_live)" True
+has "patch annunci riapplicata" "announce-fix apply" "$T/calls.log"
+check "patch annunci viva dopo il riavvio" "$(sget ann_live)" True
 check "un solo kickstart" "$(grep -c 'launchctl kickstart' "$T/calls.log")" 1
 has "heartbeat vero" "cron run hb-1" "$T/calls.log"
 has "backup prima dell'update" "backup sqlite create --global" "$T/calls.log"
@@ -319,9 +335,10 @@ has "lo dice" "non armato" "$T/out.log"
 echo "== 8. --dry-run: fotografa e stampa il piano, non tocca niente"
 setup; arm
 check "exit 0" "$(go --dry-run)" 0
-for x in "update --yes" "plugins install" "kickstart" "config set" "backup sqlite" "message send" "mcp-lazy apply"; do
+for x in "update --yes" "plugins install" "kickstart" "config set" "backup sqlite" "message send" "mcp-lazy apply" "announce-fix apply"; do
   hasnt "niente $x" "$x" "$T/calls.log"; done
 has "piano" "piano: openclaw update --yes --json --tag 2026.9.7" "$T/out.log"
+has "piano: patch annunci" "piano: patch annunci" "$T/out.log"
 
 echo "== 9. il giro supervisionato riuscito arma il notturno"
 setup
@@ -529,6 +546,25 @@ fresh
 check "exit 0" "$(go)" 0
 check "repair prima dell'update" "$(grep -n -e 'update repair' -e 'update --yes' "$T/calls.log" | head -1 | grep -c 'update repair')" 1
 check "aggiornato" "$(sget version)" 2026.9.7
+
+echo "== 28. patch annunci che non entra nella versione nuova: l'update resta, niente rollback, lo dice"
+setup '{"ann_fail":true}'; arm
+check "exit 0" "$(go)" 0
+check "resta 9.7" "$(sget version)" 2026.9.7
+hasnt "nessun rollback" "tag 2026.9.5" "$T/calls.log"
+check "patch MCP comunque viva" "$(sget patch_live)" True
+has "notifica col motivo" "patch annunci non applicata" "$T/msgs.log"
+
+echo "== 29. nessuna versione nuova ma patch annunci assente: rimessa a OpenClaw fermo, un riavvio"
+setup '{"latest":"2026.9.5","ann_patched":false,"ann_live":false}'; arm
+check "exit 0" "$(go)" 0
+has "patch annunci applicata" "announce-fix apply" "$T/calls.log"
+check "patch annunci viva" "$(sget ann_live)" True
+check "un kickstart" "$(grep -c 'launchctl kickstart' "$T/calls.log")" 1
+has "notifica" "sistemato patch annunci" "$T/msgs.log"
+setup '{"latest":"2026.9.5","ann_patched":false,"ann_live":false,"ann_fail":true}'; arm
+check "non entra: exit 1" "$(go)" 1
+has "non entra: lo dice" "non riesco a sistemare patch annunci" "$T/msgs.log"
 
 echo
 echo "$PASS ok, $FAIL FAIL"
