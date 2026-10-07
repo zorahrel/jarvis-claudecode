@@ -932,6 +932,106 @@ def analyze_codex_openclaw(start_iso, end_iso, start_epoch, P, M):
     P('')
 
 
+def analyze_muse(start_epoch, P, M, t_from, t_to):
+    MU = os.path.join(HOME, '.local', 'share', 'muse', 'sessions')
+    end_epoch = t_to.timestamp()
+    # Nota sul doppio conteggio: i subagent sono file session.jsonl separati e nessun id
+    # di record model_completed compare in due file (verificato il 07/10: 0 duplicati su
+    # ~8.3k chiamate), quindi si conta una volta per id. Ogni model_completed ha un
+    # gemello goal_usage_attribution con quantity reported=true e gli stessi numeri;
+    # i gemelli con reported=false hanno quantity a zero (proiezioni non rendicontate)
+    # e si escludono. Differenza attesa: qualche attribution reported SENZA model call
+    # (main_llm_steps=0, es. 13 record il 07/10), quindi i totali goal possono superare
+    # di poco quelli model_completed senza che ci sia doppio conteggio.
+    # cached_tokens == cache_read_tokens quando la cache c'e', cache_write_tokens e'
+    # sempre 0: la colonna cached li copre senza doppi. Le poche chiamate senza modello
+    # (usage a zero) ripiegano sul model_id dei metadati di sessione.
+    seen_mc, seen_goal = set(), set()
+    evs, sess_ws, sess_model = [], {}, {}
+    G = Counter(); goal_n = 0
+    try:
+        files = [p for p in glob.glob(os.path.join(MU, '**', 'session.jsonl'), recursive=True)
+                 if os.path.getmtime(p) >= start_epoch]
+    except Exception:
+        files = []
+    for p in files:
+        sid_file = os.path.basename(os.path.dirname(p))
+        try:
+            fh = open(p, errors='replace')
+        except Exception:
+            continue
+        for line in fh:
+            if 'model_completed' not in line and 'goal_usage_attribution' not in line \
+                    and 'runtime.session.metadata' not in line:
+                continue  # file da 200 MB: si parsa solo quel che serve
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            rs = [d]
+            if isinstance(d.get('children'), list):
+                rs = []
+                for c in d['children']:
+                    try:
+                        rs.append(json.loads(c.get('record_json') or ''))
+                    except Exception:
+                        pass
+            for r in rs:
+                pt = r.get('payload_type')
+                sid = ((r.get('stream') or {}).get('id')) or sid_file
+                if pt == 'runtime.session.metadata':
+                    rec = (r.get('payload') or {}).get('record') or {}
+                    if rec.get('workspace_root'): sess_ws[sid] = rec['workspace_root']
+                    if rec.get('model_id'): sess_model[sid] = rec['model_id']
+                    continue
+                if pt != 'runtime.session':
+                    continue
+                ev = (r.get('payload') or {}).get('event') or {}
+                try:
+                    ts = (r.get('recorded_at') or 0) / 1e6  # microsecondi epoch, tempo reale
+                except Exception:
+                    continue
+                if not (start_epoch <= ts < end_epoch):
+                    continue
+                rid = r.get('id')
+                if ev.get('kind') == 'model_completed':
+                    if rid in seen_mc: continue
+                    seen_mc.add(rid)
+                    u = ev.get('usage') or {}
+                    g = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(ROME).strftime('%m-%d')
+                    evs.append(dict(sid=sid, model=ev.get('model'), i=u.get('input_tokens') or 0,
+                                    c=u.get('cached_tokens') or 0, o=u.get('output_tokens') or 0,
+                                    rw=u.get('reasoning_tokens') or 0, day=g))
+                elif ev.get('kind') == 'goal_usage_attribution':
+                    if rid in seen_goal: continue
+                    seen_goal.add(rid)
+                    qn = ((ev.get('record') or {}).get('quantity')) or {}
+                    if qn.get('reported'):
+                        goal_n += 1
+                        G['i'] += qn.get('input_tokens') or 0; G['c'] += qn.get('cached_tokens') or 0
+                        G['o'] += qn.get('output_tokens') or 0; G['rw'] += qn.get('reasoning_tokens') or 0
+        fh.close()
+    P('## Muse (~/.local/share/muse/sessions)')
+    T = Counter()
+    for e in evs:
+        T['i'] += e['i']; T['c'] += e['c']; T['o'] += e['o']; T['rw'] += e['rw']
+    models = Counter(e['model'] or sess_model.get(e['sid']) or '?' for e in evs)
+    sess = set(e['sid'] for e in evs)
+    P(f"- {len(sess)} sessioni con chiamate · {len(evs)} chiamate · input {fmt(T['i'])} (di cui cached {fmt(T['c'])}) · output {fmt(T['o'])} (di cui reasoning {fmt(T['rw'])}) · modelli {dict(models)}")
+    gd = defaultdict(Counter)
+    for e in evs:
+        a = gd[e['day']]; a['n'] += 1; a['i'] += e['i']; a['o'] += e['o']
+    P('- per giorno (chiamate · input · output): ' + ' · '.join(f"{g} {a['n']} · {fmt(a['i'])} · {fmt(a['o'])}" for g, a in sorted(gd.items())))
+    gw = defaultdict(Counter)
+    for e in evs:
+        a = gw[short(sess_ws.get(e['sid'], '?'))]; a['i'] += e['i']; a['n'] += 1
+    P('- top 5 workspace per input: ' + ' · '.join(f"{w[:60]} {fmt(a['i'])} ({a['n']})" for w, a in sorted(gw.items(), key=lambda kv: -kv[1]['i'])[:5]))
+    P(f"- controllo doppi conteggi: {goal_n} goal_usage_attribution rendicontati nella finestra · input {fmt(G['i'])} vs {fmt(T['i'])} · output {fmt(G['o'])} vs {fmt(T['o'])} (i non rendicontati hanno quantity a zero e sono esclusi)")
+    M.update(muse_sessions=len(sess), muse_calls=len(evs), muse_input=T['i'], muse_cached=T['c'],
+             muse_output=T['o'], muse_reasoning=T['rw'])
+    P('')
+
+
 # ---------------------------------------------------------------- stato delle leve (letto adesso, non nella finestra)
 
 def lever_state(P):
@@ -1011,6 +1111,11 @@ COMPARE = [
         ('jcode_ctx_p90', 'contesto p90 jcode', 'lvl', '↓'),
         ('jcode_calls_gt400k', 'chiamate jcode >400k', 'vol', '↓'),
         ('jcode_sessions_gt400k_usd', '$ sessioni jcode >400k', 'vol', '↓'),
+    ]),
+    ('Muse (Meta Muse Code)', [
+        ('muse_calls', 'chiamate Muse', 'vol', ''),
+        ('muse_input', 'input Muse', 'vol', ''),
+        ('muse_output', 'output Muse', 'vol', ''),
     ]),
     ('Leve worker e verifier snelli (primo turno)', [
         ('sub_first_ctx_p50[worker]', 'primo turno worker', 'lvl', '< workflow-subagent'),
@@ -1123,6 +1228,7 @@ def main():
         analyze_workflows(recs, cc, quality, M)
         deep_cc(recs, cc, body, M)
     analyze_jcode(start_iso, end_iso, start_epoch, quality, M, t_from, t_to)
+    analyze_muse(start_epoch, body, M, t_from, t_to)
     analyze_codex_openclaw(start_iso, end_iso, start_epoch, body, M)
     lever_state(head)
     if a.baseline:
