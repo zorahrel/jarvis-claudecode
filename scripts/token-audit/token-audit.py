@@ -48,6 +48,9 @@ def price(model):
     m = (model or '').lower()
     if 'fable-5-1' in m or 'mythos-5-1' in m: return (10, 12.5, 20, 0.25, 50)
     if 'fable' in m or 'mythos' in m: return (10, 12.5, 20, 1.0, 50)
+    # Opus 5.5 costa meno di Opus 5 e la lettura di cache e' 0.05x (listino 07/10/2026, about-claude/pricing):
+    # trattato come Opus 5 gonfiava il totale di ~41%
+    if 'opus-5-5' in m: return (4, 5, 8, 0.2, 20)
     if 'opus' in m: return (5, 6.25, 10, 0.5, 25)
     if 'sonnet-5' in m: return (2, 2.5, 4, 0.2, 10)
     if 'sonnet' in m: return (3, 3.75, 6, 0.3, 15)
@@ -200,8 +203,14 @@ def scan(job):
                     else: errors['altro'] += 1
                 continue
             mid = m.get('id') or d.get('requestId'); u = m.get('usage')
-            if not u or mid in seen_mid: continue
-            seen_mid[mid] = 1
+            if not u: continue
+            if mid in seen_mid:
+                # nei transcript di subagent e workflow la prima riga di un messaggio porta l'output parziale
+                # (misurato 07/10: 1/7 del finale): vale il massimo tra le righe dello stesso messaggio
+                k = seen_mid[mid]
+                if k is not None: calls[k]['out'] = max(calls[k]['out'], u.get('output_tokens') or 0)
+                continue
+            seen_mid[mid] = None
             if d.get('entrypoint'): entry_points[d['entrypoint']] += 1
             if not inwin:
                 prev = (pts(ts), model, (u.get('input_tokens') or 0) + (u.get('cache_creation_input_tokens') or 0) + (u.get('cache_read_input_tokens') or 0))
@@ -218,6 +227,7 @@ def scan(job):
             calls.append(dict(mid=mid, ts=ts, t=t, model=model, inp=inp, cc=cc, cc1h=cc1h, cr=cr, out=out, ctx=ctx,
                               bust=bust, bust_gap=(t - prev[0]) if (bust and t and prev and prev[0]) else None,
                               ep=d.get('entrypoint', ''), idx=ncalls, effort=d.get('effort')))
+            seen_mid[mid] = len(calls) - 1
             ncalls += 1; prev = (t, model, ctx); compact_since = False
         elif typ == 'user':
             m = d.get('message') or {}; cont = m.get('content')
@@ -326,7 +336,7 @@ def analyze_cc(recs, P, M, day):
         if c['mid'] in seen: dup_by_file[c['file']] += 1; continue
         seen.add(c['mid']); calls.append(c)
     P(f"Chiamate API uniche (Claude Code): {len(calls)} · duplicate scartate (fork/resume copiati): {len(allc)-len(calls)} · file transcript con dati: {len(recs)}\n")
-    P("Prezzi ($/MTok, listino API, stima): Opus 5/5.5 in 5 · write5m 6.25 · write1h 10 · read 0.50 · out 25. Sonnet 5: 2/2.5/4/0.2/10. 'legacy' = Opus 15/18.75/1.5/75.\n")
+    P("Prezzi ($/MTok, listino API 07/10/2026): Opus 5.5 in 4 · write5m 5 · write1h 8 · read 0.20 · out 20. Opus 5 e 4.x: 5/6.25/10/0.50/25. Sonnet 5 e 5.5: 2/2.5/4/0.20/10. 'legacy' = Opus 15/18.75/1.5/75.\n")
     if not calls:
         P('Nessuna chiamata nella finestra.'); return None
     tot = Counter()
@@ -827,7 +837,8 @@ def analyze_jcode(start_iso, end_iso, start_epoch, P, M, t_from, t_to):
         cr = u.get('cache_read_input_tokens') or 0; o = u.get('output_tokens') or 0
         a = agg[model]; a['n'] += 1; a['in'] += i; a['cc'] += cc; a['cr'] += cr; a['out'] += o
         ctx = i + cc + cr
-        usd = (i * 5 + cc * 6.25 + cr * 0.5 + o * 25) / 1e6 if 'claude' in (model or '') else 0
+        pr = price(model)
+        usd = (i * pr[0] + cc * pr[1] + cr * pr[3] + o * pr[4]) / 1e6 if 'claude' in (model or '') else 0
         per_sess[sid].append((ts, ctx, usd, model))
         if sid not in first or ts < first[sid][0]: first[sid] = (ts, ctx)
     for p in glob.glob(J + '/session_*.json') + glob.glob(J + '/session_*.journal.jsonl'):
