@@ -73,8 +73,7 @@
     {
       "name": "kiwi",
       "transport": "http",
-      "url": "https://mcp.kiwi.com/",
-      "autoMount": false
+      "url": "https://mcp.kiwi.com/"
     },
     {
       "name": "board",
