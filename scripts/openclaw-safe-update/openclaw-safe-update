@@ -503,10 +503,21 @@ def converge(core, idle_minutes):
     return problems, notes, False
 
 
-def heartbeat():
-    """Un heartbeat vero: modello, tool MCP (con la patch), sessioni. None = andato."""
+def heartbeat_job():
     d = oc_json(["cron", "list", "--all", "--json"], 90) or {}
-    job = next((j for j in d.get("jobs") or [] if j.get("name") == HEARTBEAT), None)
+    return next((j for j in d.get("jobs") or [] if j.get("name") == HEARTBEAT), None)
+
+
+def heartbeat_last():
+    """Com'e' finito l'ultimo heartbeat prima dell'update: [stato, errore], o None se non si sa."""
+    st = (heartbeat_job() or {}).get("state") or {}
+    return [st["lastRunStatus"], str(st.get("lastError") or "")] if st.get("lastRunStatus") else None
+
+
+def heartbeat(before=None):
+    """Un heartbeat vero: modello, tool MCP (con la patch), sessioni. None = andato.
+    before: heartbeat_last() della fotografia; un esito uguale a quello di prima non e' dell'update."""
+    job = heartbeat_job()
     if not job:
         return f"cron {HEARTBEAT} non trovato"
     t0 = time.time() * 1000 - 2000
@@ -521,6 +532,12 @@ def heartbeat():
         # e' fallita solo la consegna. Non dice niente sulla versione nuova: bocciarla qui la
         # riporterebbe indietro per un difetto che ha anche la vecchia.
         log("heartbeat: turno eseguito, consegna fallita per il bug noto #153453: non conta")
+        return None
+    if e.get("status") != "ok" and [e.get("status"), error] == before:
+        # 08/10: «skipped: alerts-disabled» da prima dell'update (heartbeatVisibility tutta spenta
+        # dal 03/10, l'heartbeat non parte nemmeno). Bocciare la 9.8 per questo era un falso allarme.
+        log(f"heartbeat: {e.get('status')} come prima dell'update ({error[:80]}): non conta, "
+            "ma il giro vero non e' verificato")
         return None
     if e.get("status") != "ok":
         return f"heartbeat: {e.get('status')} {error[:120]}"
@@ -543,7 +560,7 @@ def health_gate(expected, rec, deferred=False):
         rc, msg = mcp_lazy("check")
         if rc:
             problems.append(f"patch MCP: {msg}")
-    hb = heartbeat()
+    hb = heartbeat(rec.get("heartbeat"))
     if hb:
         problems.append(hb)
     new = sorted(set(doctor_fails()) - set(rec.get("doctor") or []))
@@ -730,6 +747,7 @@ def record(cur, root):
                     for k, p in plugins.items() if p.get("origin") == "global"},
         "doctor": doctor_fails(),
         "problems": live_problems(cur),
+        "heartbeat": heartbeat_last(),
     }
 
 

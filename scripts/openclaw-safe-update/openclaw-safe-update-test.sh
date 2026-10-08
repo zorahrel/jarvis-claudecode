@@ -196,8 +196,13 @@ if args[:2] == ["config", "set"]:
     sys.exit(0)
 if args[:3] == ["backup", "sqlite", "create"]:
     sys.exit(0)
+HB_SKIP = {"status": "skipped", "error": "heartbeat skipped: alerts-disabled"}
 if args[:2] == ["cron", "list"]:
-    out({"jobs": [{"id": "hb-1", "name": "heartbeat-main"}]}); sys.exit(0)
+    job = {"id": "hb-1", "name": "heartbeat-main"}
+    if st.get("hb_skip"): job["state"] = {"lastRunStatus": HB_SKIP["status"], "lastError": HB_SKIP["error"]}
+    out({"jobs": [job]}); sys.exit(0)
+if args[:2] == ["cron", "run"] and st.get("hb_skip"):
+    st["hb"] = dict(HB_SKIP, ts=time.time() * 1000); save(); sys.exit(0)
 if args[:2] == ["cron", "run"]:
     err = ""
     if st.get("hb_wa_bug"): err = "heartbeat failed: No active WhatsApp Web listener (account: default)"
@@ -565,6 +570,12 @@ has "notifica" "sistemato patch annunci" "$T/msgs.log"
 setup '{"latest":"2026.9.5","ann_patched":false,"ann_live":false,"ann_fail":true}'; arm
 check "non entra: exit 1" "$(go)" 1
 has "non entra: lo dice" "non riesco a sistemare patch annunci" "$T/msgs.log"
+
+echo "== 30. heartbeat gia' saltato prima dell'update (alerts-disabled, 08/10): non e' colpa dell'update"
+setup '{"hb_skip":true}'; arm
+check "exit 0" "$(go)" 0
+hasnt "nessun rollback" "tag 2026.9.5" "$T/calls.log"
+has "lo dice" "come prima dell'update" "$T/out.log"
 
 echo
 echo "$PASS ok, $FAIL FAIL"
