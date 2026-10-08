@@ -16,6 +16,18 @@ unavailable]`. Due difetti di OpenClaw, ancora presenti nel 2026.9.8:
      come nei canali Discord, dove la risposta finale di Jarvis si consegna da sola.
      Upstream: openclaw/openclaw#90840, aperta.
 
+Altri due difetti del runner claude-cli, stesso giro (08/10, canale Discord rebricambi):
+
+  3. compattazione: il backend claude-cli dichiara `ownsNativeCompaction` (compatta da solo col
+     suo /compact), ma OpenClaw cerca il backend col nome del provider (`anthropic`) invece che
+     del runtime (`claude-cli`), non lo trova e compatta via API Anthropic. Senza chiave API
+     fallisce a ogni turno (`No API key found for provider "anthropic"`) e la sessione cresce
+     fino a rispondere vuoto (605k token). Fix: se il provider non e' un backend, si prova il
+     runtime dichiarato in agents.defaults.models["<provider>/<modello>"].agentRuntime.id.
+  4. tetto di 20.000 righe JSONL per turno: un sottoagente di 47 minuti lo supera e il suo
+     lavoro si butta (`CLI JSONL output exceeded 20000 lines`). Alzato a 200.000: la memoria
+     la protegge gia' il tetto di 8 MB sui caratteri, che resta.
+
   openclaw-announce-fix.py check    exit 0 = patch attiva su disco E nel gateway in esecuzione
   openclaw-announce-fix.py apply    idempotente; poi: launchctl kickstart -k gui/$UID/ai.openclaw.gateway
   openclaw-announce-fix.py revert   toglie la patch (stesso riavvio dopo)
@@ -42,6 +54,13 @@ DM_ORIG = ("\t\tconst subagentDirectMessageCompletionRequiresMessageTool = param
            " && isDirectMessageDeliveryTarget(deliveryTarget, canonicalRequesterSessionKey);\n")
 DM_NEW = (f"\t\tconst subagentDirectMessageCompletionRequiresMessageTool = false;"
           f" // {MARK}: in privato come nei canali\n")
+COMPACT_ORIG = "\t\tconst resolvedBackend = cliCompactionDeps.resolveCliBackendConfig(params.provider, params.cfg);\n"
+COMPACT_NEW = ("\t\tconst resolvedBackend = cliCompactionDeps.resolveCliBackendConfig(params.provider, params.cfg)"
+               " ?? cliCompactionDeps.resolveCliBackendConfig(params.cfg?.agents?.defaults?.models"
+               "?.[`${params.provider}/${params.model}`]?.agentRuntime?.id || \"-\", params.cfg);"
+               f" // {MARK}: il backend e' il runtime, non il provider\n")
+LINES_ORIG = "\tmaxTurnLines: 2e4\n"
+LINES_NEW = f"\tmaxTurnLines: 2e5 // {MARK}: 2e4 buttava i sottoagenti lunghi\n"
 
 
 def dist_dir():
@@ -59,9 +78,11 @@ def find(pattern, needle):
 
 
 def edits():
-    """(file, originale, patchato) per ciascuno dei due punti."""
+    """(file, originale, patchato) per ciascuno dei quattro punti."""
     return [(find("cli-runner-*.mjs", "async function persistCliAssistantTranscript"), RUN_ID_ORIG, RUN_ID_NEW),
-            (find("subagent-announce-delivery-*.mjs", "async function sendSubagentAnnounceDirectly"), DM_ORIG, DM_NEW)]
+            (find("subagent-announce-delivery-*.mjs", "async function sendSubagentAnnounceDirectly"), DM_ORIG, DM_NEW),
+            (find("cli-compaction-*.mjs", "async function runCliTurnCompactionLifecycle"), COMPACT_ORIG, COMPACT_NEW),
+            (find("cli-live-session-registry-*.mjs", "const CLI_STREAM_JSON_OUTPUT_LIMITS"), LINES_ORIG, LINES_NEW)]
 
 
 def write(path, text):
@@ -97,12 +118,13 @@ def main():
     if cmd == "check":
         if all(done):
             if gateway_started_after([p for p, _, _ in todo]):
-                print("ok   patch openclaw-announce-fix attiva (runId claude-cli, fine sottoagente in privato)")
+                print("ok   patch openclaw-announce-fix attiva (runId claude-cli, fine sottoagente in privato, compattazione claude-cli, tetto righe)")
                 return 0
             print("FAIL patch su disco ma il gateway gira col codice vecchio: launchctl kickstart -k gui/$UID/ai.openclaw.gateway")
             return 1
         print("FAIL patch openclaw-announce-fix assente (update di OpenClaw?): openclaw-announce-fix.py apply + kickstart"
-              f" [runId {'ok' if done[0] else 'no'}, privato {'ok' if done[1] else 'no'}]")
+              f" [runId {'ok' if done[0] else 'no'}, privato {'ok' if done[1] else 'no'},"
+              f" compattazione {'ok' if done[2] else 'no'}, righe {'ok' if done[3] else 'no'}]")
         return 1
     if cmd == "apply":
         for (path, orig, new), ok in zip(todo, done):
