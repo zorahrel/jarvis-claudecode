@@ -1,0 +1,5 @@
+# eval.json sono prompt veri (nominano persone) e hits.log è il log a runtime:
+# fuori dal repo pubblico. La copia cifrata di eval.json sta in jarvis-private.
+eval.json
+hits.log
+__pycache__/
