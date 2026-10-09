@@ -2,7 +2,7 @@
 
 > **Curated** list of known Discord channels, WhatsApp chats, and Telegram chats.
 > Read by the in-process `channels` MCP (`router/src/mcp/channels.ts`) so Jarvis
-> can resolve a human name like "Moonstone Ops" to the correct ID/JID without
+> can resolve a human name like "Example Ops" to the correct ID/JID without
 > guessing.
 >
 > The first ` ```yaml ` fenced block below is parsed as the data source. Edit
@@ -15,26 +15,26 @@
 
 ```yaml
 channels:
-  # ─── Discord (Armonia guild) ────────────────────────────────────────────
+  # ─── Discord (example guild) ────────────────────────────────────────────
   - name: management
     channel: discord
-    id: "1334897029998182450"
-    guildId: "935506093076017192"
-    description: Internal management discussions
+    id: "000000000000000000"
+    guildId: "000000000000000000"
+    description: Team discussion channel
     tags: [internal, ops]
 
   - name: development
     channel: discord
-    id: "1423326559485558877"
-    guildId: "935506093076017192"
+    id: "000000000000000001"
+    guildId: "000000000000000000"
     tags: [eng]
 
   # ─── WhatsApp groups ────────────────────────────────────────────────────
-  - name: Moonstone Ops
+  - name: Example Ops
     channel: whatsapp
-    id: "120363424730853388@g.us"
-    description: Moonstone deploy/migration coordination
-    tags: [moonstone, ops, deploy]
+    id: "120363000000000000@g.us"
+    description: Deploy/migration coordination
+    tags: [ops, deploy]
 
   # ─── Telegram chats (only those captured during router uptime are readable) ─
   # - name: ai-news

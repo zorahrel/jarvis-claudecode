@@ -9,8 +9,7 @@
  * subscription) or CLAUDE_CODE_OAUTH_TOKEN. No API key required.
  *
  * History: the legacy CLI-spawn implementation lived here as
- * `claude-cli.ts` until 2026-04 — see CHANGELOG and
- * `.planning/audit/sdk-migration.md`.
+ * `claude-cli.ts` until 2026-04 — see CHANGELOG.
  */
 import { join } from "path";
 import { readFileSync, writeFileSync, statSync, watch as fsWatch } from "fs";

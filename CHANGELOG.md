@@ -137,7 +137,7 @@ Dates are ISO (YYYY-MM-DD).
     a per-chat ring buffer (max 200 msgs × 500 chats, persisted to
     `state/telegram-buffer.json`). Pre-deploy history is unreachable.
   - **Channels registry** (`channels` tool): `channels_list_known`,
-    `channels_resolve` resolve a human name like "Moonstone Ops" to the right
+    `channels_resolve` resolve a human name like "Example Ops" to the right
     channel/JID/chat ID. Curate the list in
     `~/.claude/jarvis/memory/channels.md` (template at
     `router/memory-channels.example.md`).
@@ -267,8 +267,8 @@ Dates are ISO (YYYY-MM-DD).
 - **Discord mention resolution.** Raw Discord mention markers
   (`<@userId>`, `<@&roleId>`, `<#channelId>`) used to leak into prompts —
   in one observed session the agent had to guess that
-  `hi<@&1105067705649864776>.io` meant `hi@armonia.io` because Discord had
-  replaced `@armonia` with the raw role mention. Now resolved at the
+  `hi<@&000000000000000000>.example` meant `hi@example.com` because Discord had
+  replaced `@team` with the raw role mention. Now resolved at the
   connector boundary (`discord.ts`) to `@username` / `@rolename` /
   `#channelname` before the text ever reaches the router. Applied to both
   the main `text` and to `quotedMessage.text` of replies.

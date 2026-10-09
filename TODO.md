@@ -27,7 +27,7 @@
 - [x] Telegram slash-command menu — publishes Claude Code commands to Telegram's native `/`-menu
 - [x] Cron jobs runtime: schedule Claude tasks from `config.yaml` with channel delivery (JSONL run history, agent-inherited config, ASCII footer, conversation-cache seeding)
 - [x] Router hardening — proactive notify endpoint, Discord mention/multi-speaker hygiene, connector boot retry, log redaction, rate-limit + dedup (PR #8 + follow-ups #9-#17)
-- [x] SDK migration — backend Claude su `@anthropic-ai/claude-agent-sdk` (typed event stream, compaction nativa, hooks API). `claude-cli.ts` rimosso. Audit in `.planning/audit/sdk-*.md`
+- [x] SDK migration — backend Claude su `@anthropic-ai/claude-agent-sdk` (typed event stream, compaction nativa, hooks API). `claude-cli.ts` rimosso.
 - [x] Per-agent session isolation + `additionalDirectories` per media access (sicurezza guild Discord multi-agent)
 - [x] WhatsApp quoted-media download (replies "trascrivi"/"riassumi" ora processano l'allegato citato)
 - [x] MCP hot-reload — modifiche al fcache vengono recepite mid-turn senza restart router

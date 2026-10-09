@@ -40,7 +40,7 @@ export function getCoreServices(): ServiceDef[] {
       // (sqlite + numpy, same HTTP contract) on 2026-07-05; the launchd label,
       // args and log name still said "chroma" until 2026-08-14, so the tray app
       // was offering to restart a service that no longer existed under that
-      // name. See docs/memory-consolidation.md.
+      // name.
       name: "Docs-index",
       port: 3342,
       healthUrl: "http://localhost:3342/health",

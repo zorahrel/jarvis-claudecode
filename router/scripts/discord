@@ -64,8 +64,8 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -z "${DISCORD_BOT_TOKEN:-}" ]] && DISCORD_BOT_TOKEN="$(_envval DISCORD_BOT_TOKEN)"
   [[ -z "${DISCORD_GUILD_ID:-}" ]] && DISCORD_GUILD_ID="$(_envval DISCORD_GUILD_ID)"
 fi
-# Default guild: Armonia (the only guild the bot is in).
-DISCORD_GUILD_ID="${DISCORD_GUILD_ID:-935506093076017192}"
+# Default guild: set DISCORD_GUILD_ID in router/.env (see router/.env.example).
+DISCORD_GUILD_ID="${DISCORD_GUILD_ID:-000000000000000000}"
 
 if [[ -z "${DISCORD_BOT_TOKEN:-}" ]]; then
   echo "discord: no bot token (set DISCORD_BOT_TOKEN in router/.env)" >&2

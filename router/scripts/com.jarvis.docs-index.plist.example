@@ -12,7 +12,7 @@
 
   The label was com.jarvis.chroma until 2026-08-14: ChromaDB really did sit
   behind :3342 until docs-server.py replaced it on 2026-07-05, and the name
-  outlived it. See docs/memory-consolidation.md.
+  outlived it until 2026-08-14.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

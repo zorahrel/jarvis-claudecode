@@ -101,10 +101,10 @@ write tools on top. `fullAccess: true` grants everything.
 
 ```yaml
 discord:
-  allowedGuilds: ["935506093076017192"]
+  allowedGuilds: ["000000000000000000"]
   denyChannels:  ["1234567890"]            # private/finance — never reachable
 whatsapp:
-  allowedJids:   ["120363424730853388@g.us"]
+  allowedJids:   ["120363000000000000@g.us"]
 telegram:
   allowedChats:  ["-100123456789"]
 ```

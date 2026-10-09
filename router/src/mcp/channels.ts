@@ -1,7 +1,7 @@
 /**
  * Cross-channel registry MCP. Exposes a curated list of known channels/chats
  * pulled from `~/.claude/jarvis/memory/channels.md` so the agent can resolve
- * names like "Moonstone Ops group" or "armonia-board—zenda" → JID/channel ID
+ * names like "Example Ops group" or "acme-board—zenda" → JID/channel ID
  * without guessing.
  *
  * The file is human-curated. Reload happens at every tool call (cheap — small
@@ -68,7 +68,7 @@ export function createChannelsMcp(opts: CreateOpts): McpSdkServerConfigWithInsta
 
   const listKnown = tool(
     "channels_list_known",
-    "List known channels/chats curated in ~/.claude/jarvis/memory/channels.md. Use this to resolve a human name (e.g. 'Moonstone Ops') to a channel/JID/chatId before calling discord/whatsapp/telegram tools.",
+    "List known channels/chats curated in ~/.claude/jarvis/memory/channels.md. Use this to resolve a human name (e.g. 'Example Ops') to a channel/JID/chatId before calling discord/whatsapp/telegram tools.",
     {
       channel: z.enum(["discord", "whatsapp", "telegram"]).optional().describe("Filter by channel."),
       query: z.string().optional().describe("Substring filter on name/description/tags."),
